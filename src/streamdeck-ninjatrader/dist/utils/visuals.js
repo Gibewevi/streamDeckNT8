@@ -65,8 +65,8 @@ export function renderButtonSvg(visual) {
         const arrow = isUp
             ? `<polygon points="72,42 108,96 36,96" fill="#AAAAAA" opacity="0.55"/>`
             : `<polygon points="72,96 108,42 36,42" fill="#AAAAAA" opacity="0.55"/>`;
-        // Same bounding box y=42..96, centroid at 1/3 from base: up=78, down=60
-        const textY = isUp ? 78 : 60;
+        // Center of bounding box y=42..96 = 69
+        const textY = 69;
         contentSvg = `
       <text x="72" y="28" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="${tc}">${label}</text>
       ${arrow}
