@@ -10,10 +10,10 @@
 // Color palette — trading cockpit theme
 export const Colors = {
   // Backgrounds
-  buyGreen: '#00C853',
-  buyGreenDim: '#1B8A2E',
-  sellRed: '#FF1744',
-  sellRedDim: '#C62828',
+  buyGreen: '#1DA81D',
+  buyGreenDim: '#0F5C0F',
+  sellRed: '#D13B3B',
+  sellRedDim: '#7A2222',
   flattenOrange: '#E65100',
   flattenOrangeDim: '#6D2600',
   cancelYellow: '#F9A825',
@@ -80,8 +80,7 @@ export function renderButtonSvg(visual: ButtonVisual): string {
     const arrow = isUp
       ? `<polygon points="72,42 108,96 36,96" fill="#AAAAAA" opacity="0.55"/>`
       : `<polygon points="72,96 108,42 36,42" fill="#AAAAAA" opacity="0.55"/>`;
-    // Center of bounding box y=42..96 = 69
-    const textY = 69;
+    const textY = isUp ? 82 : 69;
     contentSvg = `
       <text x="72" y="28" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="${tc}">${label}</text>
       ${arrow}

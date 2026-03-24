@@ -7,10 +7,10 @@
  * This module generates SVG strings that encode color, text, and state.
  */
 export declare const Colors: {
-    readonly buyGreen: "#00C853";
-    readonly buyGreenDim: "#1B8A2E";
-    readonly sellRed: "#FF1744";
-    readonly sellRedDim: "#C62828";
+    readonly buyGreen: "#1DA81D";
+    readonly buyGreenDim: "#0F5C0F";
+    readonly sellRed: "#D13B3B";
+    readonly sellRedDim: "#7A2222";
     readonly flattenOrange: "#E65100";
     readonly flattenOrangeDim: "#6D2600";
     readonly cancelYellow: "#F9A825";
