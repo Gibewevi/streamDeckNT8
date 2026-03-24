@@ -10,10 +10,10 @@
 // Color palette — trading cockpit theme
 export const Colors = {
   // Backgrounds
-  buyGreen: '#1B8A2E',
-  buyGreenDim: '#0D4517',
-  sellRed: '#C62828',
-  sellRedDim: '#5C1111',
+  buyGreen: '#00C853',
+  buyGreenDim: '#1B8A2E',
+  sellRed: '#FF1744',
+  sellRedDim: '#C62828',
   flattenOrange: '#E65100',
   flattenOrangeDim: '#6D2600',
   cancelYellow: '#F9A825',
@@ -51,31 +51,78 @@ export interface ButtonVisual {
 }
 
 /**
- * Generate a background-only SVG for setImage() (no text — text is handled by setTitle).
+ * Generate a full SVG with background, text, and overlays for setImage().
+ * All text is rendered inside the SVG for full control over color and layout.
  * Returns a data URI suitable for setImage().
  */
 export function renderButtonSvg(visual: ButtonVisual): string {
   const bg = visual.bgColor;
+  const tc = visual.textColor || '#FFFFFF';
+  const sub = visual.subtitle || '';
+  const sc = visual.subtitleColor || tc;
+  const t = visual.title;
 
   // Badge overlay (optional small dot top-right)
   let badgeSvg = '';
   if (visual.badge) {
     const bc = visual.badgeColor || Colors.connected;
-    badgeSvg = `<circle cx="60" cy="12" r="6" fill="${bc}"/>`;
+    badgeSvg = `<circle cx="124" cy="20" r="8" fill="${bc}"/>`;
   }
 
-  // Arrow overlay for stop/target/BE +/- buttons — centered on 144x144 canvas
-  let arrowSvg = '';
-  if (visual.title.startsWith('QTY_STOP_') || visual.title.startsWith('QTY_TARGET_') || visual.title.startsWith('QTY_BE_')) {
-    const isUp = visual.title.endsWith('_UP');
-    arrowSvg = isUp
-      ? `<polygon points="72,30 104,70 40,70" fill="#AAAAAA" opacity="0.6"/>`
-      : `<polygon points="72,114 104,74 40,74" fill="#AAAAAA" opacity="0.6"/>`;
+  let contentSvg = '';
+
+  if (t.startsWith('QTY_STOP_') || t.startsWith('QTY_TARGET_') || t.startsWith('QTY_BE_')) {
+    // Arrow layout — label at top, medium centered triangle with value overlay, "ticks" at bottom
+    const isUp = t.endsWith('_UP');
+    const isStop = t.startsWith('QTY_STOP_');
+    const isBE = t.startsWith('QTY_BE_');
+    const label = isStop ? 'Stop' : isBE ? 'BE' : 'Target';
+    const arrow = isUp
+      ? `<polygon points="72,42 108,96 36,96" fill="#AAAAAA" opacity="0.55"/>`
+      : `<polygon points="72,96 108,42 36,42" fill="#AAAAAA" opacity="0.55"/>`;
+    // Same bounding box y=42..96, centroid at 1/3 from base: up=78, down=60
+    const textY = isUp ? 78 : 60;
+    contentSvg = `
+      <text x="72" y="28" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="${tc}">${label}</text>
+      ${arrow}
+      <text x="72" y="${textY}" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="24" font-weight="bold" fill="${tc}">${sub}</text>
+      <text x="72" y="124" text-anchor="middle" font-family="sans-serif" font-size="18" fill="#000000">ticks</text>`;
+
+  } else if (t === 'QTY_CANCEL') {
+    const count = sub || '0';
+    contentSvg = `
+      <text x="72" y="42" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="bold" fill="${tc}">CLOSE</text>
+      <text x="72" y="90" text-anchor="middle" font-family="sans-serif" font-size="40" font-weight="bold" fill="${tc}">${count}</text>
+      <text x="72" y="120" text-anchor="middle" font-family="sans-serif" font-size="16" fill="${sc}">orders</text>`;
+
+  } else if (t === 'QTY_PLUS' || t === 'QTY_MINUS') {
+    const sign = t === 'QTY_PLUS' ? '+' : '\u2212';
+    contentSvg = `
+      <text x="72" y="36" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="${tc}">Qty</text>
+      <text x="72" y="90" text-anchor="middle" font-family="sans-serif" font-size="48" font-weight="bold" fill="${tc}">${sign}</text>
+      <text x="72" y="130" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${sub}</text>`;
+
+  } else if (t === 'QTY_RESET') {
+    contentSvg = `
+      <text x="72" y="42" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="${tc}">Qty</text>
+      <text x="72" y="78" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="${tc}">Reset</text>
+      <text x="72" y="120" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${sub}</text>`;
+
+  } else {
+    // Standard layout: title centered, subtitle below
+    if (sub) {
+      contentSvg = `
+        <text x="72" y="62" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${t}</text>
+        <text x="72" y="100" text-anchor="middle" font-family="sans-serif" font-size="20" fill="${sc}">${sub}</text>`;
+    } else {
+      contentSvg = `
+        <text x="72" y="84" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${t}</text>`;
+    }
   }
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">
   <rect width="144" height="144" rx="12" fill="${bg}"/>
-  ${arrowSvg}
+  ${contentSvg}
   ${badgeSvg}
 </svg>`;
 

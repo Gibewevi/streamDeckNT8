@@ -55,7 +55,7 @@ function pushVisual(id: string) {
     const titleText = buildTitle(visual);
     streamDeck.logger.info(`pushVisual ${t.uuid}: title=${titleText.replace(/\n/g, '|')}, bg=${visual.bgColor}, svgLen=${svg.length}`);
     t.sdAction.setImage(svg).catch((e: any) => streamDeck.logger.error(`setImage error: ${e}`));
-    t.sdAction.setTitle(titleText).catch((e: any) => streamDeck.logger.error(`setTitle error: ${e}`));
+    t.sdAction.setTitle('').catch((e: any) => streamDeck.logger.error(`setTitle error: ${e}`));
   }
 }
 

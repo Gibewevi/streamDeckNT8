@@ -7,10 +7,10 @@
  * This module generates SVG strings that encode color, text, and state.
  */
 export declare const Colors: {
-    readonly buyGreen: "#1B8A2E";
-    readonly buyGreenDim: "#0D4517";
-    readonly sellRed: "#C62828";
-    readonly sellRedDim: "#5C1111";
+    readonly buyGreen: "#00C853";
+    readonly buyGreenDim: "#1B8A2E";
+    readonly sellRed: "#FF1744";
+    readonly sellRedDim: "#C62828";
     readonly flattenOrange: "#E65100";
     readonly flattenOrangeDim: "#6D2600";
     readonly cancelYellow: "#F9A825";
@@ -46,7 +46,8 @@ export interface ButtonVisual {
     badgeColor?: string;
 }
 /**
- * Generate a background-only SVG for setImage() (no text — text is handled by setTitle).
+ * Generate a full SVG with background, text, and overlays for setImage().
+ * All text is rendered inside the SVG for full control over color and layout.
  * Returns a data URI suitable for setImage().
  */
 export declare function renderButtonSvg(visual: ButtonVisual): string;
