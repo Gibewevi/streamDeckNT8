@@ -1,0 +1,224 @@
+{
+  "UUID": "com.trader.ninjatrader",
+  "Name": "NinjaTrader Trading Cockpit",
+  "Version": "1.0.0",
+  "Author": "StreamDeck Trader",
+  "Description": "Professional trading cockpit for NinjaTrader 8",
+  "Icon": "imgs/plugin-icon",
+  "Category": "NinjaTrader",
+  "CategoryIcon": "imgs/category-icon",
+  "CodePath": "dist/plugin.js",
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.4"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Actions": [
+    {
+      "Name": "Buy Market",
+      "UUID": "com.trader.ninjatrader.buymarket",
+      "Icon": "imgs/actions/buy-market",
+      "Tooltip": "Submit a market buy order",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/buy-market", "TitleAlignment": "middle", "FontSize": "12" }
+      ],
+      "PropertyInspectorPath": "ui/action-settings.html"
+    },
+    {
+      "Name": "Sell Market",
+      "UUID": "com.trader.ninjatrader.sellmarket",
+      "Icon": "imgs/actions/sell-market",
+      "Tooltip": "Submit a market sell order",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/sell-market", "TitleAlignment": "middle", "FontSize": "12" }
+      ],
+      "PropertyInspectorPath": "ui/action-settings.html"
+    },
+    {
+      "Name": "Buy Limit",
+      "UUID": "com.trader.ninjatrader.buylimit",
+      "Icon": "imgs/actions/buy-limit",
+      "Tooltip": "Submit a limit buy order at offset from last price",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/buy-limit", "TitleAlignment": "middle", "FontSize": "12" }
+      ],
+      "PropertyInspectorPath": "ui/action-settings.html"
+    },
+    {
+      "Name": "Sell Limit",
+      "UUID": "com.trader.ninjatrader.selllimit",
+      "Icon": "imgs/actions/sell-limit",
+      "Tooltip": "Submit a limit sell order at offset from last price",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/sell-limit", "TitleAlignment": "middle", "FontSize": "12" }
+      ],
+      "PropertyInspectorPath": "ui/action-settings.html"
+    },
+    {
+      "Name": "Flatten",
+      "UUID": "com.trader.ninjatrader.flatten",
+      "Icon": "imgs/actions/flatten",
+      "Tooltip": "Flatten all positions for current instrument",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/flatten", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Close All",
+      "UUID": "com.trader.ninjatrader.cancelorders",
+      "Icon": "imgs/actions/cancel-orders",
+      "Tooltip": "Close all positions and cancel pending orders",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/cancel-orders", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Reverse",
+      "UUID": "com.trader.ninjatrader.reverse",
+      "Icon": "imgs/actions/reverse",
+      "Tooltip": "Reverse current position",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/reverse", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Break-Even",
+      "UUID": "com.trader.ninjatrader.breakeven",
+      "Icon": "imgs/actions/breakeven",
+      "Tooltip": "Move stop to break-even (with optional offset)",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12" }
+      ],
+      "PropertyInspectorPath": "ui/be-settings.html"
+    },
+    {
+      "Name": "Stop +",
+      "UUID": "com.trader.ninjatrader.stopplus",
+      "Icon": "imgs/actions/move-stop",
+      "Tooltip": "Move stop up by 1 tick",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/move-stop", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Stop -",
+      "UUID": "com.trader.ninjatrader.stopminus",
+      "Icon": "imgs/actions/move-stop",
+      "Tooltip": "Move stop down by 1 tick",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/move-stop", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Target +",
+      "UUID": "com.trader.ninjatrader.targetplus",
+      "Icon": "imgs/actions/move-target",
+      "Tooltip": "Move target up by 1 tick",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/move-target", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Target -",
+      "UUID": "com.trader.ninjatrader.targetminus",
+      "Icon": "imgs/actions/move-target",
+      "Tooltip": "Move target down by 1 tick",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/move-target", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "BE +",
+      "UUID": "com.trader.ninjatrader.beplus",
+      "Icon": "imgs/actions/breakeven",
+      "Tooltip": "Move break-even up by 1 tick",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "BE -",
+      "UUID": "com.trader.ninjatrader.beminus",
+      "Icon": "imgs/actions/breakeven",
+      "Tooltip": "Move break-even down by 1 tick",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Qty +",
+      "UUID": "com.trader.ninjatrader.qtyplus",
+      "Icon": "imgs/actions/qty-adjust",
+      "Tooltip": "Increase quantity by 1",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/qty-adjust", "TitleAlignment": "middle", "FontSize": "14" }
+      ]
+    },
+    {
+      "Name": "Qty -",
+      "UUID": "com.trader.ninjatrader.qtyminus",
+      "Icon": "imgs/actions/qty-adjust",
+      "Tooltip": "Decrease quantity by 1",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/qty-adjust", "TitleAlignment": "middle", "FontSize": "14" }
+      ]
+    },
+    {
+      "Name": "Quantity Reset",
+      "UUID": "com.trader.ninjatrader.qtyreset",
+      "Icon": "imgs/actions/qty-reset",
+      "Tooltip": "Reset quantity to default",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/qty-reset", "TitleAlignment": "middle", "FontSize": "12" }
+      ]
+    },
+    {
+      "Name": "Select Instrument",
+      "UUID": "com.trader.ninjatrader.instrument",
+      "Icon": "imgs/actions/instrument",
+      "Tooltip": "Switch to a specific instrument",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/instrument", "TitleAlignment": "middle", "FontSize": "12" }
+      ],
+      "PropertyInspectorPath": "ui/instrument-settings.html"
+    },
+    {
+      "Name": "Status Display",
+      "UUID": "com.trader.ninjatrader.status",
+      "Icon": "imgs/actions/status",
+      "Tooltip": "Display trading status information",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/status", "TitleAlignment": "middle", "FontSize": "10" }
+      ],
+      "PropertyInspectorPath": "ui/status-settings.html"
+    }
+  ]
+}

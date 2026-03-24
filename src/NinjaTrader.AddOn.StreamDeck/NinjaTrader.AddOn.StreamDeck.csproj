@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <RootNamespace>NinjaTrader.NinjaScript.AddOns</RootNamespace>
+    <AssemblyName>NinjaTrader.AddOn.StreamDeck</AssemblyName>
+    <Nullable>annotations</Nullable>
+  </PropertyGroup>
+
+  <!--
+    NinjaTrader 8 references:
+    These DLLs are found in your NinjaTrader 8 installation folder, typically:
+      C:\Program Files\NinjaTrader 8\bin\
+    You must add references manually after cloning. The paths below are typical.
+  -->
+  <ItemGroup>
+    <Reference Include="NinjaTrader.Core">
+      <HintPath>$(ProgramFiles)\NinjaTrader 8\bin\NinjaTrader.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NinjaTrader.Gui">
+      <HintPath>$(ProgramFiles)\NinjaTrader 8\bin\NinjaTrader.Gui.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NinjaTrader.Client">
+      <HintPath>$(ProgramFiles)\NinjaTrader 8\bin\NinjaTrader.Client.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NinjaTrader.Custom">
+      <HintPath>$(USERPROFILE)\Documents\NinjaTrader 8\bin\Custom\NinjaTrader.Custom.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Net.WebSockets" />
+    <Reference Include="System.Net.WebSockets.Client" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+</Project>

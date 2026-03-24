@@ -1,0 +1,11 @@
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\bin\Release\net48\NinjaTrader.AddOn.StreamDeck.dll
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\bin\Release\net48\NinjaTrader.AddOn.StreamDeck.pdb
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\bin\Release\net48\Newtonsoft.Json.dll
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTrader.AddOn.StreamDeck.csproj.AssemblyReference.cache
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTrader.AddOn.StreamDeck.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTrader.AddOn.StreamDeck.AssemblyInfoInputs.cache
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTrader.AddOn.StreamDeck.AssemblyInfo.cs
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTrader.AddOn.StreamDeck.csproj.CoreCompileInputs.cache
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTra.235F4A13.Up2Date
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTrader.AddOn.StreamDeck.dll
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\obj\Release\net48\NinjaTrader.AddOn.StreamDeck.pdb

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp -r \"c:/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/dist/\"* \"$PLUGIN_DIR/dist/\")",
+      "Bash(cp \"c:/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/package.json\" \"$PLUGIN_DIR/package.json\")",
+      "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/logs/**)",
+      "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/**)",
+      "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/Plugins/**)",
+      "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/**)",
+      "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/logs/**)"
+    ]
+  }
+}

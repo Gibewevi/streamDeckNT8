@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Action Settings</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; color: #ccc; background: #2d2d2d; margin: 0; padding: 12px; }
+    .field { margin-bottom: 12px; }
+    label { display: block; margin-bottom: 4px; color: #999; font-size: 11px; text-transform: uppercase; }
+    input, select { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #1a1a1a; border: 1px solid #444; color: #fff; border-radius: 4px; font-size: 12px; }
+    input:focus, select:focus { border-color: #0078d4; outline: none; }
+    .hint { font-size: 10px; color: #666; margin-top: 2px; }
+    h3 { color: #fff; font-size: 13px; margin: 0 0 12px 0; border-bottom: 1px solid #444; padding-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <h3>Action Settings</h3>
+
+  <div class="field">
+    <label>Account (override)</label>
+    <input type="text" id="account" placeholder="Leave empty for global default" />
+    <div class="hint">Override the global account for this button</div>
+  </div>
+
+  <div class="field">
+    <label>Instrument (override)</label>
+    <input type="text" id="instrument" placeholder="Leave empty for global default" />
+    <div class="hint">Override the global instrument for this button</div>
+  </div>
+
+  <div class="field">
+    <label>Offset Ticks (for Limit orders)</label>
+    <input type="number" id="offsetTicks" value="-2" />
+    <div class="hint">Ticks from last price. Negative = below, Positive = above</div>
+  </div>
+
+  <script>
+    // Basic PI ↔ Plugin communication skeleton
+    // In production, this wires to the SD SDK's property inspector API
+    const $account = document.getElementById('account');
+    const $instrument = document.getElementById('instrument');
+    const $offset = document.getElementById('offsetTicks');
+
+    // Load settings from SD
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'loadSettings') {
+        const s = event.data.settings || {};
+        if (s.account) $account.value = s.account;
+        if (s.instrument) $instrument.value = s.instrument;
+        if (s.offsetTicks !== undefined) $offset.value = s.offsetTicks;
+      }
+    });
+
+    // Save on change
+    function save() {
+      const settings = {
+        account: $account.value || undefined,
+        instrument: $instrument.value || undefined,
+        offsetTicks: parseInt($offset.value, 10) || 0,
+      };
+      window.parent.postMessage({ type: 'saveSettings', settings }, '*');
+    }
+    $account.addEventListener('change', save);
+    $instrument.addEventListener('change', save);
+    $offset.addEventListener('change', save);
+  </script>
+</body>
+</html>

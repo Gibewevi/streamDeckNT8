@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Quantity Settings</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; color: #ccc; background: #2d2d2d; margin: 0; padding: 12px; }
+    .field { margin-bottom: 12px; }
+    label { display: block; margin-bottom: 4px; color: #999; font-size: 11px; text-transform: uppercase; }
+    input { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #1a1a1a; border: 1px solid #444; color: #fff; border-radius: 4px; font-size: 12px; }
+    input:focus { border-color: #0078d4; outline: none; }
+    .hint { font-size: 10px; color: #666; margin-top: 2px; }
+    h3 { color: #fff; font-size: 13px; margin: 0 0 12px 0; border-bottom: 1px solid #444; padding-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <h3>Quantity Settings</h3>
+
+  <div class="field" id="presetField">
+    <label>Preset Quantity</label>
+    <input type="number" id="quantity" value="1" min="1" max="100" />
+    <div class="hint">For Qty Preset: the quantity this button sets.</div>
+  </div>
+
+  <div class="field" id="deltaField">
+    <label>Adjustment Delta</label>
+    <input type="number" id="delta" value="1" />
+    <div class="hint">For Qty Adjust: +1 to increase, -1 to decrease.</div>
+  </div>
+
+  <script>
+    const $qty = document.getElementById('quantity');
+    const $delta = document.getElementById('delta');
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'loadSettings') {
+        const s = event.data.settings || {};
+        if (s.quantity !== undefined) $qty.value = s.quantity;
+        if (s.delta !== undefined) $delta.value = s.delta;
+      }
+    });
+
+    function save() {
+      window.parent.postMessage({
+        type: 'saveSettings',
+        settings: {
+          quantity: parseInt($qty.value, 10) || 1,
+          delta: parseInt($delta.value, 10) || 1,
+        }
+      }, '*');
+    }
+
+    $qty.addEventListener('change', save);
+    $delta.addEventListener('change', save);
+  </script>
+</body>
+</html>
