@@ -18,7 +18,7 @@ public sealed class MessageValidator
         "flatten", "cancelOrders", "reverse",
         "breakeven", "moveStop", "moveTarget",
         "qtySet", "qtyAdjust", "qtyReset",
-        "setInstrument", "setAccount", "getState"
+        "setInstrument", "setAccount", "getState", "toggleCooldown"
     };
 
     private static readonly HashSet<string> PositionRequiredActions = new(StringComparer.OrdinalIgnoreCase)
@@ -61,7 +61,7 @@ public sealed class MessageValidator
         if (QuantityActions.Contains(message.Action))
             return ValidateQuantityAction(message);
 
-        if (message.Action is "getState" or "setInstrument" or "setAccount")
+        if (message.Action is "getState" or "setInstrument" or "setAccount" or "toggleCooldown")
             return (true, null, null);
 
         // All trading actions need instrument context at minimum

@@ -14,6 +14,9 @@ public sealed class TradingState
     public PositionState? Position { get; set; }
     public InstrumentInfo? InstrumentInfo { get; set; }
     public List<string> AvailableAccounts { get; set; } = [];
+    public bool CooldownEnabled { get; set; }
+    public bool CooldownActive { get; set; }
+    public int CooldownSecondsRemaining { get; set; }
 }
 
 public sealed class PositionState

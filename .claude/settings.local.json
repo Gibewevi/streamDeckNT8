@@ -55,7 +55,14 @@
       "Read(//c/Users/pixel/AppData/Roaming/Elgato/StreamDeck/logs/**)",
       "Read(//c/Users/pixel/AppData/Roaming/Elgato/StreamDeck/**)",
       "Bash(taskkill //IM \"StreamDeckBridge.exe\" //F)",
-      "Bash(netstat -ano)"
+      "Bash(netstat -ano)",
+      "Bash(mkdir -p \"C:/Users/pixel/AppData/Roaming/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/bridge\")",
+      "Bash(cp -r \"C:/Users/pixel/Desktop/stream deck/src/StreamDeckBridge/bin/Release/net8.0/\"* \"C:/Users/pixel/AppData/Roaming/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/bridge/\")",
+      "Bash(taskkill //IM \"dotnet.exe\" //F)",
+      "Bash(cp -r \"c:/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/dist/\"* \"C:/Users/pixel/AppData/Roaming/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/dist/\")",
+      "Bash(cp -r dist/* C:/Users/pixel/AppData/Roaming/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/dist/)",
+      "Bash(taskkill //IM StreamDeck.exe //F)",
+      "Bash(start 'C:/Program Files/Elgato/StreamDeck/StreamDeck.exe')"
     ],
     "additionalDirectories": [
       "C:\\Users\\pixel\\Desktop\\stream deck\\$USERPROFILE\\Documents\\NinjaTrader 8\\bin\\Custom\\AddOns",

@@ -4,6 +4,10 @@
  * Wires the @elgato/streamdeck SDK to our bridge client and action handlers.
  */
 import streamDeck from '@elgato/streamdeck';
+import { spawn } from 'child_process';
+import { existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 // SingletonAction is exported but TS can't resolve it via Node16 module resolution
 // Use dynamic import workaround
 class NTAction {
@@ -30,7 +34,34 @@ const DISCONNECTED_STATE = {
     position: null,
     instrumentInfo: null,
     availableAccounts: [],
+    cooldownEnabled: false,
+    cooldownActive: false,
+    cooldownSecondsRemaining: 0,
 };
+// Cooldown countdown timer — ticks locally every second for smooth display
+let cooldownTimer = null;
+function startCooldownTimer() {
+    if (cooldownTimer)
+        return; // already running
+    cooldownTimer = setInterval(() => {
+        if (!lastState || !lastState.cooldownActive || lastState.cooldownSecondsRemaining <= 0) {
+            stopCooldownTimer();
+            return;
+        }
+        lastState.cooldownSecondsRemaining = Math.max(0, lastState.cooldownSecondsRemaining - 1);
+        if (lastState.cooldownSecondsRemaining <= 0) {
+            lastState.cooldownActive = false;
+            stopCooldownTimer();
+        }
+        pushAllVisuals();
+    }, 1000);
+}
+function stopCooldownTimer() {
+    if (cooldownTimer) {
+        clearInterval(cooldownTimer);
+        cooldownTimer = null;
+    }
+}
 // Track pending account change to prevent stateUpdate from overwriting it
 let pendingAccountChange = 0;
 const tracked = new Map();
@@ -61,30 +92,38 @@ function computeVisual(uuid, settings, state) {
     const qty = state.quantity ?? gs.defaultQuantity;
     const defQty = state.defaultQuantity ?? gs.defaultQuantity;
     switch (uuid) {
-        case 'com.trader.ninjatrader.buymarket':
+        case 'com.trader.ninjatrader.buymarket': {
+            const blocked = state.cooldownActive ?? false;
             return {
-                title: 'MKT', subtitle: `Buy ×${qty}`,
-                bgColor: connected ? Colors.buyGreen : Colors.buyGreenDim,
-                textColor: '#FFFFFF',
+                title: 'MKT', subtitle: blocked ? 'BLOCKED' : `Buy ×${qty}`,
+                bgColor: blocked ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
+                textColor: blocked ? Colors.textDim : '#FFFFFF',
             };
-        case 'com.trader.ninjatrader.sellmarket':
+        }
+        case 'com.trader.ninjatrader.sellmarket': {
+            const blocked = state.cooldownActive ?? false;
             return {
-                title: 'MKT', subtitle: `Sell ×${qty}`,
-                bgColor: connected ? Colors.sellRed : Colors.sellRedDim,
-                textColor: '#FFFFFF',
+                title: 'MKT', subtitle: blocked ? 'BLOCKED' : `Sell ×${qty}`,
+                bgColor: blocked ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
+                textColor: blocked ? Colors.textDim : '#FFFFFF',
             };
-        case 'com.trader.ninjatrader.buylimit':
+        }
+        case 'com.trader.ninjatrader.buylimit': {
+            const blocked = state.cooldownActive ?? false;
             return {
-                title: 'LMT', subtitle: `Buy ×${qty}`,
-                bgColor: connected ? Colors.buyGreen : Colors.buyGreenDim,
-                textColor: '#FFFFFF',
+                title: 'LMT', subtitle: blocked ? 'BLOCKED' : `Buy ×${qty}`,
+                bgColor: blocked ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
+                textColor: blocked ? Colors.textDim : '#FFFFFF',
             };
-        case 'com.trader.ninjatrader.selllimit':
+        }
+        case 'com.trader.ninjatrader.selllimit': {
+            const blocked = state.cooldownActive ?? false;
             return {
-                title: 'LMT', subtitle: `Sell ×${qty}`,
-                bgColor: connected ? Colors.sellRed : Colors.sellRedDim,
-                textColor: '#FFFFFF',
+                title: 'LMT', subtitle: blocked ? 'BLOCKED' : `Sell ×${qty}`,
+                bgColor: blocked ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
+                textColor: blocked ? Colors.textDim : '#FFFFFF',
             };
+        }
         case 'com.trader.ninjatrader.flatten':
             return {
                 title: 'Close', subtitle: `Qty ${pos?.quantity ?? 0}`,
@@ -235,6 +274,19 @@ function computeVisual(uuid, settings, state) {
                 default: bgColor = Colors.statusDark;
             }
             return { title, subtitle, bgColor, textColor };
+        }
+        case 'com.trader.ninjatrader.cooldown': {
+            const enabled = state.cooldownEnabled ?? false;
+            const active = state.cooldownActive ?? false;
+            const secs = state.cooldownSecondsRemaining ?? 0;
+            if (active) {
+                return { title: `${secs}s`, subtitle: 'SEC', bgColor: Colors.sellRed, textColor: '#FFFFFF' };
+            }
+            return {
+                title: 'SEC', subtitle: enabled ? 'ON' : 'OFF',
+                bgColor: enabled ? Colors.buyGreen : Colors.disabled,
+                textColor: enabled ? '#FFFFFF' : Colors.textDim,
+            };
         }
         default:
             return null;
@@ -403,6 +455,11 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.status'
     const cmd = createCommand('getState', {});
     bridge.send(cmd);
 }));
+// Cooldown toggle
+streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.cooldown', 'Cooldown', async () => {
+    const cmd = createCommand('toggleCooldown', {});
+    await bridge.sendCommand(cmd);
+}));
 // --- Bridge state listener ---
 bridge.onStateUpdate((raw) => {
     // Parse raw bridge payload into TradingState
@@ -441,6 +498,9 @@ bridge.onStateUpdate((raw) => {
             pointValue: inst.pointValue || 0,
         } : null,
         availableAccounts: raw.availableAccounts || [],
+        cooldownEnabled: raw.cooldownEnabled ?? false,
+        cooldownActive: raw.cooldownActive ?? false,
+        cooldownSecondsRemaining: raw.cooldownSecondsRemaining ?? 0,
     };
     // If a pending account change was recently sent, keep the local account instead of the bridge's stale value
     if (pendingAccountChange > 0 && Date.now() - pendingAccountChange < 3000 && lastState?.account) {
@@ -450,6 +510,13 @@ bridge.onStateUpdate((raw) => {
         pendingAccountChange = 0;
     }
     lastState = state;
+    // Manage cooldown countdown timer
+    if (state.cooldownActive && state.cooldownSecondsRemaining > 0) {
+        startCooldownTimer();
+    }
+    else {
+        stopCooldownTimer();
+    }
     streamDeck.logger.info(`StateUpdate received: account=${state.account}, ntConnected=${state.ntConnected}, instrument=${state.instrument}, accounts=[${state.availableAccounts.join(',')}], tracked=${tracked.size}`);
     pushAllVisuals();
 });
@@ -457,6 +524,29 @@ bridge.onConnectionChange((connected) => {
     streamDeck.logger.info(`Bridge: ${connected ? 'CONNECTED' : 'DISCONNECTED'}`);
     pushAllVisuals();
 });
+// --- Auto-launch bridge if not running ---
+function launchBridge() {
+    // Bridge exe is bundled alongside the plugin in ../bridge/
+    const pluginDir = dirname(fileURLToPath(import.meta.url));
+    const bridgePath = join(pluginDir, '..', 'bridge', 'StreamDeckBridge.exe');
+    if (!existsSync(bridgePath)) {
+        streamDeck.logger.warn(`Bridge exe not found at ${bridgePath}`);
+        return;
+    }
+    try {
+        const child = spawn(bridgePath, [], {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+        });
+        child.unref();
+        streamDeck.logger.info(`Bridge auto-launched (PID ${child.pid})`);
+    }
+    catch (err) {
+        streamDeck.logger.error(`Failed to launch bridge: ${err.message}`);
+    }
+}
+launchBridge();
 // --- Start ---
 bridge.start();
 streamDeck.connect();

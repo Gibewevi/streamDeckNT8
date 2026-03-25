@@ -18,6 +18,11 @@ public sealed class StateManager
     private DateTime _instrumentSetAt = DateTime.MinValue;
     private static readonly TimeSpan OverrideGuard = TimeSpan.FromSeconds(5);
 
+    private bool _cooldownEnabled;
+    private DateTime? _cooldownUntil;
+    private bool _previousPositionExists;
+    private double _previousUnrealizedPnl;
+
     public StateManager(BridgeConfig config, ILogger<StateManager> logger)
     {
         _config = config;
@@ -35,6 +40,11 @@ public sealed class StateManager
     {
         lock (_lock)
         {
+            var cooldownActive = _cooldownUntil.HasValue && DateTime.UtcNow < _cooldownUntil.Value;
+            var cooldownRemaining = cooldownActive
+                ? (int)Math.Ceiling((_cooldownUntil!.Value - DateTime.UtcNow).TotalSeconds)
+                : 0;
+
             return new TradingState
             {
                 Account = _state.Account,
@@ -45,7 +55,10 @@ public sealed class StateManager
                 PluginConnected = _state.PluginConnected,
                 Position = _state.Position,
                 InstrumentInfo = _state.InstrumentInfo,
-                AvailableAccounts = new List<string>(_state.AvailableAccounts)
+                AvailableAccounts = new List<string>(_state.AvailableAccounts),
+                CooldownEnabled = _cooldownEnabled,
+                CooldownActive = cooldownActive,
+                CooldownSecondsRemaining = cooldownRemaining
             };
         }
     }
@@ -131,9 +144,21 @@ public sealed class StateManager
     {
         lock (_lock)
         {
+            // Save previous position state before updating
+            _previousPositionExists = _state.Position?.Exists ?? false;
+            _previousUnrealizedPnl = _state.Position?.UnrealizedPnl ?? 0;
+
             if (statePayload.TryGetProperty("position", out var pos))
             {
                 _state.Position = JsonSerializer.Deserialize<PositionState>(pos.GetRawText(), CamelCase);
+
+                // Detect position closed with a loss → trigger cooldown
+                var currentExists = _state.Position?.Exists ?? false;
+                if (_cooldownEnabled && _previousPositionExists && !currentExists && _previousUnrealizedPnl < 0)
+                {
+                    _cooldownUntil = DateTime.UtcNow.AddSeconds(60);
+                    _logger.LogWarning("Cooldown activated for 60s after losing trade (PnL: {Pnl})", _previousUnrealizedPnl);
+                }
             }
             if (statePayload.TryGetProperty("instrument", out var inst))
             {
@@ -203,6 +228,33 @@ public sealed class StateManager
                 dict["quantity"] = _state.Quantity;
 
             return JsonSerializer.SerializeToElement(dict);
+        }
+    }
+
+    public bool ToggleCooldown()
+    {
+        lock (_lock)
+        {
+            _cooldownEnabled = !_cooldownEnabled;
+            if (!_cooldownEnabled)
+            {
+                // Toggling OFF — cancel any active cooldown
+                _cooldownUntil = null;
+            }
+            _logger.LogInformation("Cooldown {State}", _cooldownEnabled ? "ENABLED" : "DISABLED");
+            return _cooldownEnabled;
+        }
+    }
+
+    public bool IsOrderBlocked(string action)
+    {
+        lock (_lock)
+        {
+            var cooldownActive = _cooldownUntil.HasValue && DateTime.UtcNow < _cooldownUntil.Value;
+            if (!cooldownActive) return false;
+
+            // Allow protective/management actions even during cooldown
+            return action is "buyMarket" or "sellMarket" or "buyLimit" or "sellLimit" or "reverse";
         }
     }
 

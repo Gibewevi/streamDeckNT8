@@ -28,6 +28,9 @@ export interface TradingState {
     position: PositionState | null;
     instrumentInfo: InstrumentInfo | null;
     availableAccounts: string[];
+    cooldownEnabled: boolean;
+    cooldownActive: boolean;
+    cooldownSecondsRemaining: number;
 }
 export interface PositionState {
     exists: boolean;

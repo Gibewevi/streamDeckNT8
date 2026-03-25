@@ -208,7 +208,7 @@ public sealed class BridgeServer : BackgroundService
                     await SendToPlugin(localResponse, ct);
 
                     // For qty/instrument changes, also broadcast updated state
-                    if (msg.Action is "qtySet" or "qtyAdjust" or "qtyReset" or "setInstrument" or "setAccount")
+                    if (msg.Action is "qtySet" or "qtyAdjust" or "qtyReset" or "setInstrument" or "setAccount" or "toggleCooldown")
                     {
                         await BroadcastState(ct);
                     }

@@ -18,7 +18,7 @@ public sealed class MessageRouter
 
     private static readonly HashSet<string> LocalActions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState"
+        "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState", "toggleCooldown"
     };
 
     public MessageRouter(
@@ -92,6 +92,13 @@ public sealed class MessageRouter
             }
 
             return (resp, false, null);
+        }
+
+        // Check cooldown before forwarding entry orders to NT8
+        if (_stateManager.IsOrderBlocked(message.Action))
+        {
+            _logger.LogWarning("[REQ:{RequestId}] Cooldown active, blocking {Action}", message.RequestId, message.Action);
+            return (BridgeMessage.CreateError(message.RequestId, message.Action, "COOLDOWN_ACTIVE", "Cooldown is active after a losing trade. Entry orders are blocked."), false, null);
         }
 
         // Enrich and forward to NT8
@@ -177,6 +184,19 @@ public sealed class MessageRouter
                         Action = message.Action,
                         Timestamp = DateTimeOffset.UtcNow.ToString("o"),
                         Result = JsonSerializer.SerializeToElement(new { success = true, instrument = inst })
+                    };
+                }
+            case "toggleCooldown":
+                {
+                    var enabled = _stateManager.ToggleCooldown();
+                    return new BridgeMessage
+                    {
+                        Type = "response",
+                        RequestId = message.RequestId,
+                        Source = "bridge",
+                        Action = message.Action,
+                        Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                        Result = JsonSerializer.SerializeToElement(new { success = true, cooldownEnabled = enabled })
                     };
                 }
             case "getState":
