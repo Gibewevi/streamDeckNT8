@@ -33,7 +33,11 @@ const DISCONNECTED_STATE: TradingState = {
   pluginConnected: false,
   position: null,
   instrumentInfo: null,
+  availableAccounts: [],
 };
+
+// Track pending account change to prevent stateUpdate from overwriting it
+let pendingAccountChange = 0;
 
 // Track all visible action contexts for live updates
 type TrackedAction = {
@@ -205,6 +209,17 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
         textColor: isActive ? Colors.textGold : Colors.textDim,
       };
     }
+    case 'com.trader.ninjatrader.account': {
+      const currentAccount = state.account || '';
+      const isActive = connected && currentAccount !== '';
+      const displayName = currentAccount.length > 6 ? currentAccount.substring(0, 6) : currentAccount;
+      return {
+        title: displayName || 'ACCT',
+        subtitle: isActive ? 'ACTIVE' : 'INACTIVE',
+        bgColor: isActive ? Colors.instrumentActive : Colors.disabled,
+        textColor: isActive ? Colors.textGold : Colors.textDim,
+      };
+    }
     case 'com.trader.ninjatrader.status': {
       const statusType = (settings.statusType as StatusType) || 'connection';
       const { title, subtitle } = StatusLogic.getDisplayText(statusType, state);
@@ -353,15 +368,58 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.qtyrese
   }
 }));
 
-// Instrument
+// Instrument — update local state immediately, send to bridge if connected
 streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.instrument', 'Instrument', async (s) => {
   const instrument = (s.instrument as string) || '';
   if (!instrument) return; // Not configured, skip
-  const cmd = createCommand('setInstrument', { instrument });
-  const resp = await bridge.sendCommand(cmd);
-  if (resp.result?.success && lastState) {
-    lastState.instrument = instrument;
-    pushAllVisuals(); // Immediately refresh ALL buttons so the old one goes inactive
+
+  // Always update local state for immediate visual feedback
+  if (!lastState) lastState = { ...DISCONNECTED_STATE };
+  lastState.instrument = instrument;
+  pushAllVisuals();
+
+  // Send to bridge if connected (fire-and-forget if disconnected)
+  if (bridge.isConnected) {
+    const cmd = createCommand('setInstrument', { instrument });
+    await bridge.sendCommand(cmd);
+  }
+}));
+
+// Account — cycle through available accounts (from bridge or settings fallback)
+streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.account', 'Account', async (s) => {
+  // Settings accounts take priority (user picks exactly which accounts to cycle)
+  // Fallback to bridge list filtered by prefix
+  let accounts: string[] = [];
+  if (s.accounts && (s.accounts as string).trim().length > 0) {
+    accounts = (s.accounts as string).split(',').map(a => a.trim()).filter(a => a.length > 0);
+  } else {
+    accounts = (lastState?.availableAccounts ?? []).filter(a =>
+      a.startsWith('Sim') || a.startsWith('APEX-') || a.startsWith('PA-APEX-') || a.startsWith('BX')
+    );
+  }
+  streamDeck.logger.info(`Account button pressed, accounts: ${accounts.length}`);
+
+  if (accounts.length === 0) {
+    streamDeck.logger.info('Account: no accounts available');
+    return;
+  }
+
+  const currentAccount = lastState?.account ?? '';
+  const currentIdx = accounts.indexOf(currentAccount);
+  const nextIdx = (currentIdx + 1) % accounts.length;
+  const nextAccount = accounts[nextIdx];
+  streamDeck.logger.info(`Account cycle: current=${currentAccount}, idx=${currentIdx}, nextIdx=${nextIdx}, next=${nextAccount}, total=${accounts.length}`);
+
+  // Always update local state for immediate visual feedback
+  if (!lastState) lastState = { ...DISCONNECTED_STATE };
+  lastState.account = nextAccount;
+  pendingAccountChange = Date.now();
+  pushAllVisuals();
+
+  // Send to bridge if connected
+  if (bridge.isConnected) {
+    const cmd = createCommand('setAccount', { account: nextAccount });
+    await bridge.sendCommand(cmd);
   }
 }));
 
@@ -372,9 +430,55 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.status'
 }));
 
 // --- Bridge state listener ---
-bridge.onStateUpdate((state: TradingState) => {
+bridge.onStateUpdate((raw: any) => {
+  // Parse raw bridge payload into TradingState
+  // Bridge sends account as string, NT8 sends as {name, connected}
+  const acctRaw = raw.account;
+  const accountName = typeof acctRaw === 'string' ? acctRaw : (acctRaw?.name || '');
+  const instRaw = raw.instrument;
+  const instrumentName = typeof instRaw === 'string' ? instRaw : (instRaw?.name || '');
+  const inst = typeof instRaw === 'object' ? (instRaw || {}) : {};
+  const pos = raw.position || {};
+
+  const state: TradingState = {
+    account: accountName,
+    instrument: instrumentName,
+    quantity: raw.quantity ?? gs.defaultQuantity,
+    defaultQuantity: raw.defaultQuantity ?? gs.defaultQuantity,
+    ntConnected: raw.ntConnected ?? false,
+    pluginConnected: true,
+    position: pos.exists != null ? {
+      exists: pos.exists,
+      direction: pos.direction || 'Flat',
+      quantity: pos.quantity || 0,
+      averagePrice: pos.averagePrice || 0,
+      unrealizedPnl: pos.unrealizedPnl || 0,
+      hasStopOrder: pos.hasStopOrder || false,
+      stopPrice: pos.stopPrice || 0,
+      hasTargetOrder: pos.hasTargetOrder || false,
+      targetPrice: pos.targetPrice || 0,
+      activeOrderCount: pos.activeOrderCount || 0,
+    } : null,
+    instrumentInfo: inst.name ? {
+      name: inst.name,
+      lastPrice: inst.lastPrice || 0,
+      openPrice: inst.openPrice || 0,
+      settlementPrice: inst.settlementPrice || 0,
+      tickSize: inst.tickSize || 0,
+      pointValue: inst.pointValue || 0,
+    } : null,
+    availableAccounts: raw.availableAccounts || [],
+  };
+
+  // If a pending account change was recently sent, keep the local account instead of the bridge's stale value
+  if (pendingAccountChange > 0 && Date.now() - pendingAccountChange < 3000 && lastState?.account) {
+    state.account = lastState.account;
+  } else {
+    pendingAccountChange = 0;
+  }
+
   lastState = state;
-  streamDeck.logger.info(`StateUpdate received: ntConnected=${state.ntConnected}, instrument=${state.instrument}, tracked=${tracked.size}`);
+  streamDeck.logger.info(`StateUpdate received: account=${state.account}, ntConnected=${state.ntConnected}, instrument=${state.instrument}, accounts=[${state.availableAccounts.join(',')}], tracked=${tracked.size}`);
   pushAllVisuals();
 });
 

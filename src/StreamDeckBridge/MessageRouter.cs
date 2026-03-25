@@ -18,7 +18,7 @@ public sealed class MessageRouter
 
     private static readonly HashSet<string> LocalActions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "getState"
+        "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState"
     };
 
     public MessageRouter(
@@ -73,9 +73,9 @@ public sealed class MessageRouter
         {
             var resp = HandleLocalAction(message);
 
-            // setInstrument must ALSO be forwarded to NT8 so the add-on
-            // updates its tracked instrument and starts publishing data for it
-            if (message.Action == "setInstrument")
+            // setInstrument/setAccount must ALSO be forwarded to NT8 so the add-on
+            // updates its tracked instrument/account and starts publishing data for it
+            if (message.Action is "setInstrument" or "setAccount")
             {
                 var fwdPayload = _stateManager.EnrichPayload(message);
                 var fwdMsg = new BridgeMessage
@@ -150,6 +150,20 @@ public sealed class MessageRouter
                 {
                     var newQty = _stateManager.ResetQuantity();
                     return CreateQtyResponse(message, newQty);
+                }
+            case "setAccount":
+                {
+                    var acct = GetPayloadString(message, "account") ?? "";
+                    _stateManager.SetAccount(acct);
+                    return new BridgeMessage
+                    {
+                        Type = "response",
+                        RequestId = message.RequestId,
+                        Source = "bridge",
+                        Action = message.Action,
+                        Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                        Result = JsonSerializer.SerializeToElement(new { success = true, account = acct })
+                    };
                 }
             case "setInstrument":
                 {

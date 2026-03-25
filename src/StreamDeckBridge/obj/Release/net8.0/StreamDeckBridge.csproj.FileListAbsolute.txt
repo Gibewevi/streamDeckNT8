@@ -44,3 +44,4 @@ C:\Users\pixel\Desktop\stream deck\src\StreamDeckBridge\obj\Release\net8.0\refin
 C:\Users\pixel\Desktop\stream deck\src\StreamDeckBridge\obj\Release\net8.0\StreamDeckBridge.pdb
 C:\Users\pixel\Desktop\stream deck\src\StreamDeckBridge\obj\Release\net8.0\StreamDeckBridge.genruntimeconfig.cache
 C:\Users\pixel\Desktop\stream deck\src\StreamDeckBridge\obj\Release\net8.0\ref\StreamDeckBridge.dll
+C:\Users\pixel\Desktop\stream deck\src\StreamDeckBridge\obj\Release\net8.0\StreamDeckBridge.sourcelink.json

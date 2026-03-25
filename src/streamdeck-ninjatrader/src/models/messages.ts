@@ -23,6 +23,7 @@ export interface TradingState {
   pluginConnected: boolean;
   position: PositionState | null;
   instrumentInfo: InstrumentInfo | null;
+  availableAccounts: string[];
 }
 
 export interface PositionState {

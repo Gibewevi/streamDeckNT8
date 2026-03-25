@@ -14,6 +14,9 @@ public sealed class StateManager
     private readonly ILogger<StateManager> _logger;
     private readonly object _lock = new();
     private readonly TradingState _state;
+    private DateTime _accountSetAt = DateTime.MinValue;
+    private DateTime _instrumentSetAt = DateTime.MinValue;
+    private static readonly TimeSpan OverrideGuard = TimeSpan.FromSeconds(5);
 
     public StateManager(BridgeConfig config, ILogger<StateManager> logger)
     {
@@ -41,7 +44,8 @@ public sealed class StateManager
                 NtConnected = _state.NtConnected,
                 PluginConnected = _state.PluginConnected,
                 Position = _state.Position,
-                InstrumentInfo = _state.InstrumentInfo
+                InstrumentInfo = _state.InstrumentInfo,
+                AvailableAccounts = new List<string>(_state.AvailableAccounts)
             };
         }
     }
@@ -77,12 +81,24 @@ public sealed class StateManager
         }
     }
 
+    public string SetAccount(string account)
+    {
+        lock (_lock)
+        {
+            _state.Account = account;
+            _accountSetAt = DateTime.UtcNow;
+            _logger.LogInformation("Account set to {Account} (guarded for {Secs}s)", account, OverrideGuard.TotalSeconds);
+            return _state.Account;
+        }
+    }
+
     public string SetInstrument(string instrument)
     {
         lock (_lock)
         {
             _state.Instrument = instrument;
-            _logger.LogInformation("Instrument set to {Instrument}", instrument);
+            _instrumentSetAt = DateTime.UtcNow;
+            _logger.LogInformation("Instrument set to {Instrument} (guarded for {Secs}s)", instrument, OverrideGuard.TotalSeconds);
             return _state.Instrument;
         }
     }
@@ -128,6 +144,28 @@ public sealed class StateManager
                 {
                     _state.Instrument = _state.InstrumentInfo.Name;
                     _logger.LogInformation("Instrument auto-detected from NT8: {Instrument}", _state.Instrument);
+                }
+            }
+            // Update available accounts list from NT8
+            if (statePayload.TryGetProperty("availableAccounts", out var accts) && accts.ValueKind == JsonValueKind.Array)
+            {
+                _state.AvailableAccounts.Clear();
+                foreach (var a in accts.EnumerateArray())
+                {
+                    var name = a.GetString();
+                    if (!string.IsNullOrEmpty(name))
+                        _state.AvailableAccounts.Add(name);
+                }
+            }
+            // Update account name from NT8 — but not if user recently changed it via setAccount
+            var accountGuarded = (DateTime.UtcNow - _accountSetAt) < OverrideGuard;
+            if (!accountGuarded && statePayload.TryGetProperty("account", out var acctObj) && acctObj.ValueKind == JsonValueKind.Object)
+            {
+                if (acctObj.TryGetProperty("name", out var acctName) && acctName.ValueKind == JsonValueKind.String)
+                {
+                    var name = acctName.GetString();
+                    if (!string.IsNullOrEmpty(name))
+                        _state.Account = name;
                 }
             }
             // Update NT connected status from addon heartbeat
