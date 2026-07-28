@@ -57,7 +57,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                     ctx.Instrument,
                     orderAction,
                     OrderType.Market,
-                    TimeInForce.Gtc,
+                    TimeInForce.Day,
                     qty,
                     0,  // limitPrice
                     0,  // stopPrice
@@ -67,8 +67,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                 ctx.Account.Submit(new[] { order });
 
-                SdLogger.Info("[REQ:{0}] {1} {2} {3} Market submitted (OrderId: {4})",
-                    cmd.RequestId, orderAction, qty, ctx.Instrument.FullName, order.OrderId);
+                SdLogger.Info("[REQ:{0}] {1} {2} {3} Market submitted on {4} (OrderId: {5})",
+                    cmd.RequestId, orderAction, qty, ctx.Instrument.FullName, ctx.Account.Name, order.OrderId);
 
                 return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
                 {
@@ -117,8 +117,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                 ctx.Account.Submit(new[] { order });
 
-                SdLogger.Info("[REQ:{0}] {1} {2} {3} Limit @ {4} submitted",
-                    cmd.RequestId, orderAction, qty, ctx.Instrument.FullName, limitPrice);
+                SdLogger.Info("[REQ:{0}] {1} {2} {3} Limit on {4} @ {5} submitted",
+                    cmd.RequestId, orderAction, qty, ctx.Instrument.FullName, ctx.Account.Name, limitPrice);
 
                 return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
                 {
@@ -205,7 +205,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                     ctx.Instrument,
                     reverseAction,
                     OrderType.Market,
-                    TimeInForce.Gtc,
+                    TimeInForce.Day,
                     reverseQty,
                     0, 0,
                     string.Empty,
@@ -470,7 +470,14 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             }
             catch
             {
-                return instrument.MarketData.Bid.Price;
+                try
+                {
+                    return instrument.MarketData.Bid.Price;
+                }
+                catch
+                {
+                    return 0.0;
+                }
             }
         }
 

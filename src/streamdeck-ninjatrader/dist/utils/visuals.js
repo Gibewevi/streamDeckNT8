@@ -86,6 +86,15 @@ export function renderButtonSvg(visual) {
       <text x="72" y="90" text-anchor="middle" font-family="sans-serif" font-size="48" font-weight="bold" fill="${tc}">${sign}</text>
       <text x="72" y="130" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${sub}</text>`;
     }
+    else if (t === 'BE') {
+        contentSvg = `
+      <text x="72" y="58" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">BE</text>
+      <text x="72" y="100" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="${sc}">${sub}</text>`;
+    }
+    else if (t === 'COUNTDOWN') {
+        // Cooldown countdown — SVG is background-only; native setTitle renders the number
+        contentSvg = ``;
+    }
     else if (t === 'QTY_RESET') {
         contentSvg = `
       <text x="72" y="42" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="${tc}">Qty</text>
@@ -134,6 +143,8 @@ export function buildTitle(visual) {
         const label = isStop ? 'Stop' : isBE ? 'BE' : 'Target';
         return `${label}\n${visual.subtitle || ''}`;
     }
+    if (visual.title === 'COUNTDOWN')
+        return visual.subtitle || '';
     // Standard 2-line title
     return visual.subtitle ? `${visual.title}\n${visual.subtitle}` : visual.title;
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
@@ -84,6 +85,12 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
                 return;
             }
 
+            if (value is IEnumerable enumerable)
+            {
+                WriteEnumerable(sb, enumerable);
+                return;
+            }
+
             // Anonymous types and regular objects — use reflection
             WriteObject(sb, value);
         }
@@ -138,6 +145,19 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
             sb.Append(']');
         }
 
+        private static void WriteEnumerable(StringBuilder sb, IEnumerable enumerable)
+        {
+            sb.Append('[');
+            bool first = true;
+            foreach (var item in enumerable)
+            {
+                if (!first) sb.Append(',');
+                WriteValue(sb, item);
+                first = false;
+            }
+            sb.Append(']');
+        }
+
         private static void WriteObject(StringBuilder sb, object obj)
         {
             sb.Append('{');
@@ -145,6 +165,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
             bool first = true;
             foreach (var prop in props)
             {
+                if (prop.GetIndexParameters().Length > 0) continue;
+
                 var val = prop.GetValue(obj, null);
                 if (val == null) continue;
                 if (!first) sb.Append(',');

@@ -5,8 +5,8 @@ namespace StreamDeckBridge.Models;
 /// </summary>
 public sealed class TradingState
 {
-    public string Account { get; set; } = "Sim101";
-    public string Instrument { get; set; } = "ES 06-25";
+    public string Account { get; set; } = string.Empty;
+    public string Instrument { get; set; } = string.Empty;
     public int Quantity { get; set; } = 1;
     public int DefaultQuantity { get; set; } = 1;
     public bool NtConnected { get; set; }

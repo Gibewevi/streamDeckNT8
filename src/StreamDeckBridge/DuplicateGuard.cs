@@ -21,7 +21,18 @@ public sealed class DuplicateGuard
     public bool IsDuplicate(string requestId)
     {
         var now = DateTimeOffset.UtcNow;
-        Cleanup(now);
+
+        // Periodic cleanup of expired entries
+        if (_recentRequests.Count > 0)
+        {
+            var expiredKeys = _recentRequests
+                .Where(kvp => now - kvp.Value > _window)
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var key in expiredKeys)
+                _recentRequests.TryRemove(key, out _);
+        }
 
         if (_recentRequests.TryGetValue(requestId, out _))
         {
@@ -31,16 +42,5 @@ public sealed class DuplicateGuard
 
         _recentRequests.TryAdd(requestId, now);
         return false;
-    }
-
-    private void Cleanup(DateTimeOffset now)
-    {
-        var expiredKeys = _recentRequests
-            .Where(kvp => now - kvp.Value > _window)
-            .Select(kvp => kvp.Key)
-            .ToList();
-
-        foreach (var key in expiredKeys)
-            _recentRequests.TryRemove(key, out _);
     }
 }

@@ -19,17 +19,169 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         {
             if (string.IsNullOrWhiteSpace(accountName)) return null;
 
+            lock (Connection.Connections)
+            {
+                foreach (Connection connection in Connection.Connections)
+                {
+                    if (connection == null || connection.Status != ConnectionStatus.Connected)
+                        continue;
+
+                    foreach (Account acct in connection.Accounts)
+                    {
+                        if (IsSelectableAccount(acct) &&
+                            string.Equals(acct.Name, accountName, StringComparison.OrdinalIgnoreCase))
+                            return acct;
+                    }
+                }
+            }
+
             lock (Account.All)
             {
                 foreach (Account acct in Account.All)
                 {
-                    if (string.Equals(acct.Name, accountName, StringComparison.OrdinalIgnoreCase))
+                    if (IsSelectableAccount(acct) &&
+                        string.Equals(acct.Name, accountName, StringComparison.OrdinalIgnoreCase))
                         return acct;
                 }
             }
 
             SdLogger.Warn("Account not found: {0}", accountName);
             return null;
+        }
+
+        /// <summary>
+        /// Returns account names that are currently selectable for trading.
+        /// NinjaTrader keeps old broker accounts in Account.All, so filter out
+        /// disabled/disconnected historical broker accounts before publishing to Stream Deck.
+        /// </summary>
+        public List<string> GetAccountNames()
+        {
+            var liveNames = new List<string>();
+            var simNames = new List<string>();
+
+            lock (Connection.Connections)
+            {
+                foreach (Connection connection in Connection.Connections)
+                {
+                    if (connection == null || connection.Status != ConnectionStatus.Connected)
+                        continue;
+
+                    foreach (Account acct in connection.Accounts)
+                        AddSelectableAccount(acct, liveNames, simNames);
+                }
+            }
+
+            lock (Account.All)
+            {
+                foreach (Account acct in Account.All)
+                {
+                    if (acct != null && acct.Provider == Provider.Simulator)
+                        AddSelectableAccount(acct, liveNames, simNames);
+                }
+            }
+
+            return FinalizeAccountNames(liveNames.Concat(simNames).ToList());
+        }
+
+        private static List<string> FinalizeAccountNames(List<string> names)
+        {
+            return PruneRolledAccountNames(names.Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        }
+
+        private static List<string> PruneRolledAccountNames(List<string> names)
+        {
+            var passthrough = new List<AccountNameCandidate>();
+            var rolledByBase = new Dictionary<string, AccountNameCandidate>(StringComparer.OrdinalIgnoreCase);
+
+            for (int i = 0; i < names.Count; i++)
+            {
+                var name = names[i];
+                if (!TryGetRolledAccountParts(name, out var baseName, out var suffix))
+                {
+                    passthrough.Add(new AccountNameCandidate(name, i, long.MinValue + i));
+                    continue;
+                }
+
+                if (!rolledByBase.TryGetValue(baseName, out var current) || suffix > current.Suffix)
+                    rolledByBase[baseName] = new AccountNameCandidate(name, i, suffix);
+            }
+
+            return passthrough
+                .Concat(rolledByBase.Values)
+                .OrderBy(candidate => candidate.Index)
+                .Select(candidate => candidate.Name)
+                .ToList();
+        }
+
+        private static bool TryGetRolledAccountParts(string accountName, out string baseName, out long suffix)
+        {
+            baseName = null;
+            suffix = 0;
+
+            if (string.IsNullOrWhiteSpace(accountName))
+                return false;
+
+            var lastDash = accountName.LastIndexOf('-');
+            if (lastDash <= 0 || lastDash >= accountName.Length - 1)
+                return false;
+
+            var prefix = accountName.Substring(0, lastDash + 1);
+            var suffixText = accountName.Substring(lastDash + 1);
+
+            if (suffixText.Length > 4 || !prefix.Any(char.IsDigit))
+                return false;
+
+            if (!long.TryParse(suffixText, out suffix))
+                return false;
+
+            baseName = prefix;
+            return true;
+        }
+
+        private struct AccountNameCandidate
+        {
+            public readonly string Name;
+            public readonly int Index;
+            public readonly long Suffix;
+
+            public AccountNameCandidate(string name, int index, long suffix)
+            {
+                Name = name;
+                Index = index;
+                Suffix = suffix;
+            }
+        }
+
+        private static void AddSelectableAccount(Account account, List<string> liveNames, List<string> simNames)
+        {
+            if (!IsSelectableAccount(account))
+                return;
+
+            if (account.Provider == Provider.Simulator)
+                simNames.Add(account.Name);
+            else
+                liveNames.Add(account.Name);
+        }
+
+        private static bool IsSelectableAccount(Account account)
+        {
+            if (account == null || string.IsNullOrWhiteSpace(account.Name))
+                return false;
+
+            if (string.Equals(account.Name, "Backtest", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(account.Name, "Playback101", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (account.AccountStatus != AccountStatus.Enabled)
+                return false;
+
+            if (account.Provider == Provider.Simulator)
+                return true;
+
+            if (account.ConnectionStatus == ConnectionStatus.Connected)
+                return true;
+
+            return account.Connection != null && account.Connection.Status == ConnectionStatus.Connected;
         }
 
         /// <summary>

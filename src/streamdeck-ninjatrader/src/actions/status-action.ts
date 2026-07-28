@@ -4,6 +4,24 @@ import { Colors } from '../utils/visuals.js';
 
 export type StatusType = 'account' | 'instrument' | 'position' | 'pnl' | 'quantity' | 'connection';
 
+function formatAccountLabel(account: string): string {
+  const value = account.trim();
+  if (!value) return '---';
+
+  const compact = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  const letters = (value.match(/[A-Za-z]/g) ?? []).join('').toUpperCase();
+  const digits = (value.match(/\d/g) ?? []).join('');
+
+  const prefix = (letters.length >= 3 ? letters : compact || value.toUpperCase()).slice(0, 3);
+  const suffix = digits.length >= 3
+    ? digits.slice(-3)
+    : compact.length > prefix.length
+      ? compact.slice(-3)
+      : '';
+
+  return suffix ? `${prefix}-${suffix}` : prefix;
+}
+
 /**
  * Generic status display action.
  * What it shows depends on the 'statusType' setting.
@@ -65,7 +83,7 @@ export class StatusDisplayAction extends BaseAction {
 
     switch (statusType) {
       case 'account':
-        return { title: state.account || '---', subtitle: 'Account' };
+        return { title: formatAccountLabel(state.account || ''), subtitle: 'Account' };
 
       case 'instrument':
         return {

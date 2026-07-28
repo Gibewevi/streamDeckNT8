@@ -175,6 +175,7 @@ public sealed class BridgeServer : BackgroundService
     private async Task HandlePluginSession(WebSocket ws, CancellationToken ct)
     {
         var buffer = new byte[8192];
+        var messageBuffer = new MemoryStream();
         try
         {
             while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
@@ -183,7 +184,12 @@ public sealed class BridgeServer : BackgroundService
                 if (result.MessageType == WebSocketMessageType.Close)
                     break;
 
-                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                messageBuffer.Write(buffer, 0, result.Count);
+                if (!result.EndOfMessage)
+                    continue;
+
+                var json = Encoding.UTF8.GetString(messageBuffer.ToArray());
+                messageBuffer.SetLength(0);
                 _logger.LogDebug("Plugin → Bridge: {Json}", json);
 
                 BridgeMessage? msg;
@@ -246,6 +252,7 @@ public sealed class BridgeServer : BackgroundService
     private async Task HandleAddonSession(WebSocket ws, CancellationToken ct)
     {
         var buffer = new byte[8192];
+        var messageBuffer = new MemoryStream();
         try
         {
             while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
@@ -254,7 +261,12 @@ public sealed class BridgeServer : BackgroundService
                 if (result.MessageType == WebSocketMessageType.Close)
                     break;
 
-                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                messageBuffer.Write(buffer, 0, result.Count);
+                if (!result.EndOfMessage)
+                    continue;
+
+                var json = Encoding.UTF8.GetString(messageBuffer.ToArray());
+                messageBuffer.SetLength(0);
                 _logger.LogDebug("AddOn → Bridge: {Json}", json);
 
                 BridgeMessage? msg;

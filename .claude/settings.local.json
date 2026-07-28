@@ -62,7 +62,13 @@
       "Bash(cp -r \"c:/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/dist/\"* \"C:/Users/pixel/AppData/Roaming/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/dist/\")",
       "Bash(cp -r dist/* C:/Users/pixel/AppData/Roaming/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/dist/)",
       "Bash(taskkill //IM StreamDeck.exe //F)",
-      "Bash(start 'C:/Program Files/Elgato/StreamDeck/StreamDeck.exe')"
+      "Bash(start 'C:/Program Files/Elgato/StreamDeck/StreamDeck.exe')",
+      "Bash(taskkill //IM \"node.exe\" //F)",
+      "Bash(taskkill //F //PID 27924)",
+      "Bash(taskkill //F //PID 24116)",
+      "Bash(taskkill //IM \"escape-node-job.exe\" //F)",
+      "Read(//c/Users/pixel/AppData/**)",
+      "Bash(start \"\" \"C:/Users/pixel/Desktop/stream deck/src/StreamDeckBridge/bin/Debug/net8.0/StreamDeckBridge.exe\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\pixel\\Desktop\\stream deck\\$USERPROFILE\\Documents\\NinjaTrader 8\\bin\\Custom\\AddOns",
@@ -72,7 +78,8 @@
       "C:\\Users\\pixel\\Documents\\NinjaTrader 8\\bin\\Custom\\AddOns\\StreamDeck\\Services",
       "C:\\Users\\pixel\\Documents\\NinjaTrader 8\\bin\\Custom\\AddOns\\StreamDeck",
       "C:\\Users\\pixel\\Desktop\\stream deck\\$PLUGIN_DIR\\imgs",
-      "C:\\Users\\pixel\\AppData\\Roaming\\Elgato\\StreamDeck\\Plugins\\com.trader.ninjatrader.sdPlugin\\imgs\\actions"
+      "C:\\Users\\pixel\\AppData\\Roaming\\Elgato\\StreamDeck\\Plugins\\com.trader.ninjatrader.sdPlugin\\imgs\\actions",
+      "\\dev"
     ]
   }
 }

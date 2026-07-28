@@ -20,7 +20,7 @@ class NTAction {
 }
 import { BridgeClient } from './services/bridge-client.js';
 import { DEFAULT_GLOBAL_SETTINGS, GlobalSettings, TradingState, createCommand } from './models/messages.js';
-import { renderButtonSvg, buildTitle, Colors } from './utils/visuals.js';
+import { renderButtonSvg, Colors } from './utils/visuals.js';
 import { StatusDisplayAction as StatusLogic, type StatusType } from './actions/status-action.js';
 
 // --- Global State ---
@@ -80,6 +80,68 @@ type TrackedAction = {
 };
 const tracked = new Map<string, TrackedAction>();
 
+function normalizeAccountList(value: unknown): string[] {
+  const rawItems = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[\n,;]/)
+      : [];
+
+  const seen = new Set<string>();
+  const accounts: string[] = [];
+
+  for (const item of rawItems) {
+    const account = typeof item === 'string'
+      ? item.trim()
+      : typeof item === 'object' && item !== null && 'name' in item
+        ? String((item as { name?: unknown }).name ?? '').trim()
+        : '';
+
+    if (!account) continue;
+
+    const key = account.toUpperCase();
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    accounts.push(account);
+  }
+
+  return accounts;
+}
+
+function formatAccountLabel(account: string): string {
+  const value = account.trim();
+  if (!value) return 'ACCT';
+
+  const compact = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  const letters = (value.match(/[A-Za-z]/g) ?? []).join('').toUpperCase();
+  const digits = (value.match(/\d/g) ?? []).join('');
+
+  const prefix = (letters.length >= 3 ? letters : compact || value.toUpperCase()).slice(0, 3);
+  const suffix = digits.length >= 3
+    ? digits.slice(-3)
+    : compact.length > prefix.length
+      ? compact.slice(-3)
+      : '';
+
+  return suffix ? `${prefix}-${suffix}` : prefix;
+}
+
+function getAccountCycleList(settings: Record<string, unknown>, state: TradingState | null): string[] {
+  const availableAccounts = normalizeAccountList(state?.availableAccounts ?? []);
+  if (availableAccounts.length === 0) return [];
+
+  const configuredAccounts = normalizeAccountList(settings.accounts);
+  if (configuredAccounts.length === 0) return availableAccounts;
+
+  const activeByName = new Map(availableAccounts.map((account) => [account.toUpperCase(), account]));
+  const configuredActiveAccounts = configuredAccounts
+    .map((account) => activeByName.get(account.toUpperCase()))
+    .filter((account): account is string => Boolean(account));
+
+  return configuredActiveAccounts.length > 0 ? configuredActiveAccounts : availableAccounts;
+}
+
 // --- Visual update engine ---
 
 function pushVisual(id: string) {
@@ -89,10 +151,15 @@ function pushVisual(id: string) {
   const visual = computeVisual(t.uuid, t.settings, state);
   if (visual) {
     const svg = renderButtonSvg(visual);
-    const titleText = buildTitle(visual);
-    streamDeck.logger.info(`pushVisual ${t.uuid}: title=${titleText.replace(/\n/g, '|')}, bg=${visual.bgColor}, svgLen=${svg.length}`);
+    streamDeck.logger.info(`pushVisual ${t.uuid}: title=${visual.title}, bg=${visual.bgColor}, svgLen=${svg.length}`);
     t.sdAction.setImage(svg).catch((e: any) => streamDeck.logger.error(`setImage error: ${e}`));
-    t.sdAction.setTitle('').catch((e: any) => streamDeck.logger.error(`setTitle error: ${e}`));
+    // COUNTDOWN: use native title for the big number (SDK controls font size via setFeedbackLayout isn't available on Keypad)
+    // All other actions: clear native title so only SVG text shows
+    if (visual.title === 'COUNTDOWN') {
+      t.sdAction.setTitle(`${visual.subtitle || ''}`).catch((e: any) => streamDeck.logger.error(`setTitle error: ${e}`));
+    } else {
+      t.sdAction.setTitle('').catch((e: any) => streamDeck.logger.error(`setTitle error: ${e}`));
+    }
   }
 }
 
@@ -104,7 +171,7 @@ function pushAllVisuals() {
 
 function computeVisual(uuid: string, settings: Record<string, unknown>, state: TradingState) {
   const connected = bridge.isConnected && state.ntConnected;
-  const hasPos = state.position?.exists ?? false;
+
   const pos = state.position;
   const qty = state.quantity ?? gs.defaultQuantity;
   const defQty = state.defaultQuantity ?? gs.defaultQuantity;
@@ -148,13 +215,11 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
         bgColor: '#FFFFFF', textColor: '#000000',
       };
     case 'com.trader.ninjatrader.cancelorders': {
-      const orderCount = pos?.activeOrderCount ?? 0;
       const posQty = Math.abs(pos?.quantity ?? 0);
-      const total = orderCount + posQty;
       return {
-        title: 'QTY_CANCEL', subtitle: total > 0 ? `${total}` : '0',
-        bgColor: total > 0 ? Colors.sellRed : '#FFFFFF',
-        textColor: total > 0 ? '#FFFFFF' : '#000000',
+        title: 'QTY_CANCEL', subtitle: posQty > 0 ? `${posQty}` : '0',
+        bgColor: posQty > 0 ? Colors.sellRed : '#FFFFFF',
+        textColor: posQty > 0 ? '#FFFFFF' : '#000000',
       };
     }
     case 'com.trader.ninjatrader.reverse':
@@ -164,14 +229,11 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
       };
     case 'com.trader.ninjatrader.breakeven': {
       const offset = (settings.offsetTicks as number) ?? 0;
-      const hasStop = pos?.hasStopOrder ?? false;
-      const active = hasPos && hasStop;
-      const label = offset > 0 ? `BE+${offset}t` : 'BE';
       return {
-        title: label,
-        subtitle: active ? `Stop→${pos!.averagePrice}` : 'Inactive',
-        bgColor: active ? Colors.beBlue : Colors.beBlueDim,
-        textColor: active ? Colors.textWhite : Colors.textDim,
+        title: 'BE',
+        subtitle: `+${offset}`,
+        bgColor: Colors.flattenOrange,
+        textColor: Colors.textWhite,
       };
     }
     case 'com.trader.ninjatrader.stopplus':
@@ -251,11 +313,10 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
       };
     }
     case 'com.trader.ninjatrader.account': {
-      const currentAccount = state.account || '';
+      const currentAccount = state.ntConnected ? (state.account || '') : '';
       const isActive = connected && currentAccount !== '';
-      const displayName = currentAccount.length > 6 ? currentAccount.substring(0, 6) : currentAccount;
       return {
-        title: displayName || 'ACCT',
+        title: formatAccountLabel(currentAccount),
         subtitle: isActive ? 'ACTIVE' : 'INACTIVE',
         bgColor: isActive ? Colors.instrumentActive : Colors.disabled,
         textColor: isActive ? Colors.textGold : Colors.textDim,
@@ -340,10 +401,14 @@ function createSDAction(uuid: string, actionName: string, handler: (settings: Re
 // --- Register all trading actions ---
 
 async function sendCmd(action: string, payload: Record<string, unknown>, settings: Record<string, unknown>) {
-  const account = (settings.account as string) || lastState?.account || gs.defaultAccount;
+  const selectedAccount = lastState?.ntConnected ? (lastState.account || '').trim() : '';
+  const fallbackAccount = typeof settings.account === 'string' ? settings.account.trim() : '';
+  const account = selectedAccount || fallbackAccount || gs.defaultAccount;
   const instrument = (settings.instrument as string) || lastState?.instrument || gs.defaultInstrument;
+  streamDeck.logger.info(`sendCmd ${action}: account=${account}, instrument=${instrument}, payload=${JSON.stringify(payload)}`);
   const cmd = createCommand(action, { account, instrument, ...payload });
   const resp = await bridge.sendCommand(cmd);
+  streamDeck.logger.info(`sendCmd ${action} response: ${JSON.stringify(resp)}`);
   if (resp.error) {
     streamDeck.logger.error(`${action} failed: ${resp.error.code} — ${resp.error.message}`);
     throw new Error(`${resp.error.code}: ${resp.error.message}`);
@@ -439,18 +504,11 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.instrum
   }
 }));
 
-// Account — cycle through available accounts (from bridge or settings fallback)
+// Account — cycle through active accounts published by NinjaTrader
 streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.account', 'Account', async (s) => {
-  // Settings accounts take priority (user picks exactly which accounts to cycle)
-  // Fallback to bridge list filtered by prefix
-  let accounts: string[] = [];
-  if (s.accounts && (s.accounts as string).trim().length > 0) {
-    accounts = (s.accounts as string).split(',').map(a => a.trim()).filter(a => a.length > 0);
-  } else {
-    accounts = (lastState?.availableAccounts ?? []).filter(a =>
-      a.startsWith('Sim') || a.startsWith('APEX-') || a.startsWith('PA-APEX-') || a.startsWith('BX')
-    );
-  }
+  // Settings only reorder/filter accounts that are currently active in NT8.
+  // They never reintroduce stale broker accounts that NT8 is not publishing.
+  const accounts = getAccountCycleList(s, lastState);
   streamDeck.logger.info(`Account button pressed, accounts: ${accounts.length}`);
 
   if (accounts.length === 0) {
@@ -458,7 +516,7 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.account
     return;
   }
 
-  const currentAccount = lastState?.account ?? '';
+  const currentAccount = lastState?.ntConnected ? (lastState.account ?? '') : '';
   const currentIdx = accounts.indexOf(currentAccount);
   const nextIdx = (currentIdx + 1) % accounts.length;
   const nextAccount = accounts[nextIdx];
@@ -527,7 +585,7 @@ bridge.onStateUpdate((raw: any) => {
       tickSize: inst.tickSize || 0,
       pointValue: inst.pointValue || 0,
     } : null,
-    availableAccounts: raw.availableAccounts || [],
+    availableAccounts: normalizeAccountList(raw.availableAccounts || []),
     cooldownEnabled: raw.cooldownEnabled ?? false,
     cooldownActive: raw.cooldownActive ?? false,
     cooldownSecondsRemaining: raw.cooldownSecondsRemaining ?? 0,
@@ -538,6 +596,12 @@ bridge.onStateUpdate((raw: any) => {
     state.account = lastState.account;
   } else {
     pendingAccountChange = 0;
+  }
+
+  // If local cooldown timer is already running, keep local countdown values to avoid jitter
+  if (cooldownTimer && lastState?.cooldownActive) {
+    state.cooldownActive = lastState.cooldownActive;
+    state.cooldownSecondsRemaining = lastState.cooldownSecondsRemaining;
   }
 
   lastState = state;

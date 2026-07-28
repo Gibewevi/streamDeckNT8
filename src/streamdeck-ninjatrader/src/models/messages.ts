@@ -60,7 +60,7 @@ export interface GlobalSettings {
 
 export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
   bridgeUrl: 'ws://127.0.0.1:8218',
-  defaultAccount: 'Sim101',
+  defaultAccount: '',
   defaultInstrument: '',
   defaultQuantity: 1,
 };

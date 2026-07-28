@@ -121,6 +121,14 @@ public sealed class StateManager
         lock (_lock)
         {
             _state.NtConnected = connected;
+            if (!connected)
+            {
+                _state.Account = string.Empty;
+                _state.AvailableAccounts.Clear();
+                _state.Position = null;
+                _state.InstrumentInfo = null;
+            }
+
             _logger.LogInformation("NT8 connection: {Status}", connected ? "CONNECTED" : "DISCONNECTED");
         }
     }

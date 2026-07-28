@@ -22,6 +22,16 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private string _trackedInstrument;
         private bool _disposed;
 
+        public string TrackedAccount
+        {
+            get { return _trackedAccount; }
+        }
+
+        public string TrackedInstrument
+        {
+            get { return _trackedInstrument; }
+        }
+
         public StatePublisher(ContextResolver resolver, BridgeClient bridgeClient, AddOnConfig config)
         {
             _resolver = resolver;
@@ -31,8 +41,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         public void Start(string accountName, string instrumentName)
         {
-            _trackedAccount = accountName;
-            _trackedInstrument = instrumentName;
+            if (!string.IsNullOrWhiteSpace(accountName))
+                _trackedAccount = accountName;
+
+            if (!string.IsNullOrWhiteSpace(instrumentName))
+                _trackedInstrument = instrumentName;
 
             _stateTimer = new Timer(
                 _ => PublishState(),
@@ -45,8 +58,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         public void UpdateTracking(string accountName, string instrumentName)
         {
-            _trackedAccount = accountName;
-            _trackedInstrument = instrumentName;
+            if (!string.IsNullOrWhiteSpace(accountName))
+                _trackedAccount = accountName;
+
+            if (!string.IsNullOrWhiteSpace(instrumentName))
+                _trackedInstrument = instrumentName;
             SdLogger.Info("State tracking updated — {0} / {1}", accountName, instrumentName);
         }
 
@@ -56,10 +72,24 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
             try
             {
+                var availableAccounts = _resolver.GetAccountNames();
+                if (availableAccounts.Count > 0 &&
+                    (string.IsNullOrWhiteSpace(_trackedAccount) ||
+                     !availableAccounts.Any(a => string.Equals(a, _trackedAccount, StringComparison.OrdinalIgnoreCase))))
+                {
+                    _trackedAccount = availableAccounts[0];
+                    SdLogger.Info("Account auto-selected from active list: {0}", _trackedAccount);
+                }
+                else if (availableAccounts.Count == 0 && !string.IsNullOrWhiteSpace(_trackedAccount))
+                {
+                    _trackedAccount = string.Empty;
+                    SdLogger.Info("Tracked account cleared because no active accounts are available.");
+                }
+
                 var account = _resolver.FindAccount(_trackedAccount);
                 var instrument = _resolver.FindInstrument(_trackedInstrument);
 
-                var state = BuildState(account, instrument);
+                var state = BuildState(account, instrument, availableAccounts);
                 var msg = BridgeMessage.CreateEvent("stateUpdate", state);
                 _bridgeClient.SendAsync(msg).ConfigureAwait(false);
             }
@@ -69,7 +99,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             }
         }
 
-        private object BuildState(Account account, Instrument instrument)
+        private object BuildState(Account account, Instrument instrument, List<string> availableAccounts)
         {
             var accountDict = new Dictionary<string, object>();
             accountDict["name"] = account != null ? account.Name : _trackedAccount;
@@ -87,7 +117,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 instrumentDict["name"] = instrument.FullName;
                 instrumentDict["lastPrice"] = lastPrice;
                 instrumentDict["tickSize"] = instrument.MasterInstrument.TickSize;
-                instrumentDict["pointValue"] = instrument.MasterInstrument.PointValue;
+                double pointValue = instrument.MasterInstrument.PointValue;
+                instrumentDict["pointValue"] = pointValue > 0 ? pointValue : 1.0;
 
                 if (account != null)
                 {
@@ -132,6 +163,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             state["account"] = accountDict;
             state["instrument"] = instrumentDict;
             state["position"] = positionDict;
+            state["availableAccounts"] = availableAccounts;
             return state;
         }
 

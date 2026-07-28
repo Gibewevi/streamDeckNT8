@@ -30,7 +30,7 @@
       "Tooltip": "Submit a market buy order",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/buy-market", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/buy-market", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ],
       "PropertyInspectorPath": "ui/action-settings.html"
     },
@@ -41,7 +41,7 @@
       "Tooltip": "Submit a market sell order",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/sell-market", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/sell-market", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ],
       "PropertyInspectorPath": "ui/action-settings.html"
     },
@@ -52,7 +52,7 @@
       "Tooltip": "Submit a limit buy order at offset from last price",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/buy-limit", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/buy-limit", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ],
       "PropertyInspectorPath": "ui/action-settings.html"
     },
@@ -63,7 +63,7 @@
       "Tooltip": "Submit a limit sell order at offset from last price",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/sell-limit", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/sell-limit", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ],
       "PropertyInspectorPath": "ui/action-settings.html"
     },
@@ -74,7 +74,7 @@
       "Tooltip": "Flatten all positions for current instrument",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/flatten", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/flatten", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -84,7 +84,7 @@
       "Tooltip": "Close all positions and cancel pending orders",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/cancel-orders", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/cancel-orders", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -94,7 +94,7 @@
       "Tooltip": "Reverse current position",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/reverse", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/reverse", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -104,7 +104,7 @@
       "Tooltip": "Move stop to break-even (with optional offset)",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ],
       "PropertyInspectorPath": "ui/be-settings.html"
     },
@@ -115,7 +115,7 @@
       "Tooltip": "Move stop up by 1 tick",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/move-stop", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/move-stop", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -125,7 +125,7 @@
       "Tooltip": "Move stop down by 1 tick",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/move-stop", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/move-stop", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -135,7 +135,7 @@
       "Tooltip": "Move target up by 1 tick",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/move-target", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/move-target", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -145,7 +145,7 @@
       "Tooltip": "Move target down by 1 tick",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/move-target", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/move-target", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -155,7 +155,7 @@
       "Tooltip": "Move break-even up by 1 tick",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -165,7 +165,7 @@
       "Tooltip": "Move break-even down by 1 tick",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/breakeven", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -175,7 +175,7 @@
       "Tooltip": "Increase quantity by 1",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/qty-adjust", "TitleAlignment": "middle", "FontSize": "14" }
+        { "Image": "imgs/actions/qty-adjust", "TitleAlignment": "middle", "FontSize": "14", "ShowTitle": false }
       ]
     },
     {
@@ -185,7 +185,7 @@
       "Tooltip": "Decrease quantity by 1",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/qty-adjust", "TitleAlignment": "middle", "FontSize": "14" }
+        { "Image": "imgs/actions/qty-adjust", "TitleAlignment": "middle", "FontSize": "14", "ShowTitle": false }
       ]
     },
     {
@@ -195,7 +195,7 @@
       "Tooltip": "Reset quantity to default",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/qty-reset", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/qty-reset", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
     },
     {
@@ -205,9 +205,20 @@
       "Tooltip": "Switch to a specific instrument",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/instrument", "TitleAlignment": "middle", "FontSize": "12" }
+        { "Image": "imgs/actions/instrument", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ],
       "PropertyInspectorPath": "ui/instrument-settings.html"
+    },
+    {
+      "Name": "Select Account",
+      "UUID": "com.trader.ninjatrader.account",
+      "Icon": "imgs/actions/status",
+      "Tooltip": "Cycle through NinjaTrader accounts",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/status", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
+      ],
+      "PropertyInspectorPath": "ui/account-settings.html"
     },
     {
       "Name": "Status Display",
@@ -216,9 +227,19 @@
       "Tooltip": "Display trading status information",
       "Controllers": ["Keypad"],
       "States": [
-        { "Image": "imgs/actions/status", "TitleAlignment": "middle", "FontSize": "10" }
+        { "Image": "imgs/actions/status", "TitleAlignment": "middle", "FontSize": "10", "ShowTitle": false }
       ],
       "PropertyInspectorPath": "ui/status-settings.html"
+    },
+    {
+      "Name": "Cooldown",
+      "UUID": "com.trader.ninjatrader.cooldown",
+      "Icon": "imgs/actions/status",
+      "Tooltip": "Toggle cooldown protection after a losing trade",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/status", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
+      ]
     }
   ]
 }

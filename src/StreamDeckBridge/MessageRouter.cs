@@ -51,8 +51,8 @@ public sealed class MessageRouter
             return (BridgeMessage.CreateError(message.RequestId, message.Action, errorCode!, errorMessage!), false, null);
         }
 
-        // Duplicate check
-        if (message.RequestId != null && _duplicateGuard.IsDuplicate(message.RequestId))
+        // Duplicate check — only for requests with requestId (null requestId skips duplicate detection)
+        if (!string.IsNullOrEmpty(message.RequestId) && _duplicateGuard.IsDuplicate(message.RequestId))
         {
             return (BridgeMessage.CreateError(message.RequestId, message.Action, "DUPLICATE_REQUEST", "This requestId was already processed recently."), false, null);
         }

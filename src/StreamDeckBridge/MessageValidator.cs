@@ -61,7 +61,13 @@ public sealed class MessageValidator
         if (QuantityActions.Contains(message.Action))
             return ValidateQuantityAction(message);
 
-        if (message.Action is "getState" or "setInstrument" or "setAccount" or "toggleCooldown")
+        if (message.Action == "setInstrument")
+            return ValidateRequiredPayloadString(message, "instrument", "instrument is required for setInstrument.");
+
+        if (message.Action == "setAccount")
+            return ValidateRequiredPayloadString(message, "account", "account is required for setAccount.");
+
+        if (message.Action is "getState" or "toggleCooldown")
             return (true, null, null);
 
         // All trading actions need instrument context at minimum
@@ -111,6 +117,15 @@ public sealed class MessageValidator
             if (qty == null || qty < 1)
                 return (false, "INVALID_QUANTITY", "quantity must be a positive integer for order actions.");
         }
+
+        return (true, null, null);
+    }
+
+    private (bool, string?, string?) ValidateRequiredPayloadString(BridgeMessage message, string key, string errorMessage)
+    {
+        var value = GetPayloadString(message, key);
+        if (string.IsNullOrWhiteSpace(value))
+            return (false, "INVALID_PAYLOAD", errorMessage);
 
         return (true, null, null);
     }

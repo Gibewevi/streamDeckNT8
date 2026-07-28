@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using NinjaTrader.NinjaScript.AddOns.StreamDeck.Models;
 using NinjaTrader.NinjaScript.AddOns.StreamDeck.Services;
 using NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities;
@@ -65,7 +66,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 _bridgeClient.Start();
 
                 // Start state publishing with default tracking
-                _statePublisher.Start(_config.BridgeUrl.Contains("Sim") ? "Sim101" : "Sim101", "ES 06-25");
+                _statePublisher.Start(GetInitialAccountName(), "ES 06-25");
 
                 SdLogger.Info("StreamDeck Add-On initialized successfully");
             }
@@ -98,15 +99,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 return;
             }
 
-            // Handle instrument change tracking
-            if (message.Action == "setInstrument")
+            if (message.Action == "setInstrument" || message.Action == "setAccount")
             {
-                var newInstrument = message.GetPayloadString("instrument");
-                if (!string.IsNullOrEmpty(newInstrument))
-                {
-                    var account = message.GetPayloadString("account") ?? "Sim101";
-                    _statePublisher.UpdateTracking(account, newInstrument);
-                }
+                var trackingResponse = HandleTrackingCommand(message);
+                _bridgeClient.SendAsync(trackingResponse).ConfigureAwait(false);
+                return;
             }
 
             // Dispatch to trading engine
@@ -114,6 +111,35 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             // Send response back to bridge
             _bridgeClient.SendAsync(response).ConfigureAwait(false);
+        }
+
+        private string GetInitialAccountName()
+        {
+            var firstAccount = _resolver.GetAccountNames().FirstOrDefault();
+            return !string.IsNullOrWhiteSpace(firstAccount) ? firstAccount : string.Empty;
+        }
+
+        private BridgeMessage HandleTrackingCommand(BridgeMessage message)
+        {
+            var account = message.GetPayloadString("account");
+            var instrument = message.GetPayloadString("instrument");
+
+            if (message.Action == "setAccount" && string.IsNullOrWhiteSpace(account))
+                return BridgeMessage.CreateError(message.RequestId, message.Action, "CONTEXT_MISSING", "Account name is required.");
+
+            if (message.Action == "setInstrument" && string.IsNullOrWhiteSpace(instrument))
+                return BridgeMessage.CreateError(message.RequestId, message.Action, "CONTEXT_MISSING", "Instrument name is required.");
+
+            var nextAccount = !string.IsNullOrWhiteSpace(account) ? account : _statePublisher.TrackedAccount;
+            var nextInstrument = !string.IsNullOrWhiteSpace(instrument) ? instrument : _statePublisher.TrackedInstrument;
+
+            _statePublisher.UpdateTracking(nextAccount, nextInstrument);
+
+            return BridgeMessage.CreateResponse(message.RequestId, message.Action, true, new
+            {
+                account = nextAccount,
+                instrument = nextInstrument
+            });
         }
 
         private void OnConnectionChanged(bool connected)
