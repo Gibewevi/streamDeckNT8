@@ -281,5 +281,4 @@ stream deck/
 - Support Stream Deck+ (encodeurs rotatifs)
 - Dashboard P&L enrichi
 - Macro-actions (séquences)
-#   s t r e a m D e c k N T 8  
- 
+# streamDeckNT8
