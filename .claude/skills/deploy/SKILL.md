@@ -65,6 +65,29 @@ Get-ChildItem "$repo\src\NinjaTrader.AddOn.StreamDeck" -Recurse -Filter *.cs |
   ForEach-Object { Copy-Item $_.FullName "$nt\$($_.Name)" -Force }
 ```
 
+### 4 bis. Purger les copies périmées — sinon rien ne compile
+
+La copie ci-dessus écrit **à plat**. Toute copie d'un déploiement antérieur restée dans un
+sous-dossier (`Models\`, `Services\`, `Utilities\`) déclare la **même classe dans le même
+namespace** : NinjaScript compile récursivement, on obtient des `CS0101` et **toute** la
+compilation NinjaScript échoue — y compris les indicateurs et stratégies du trader.
+
+Ce cas s'est produit : la compilation a échoué silencieusement, NinjaTrader a rechargé le DLL de
+la veille, et le code fraîchement déployé n'a jamais tourné.
+
+```powershell
+# Vérifier d'abord qu'aucune classe n'existe UNIQUEMENT en sous-dossier
+$flat = Get-ChildItem "$nt\*.cs" | Select-Object -ExpandProperty Name
+Get-ChildItem "$nt\*\*.cs" | Where-Object { $flat -notcontains $_.Name } | Select-Object FullName
+# (aucun résultat = suppression sans perte)
+
+Remove-Item -Recurse -Force "$nt\Models","$nt\Services","$nt\Utilities" -ErrorAction SilentlyContinue
+Get-ChildItem "$nt\*.bak-*" | Remove-Item -Force
+```
+
+Contrôle : `(Get-ChildItem $nt -Recurse -Filter *.cs).Count` doit égaler le nombre de `.cs` du
+projet, sans doublon.
+
 ### 5. Vérifier
 
 Vérifier **sur les fichiers déployés**, jamais sur ceux du dépôt :
@@ -92,7 +115,17 @@ annoncer, ne pas les exécuter d'autorité.
 - **Stream Deck** : le processus node en cours garde l'ancien code. Tant qu'il n'a pas redémarré,
   `plugin-AAAA-MM-JJ.log` n'apparaît pas — c'est le signe le plus fiable que le nouveau plugin
   n'est pas actif. Le redémarrage relance aussi le bridge automatiquement.
-- **NinjaTrader** : recompile les sources de l'add-on au démarrage et crée `addon-AAAA-MM-JJ.log`.
+- **NinjaTrader** : redémarrer **ne suffit pas**. NinjaTrader recharge `NinjaTrader.Custom.dll`
+  tel quel ; il faut **ouvrir l'éditeur NinjaScript et compiler (F5)** pour que les sources
+  déployées soient prises en compte. Vérification décisive :
+
+  ```powershell
+  Get-Item "$env:USERPROFILE\Documents\NinjaTrader 8\bin\Custom\NinjaTrader.Custom.dll" |
+    Select-Object LastWriteTime
+  ```
+
+  Si la date du DLL est antérieure à celle des `.cs` déployés, l'ancien code tourne toujours.
+  L'apparition de `addon-AAAA-MM-JJ.log` confirme que la nouvelle version est active.
 
 ## Contrôle final
 

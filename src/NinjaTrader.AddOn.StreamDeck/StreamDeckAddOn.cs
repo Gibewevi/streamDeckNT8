@@ -67,6 +67,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 _orderMonitor = new OrderMonitor(_bridgeClient);
                 _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor);
 
+                // Fills and cancellations refresh the deck on the spot instead of waiting for the
+                // next publish tick. Set here rather than injected so the monitor keeps no
+                // reference back to the publisher that owns it.
+                _orderMonitor.StateChanged = _statePublisher.PublishNow;
+
                 _bridgeClient.Start();
 
                 // Start state publishing with default tracking

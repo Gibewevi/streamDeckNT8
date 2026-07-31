@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "HDWXW6J4FIU=",
+  "dgSpecHash": "/Mk6kq8JkI0=",
   "success": true,
-  "projectFilePath": "c:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
+  "projectFilePath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\pixel\\.nuget\\packages\\microsoft.extensions.configuration\\8.0.0\\microsoft.extensions.configuration.8.0.0.nupkg.sha512",
     "C:\\Users\\pixel\\.nuget\\packages\\microsoft.extensions.configuration.abstractions\\8.0.0\\microsoft.extensions.configuration.abstractions.8.0.0.nupkg.sha512",

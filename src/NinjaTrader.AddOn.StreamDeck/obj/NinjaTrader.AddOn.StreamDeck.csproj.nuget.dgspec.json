@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "c:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj": {}
+    "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj": {}
   },
   "projects": {
-    "c:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj": {
+    "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "c:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
+        "projectUniqueName": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
         "projectName": "NinjaTrader.AddOn.StreamDeck",
-        "projectPath": "c:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
+        "projectPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
         "packagesPath": "C:\\Users\\pixel\\.nuget\\packages\\",
-        "outputPath": "c:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\obj\\",
+        "outputPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\pixel\\AppData\\Roaming\\NuGet\\NuGet.Config"

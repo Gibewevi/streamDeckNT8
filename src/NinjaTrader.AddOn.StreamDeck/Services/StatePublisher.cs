@@ -63,7 +63,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 _trackedInstrument = instrumentName;
 
             _stateTimer = new Timer(
-                _ => PublishState(),
+                _ => PublishState(false),
                 null,
                 TimeSpan.FromMilliseconds(1000), // Initial delay
                 TimeSpan.FromMilliseconds(_config.StateUpdateIntervalMs));
@@ -81,13 +81,45 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             SdLogger.Info("State tracking updated — {0} / {1}", accountName, instrumentName);
         }
 
-        private void PublishState()
+        /// <summary>
+        /// Publishes the state immediately instead of waiting for the next timer tick.
+        ///
+        /// A fill used to reach the deck only on the following tick — 250 ms on average, 500 ms
+        /// worst case, on top of the ~100 ms NinjaTrader takes to walk the order to Filled. The
+        /// trader pressed a key and then watched a stale position for a third of a second. Called
+        /// on the NinjaTrader event thread when a position or an order actually changes, so it
+        /// must never throw: an exception here escapes into NT8's event pipeline.
+        /// </summary>
+        public void PublishNow()
+        {
+            if (_disposed) return;
+
+            try
+            {
+                PublishState(true);
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Fail("StatePublish", ex, "Immediate state publish failed");
+            }
+        }
+
+        private void PublishState(bool immediate)
         {
             if (!_bridgeClient.IsConnected) return;
 
             // Skip this tick if the previous publish is still running
             if (Interlocked.CompareExchange(ref _publishing, 1, 0) != 0)
             {
+                // An immediate publish losing the race is not a stall: the publish already in
+                // flight is milliseconds old, and the timer republishes right after. Counting it
+                // would make the stall detector fire on healthy bursts of fills.
+                if (immediate)
+                {
+                    SdLogger.TraceEvent("StatePublish", "Immediate publish skipped — a publish is already in flight");
+                    return;
+                }
+
                 _consecutiveSkips++;
                 // The first skip is routine; a sustained run means the deck is frozen on stale
                 // data, which the trader sees as "the buttons stopped updating".
