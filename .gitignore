@@ -7,3 +7,11 @@ logs/
 
 # Note : bin/, obj/ et dist/ sont volontairement versionnés dans ce dépôt et le restent.
 # Les ajouter ici n'aurait aucun effet — .gitignore ne s'applique pas aux fichiers déjà suivis.
+
+# Hôte propriétaire (remplacement de l'application Stream Deck) : son node_modules représente
+# plusieurs milliers de fichiers, qui rendraient `git status` inexploitable.
+src/deck-host/node_modules/
+src/deck-host/dist/
+# Le bridge est livré dans le dossier de l'hôte (`npm run build:bridge`) : c'est une sortie de
+# publication régénérable, comme src/StreamDeckBridge/publish/.
+src/deck-host/bridge/

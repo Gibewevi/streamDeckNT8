@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradeDeck</title>
+<style>
+  :root {
+    --bg:#1e1e21; --card:#282a2e; --card-2:#313338; --card-3:#3b3d43;
+    --edge:#3a3c42; --edge-2:#4b4e56;
+    --txt:#f2f4f7; --dim:#a8aeb8; --faint:#7b818c;
+    --accent:#ffa257; --accent-soft:rgba(255,162,87,.22);
+    --up:#4ade80; --down:#f87171; --warn:#fbbf24;
+    --r:12px; --r-sm:8px;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Consolas,monospace;
+    --ease:cubic-bezier(.4,0,.2,1);
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body {
+    margin:0; color:var(--txt); overflow:hidden;
+    font:14px/1.5 "Inter",ui-sans-serif,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:grid; grid-template-columns:250px minmax(0,1fr); height:100vh;
+    /* Deux halos très légers : sans eux, le verre dépoli flouterait un aplat uni et
+       l'effet serait invisible. */
+    background:
+      radial-gradient(900px 520px at 22% -12%, rgba(255,162,87,.09), transparent 62%),
+      radial-gradient(760px 460px at 88% 112%, rgba(255,162,87,.06), transparent 60%),
+      var(--bg);
+  }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#4a4d55; border-radius:99px; border:3px solid transparent; background-clip:padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background:#5d616a; background-clip:padding-box; }
+  ::selection { background:var(--accent-soft); }
+  .lbl { font-size:10.5px; text-transform:uppercase; letter-spacing:1.1px; color:var(--faint); font-weight:600; }
+  .num { font-family:var(--mono); font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+
+  /* ---------------- Barre latérale ---------------- */
+  aside { border-right:1px solid var(--edge); display:flex; flex-direction:column; min-height:0; padding:14px; gap:11px; }
+
+  /* Identité et santé du système dans un même bloc : ce sont les deux choses
+     qu'on veut voir d'un coup d'œil en arrivant. */
+  .head { flex:none; border-radius:var(--r); background:var(--card); border:1px solid var(--edge); }
+  .brand { display:flex; align-items:center; gap:10px; padding:12px 13px; }
+  .mark {
+    width:32px; height:32px; border-radius:9px; flex:none; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(145deg,#ffb173,#ff8125); color:#fff;
+    box-shadow:0 2px 12px rgba(255,162,87,.5);
+  }
+  .mark svg { width:17px; height:17px; }
+  .brand .n { font-size:15px; font-weight:700; letter-spacing:-.02em; }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--down); flex:none; transition:.2s var(--ease); }
+  .dot.on { background:var(--up); box-shadow:0 0 0 3px rgba(74,222,128,.14); }
+
+  /* Santé du système, en discret à droite : information de veille, pas un titre. */
+  .statusbar { display:flex; align-items:center; gap:16px; margin-left:auto; }
+  .st { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--dim); }
+  .st em { font-style:normal; font-size:11px; color:var(--faint); font-family:var(--mono); }
+
+  .search { position:relative; flex:none; }
+  .search svg { position:absolute; left:11px; top:10px; width:14px; height:14px; color:var(--faint); pointer-events:none; }
+  .search input {
+    width:100%; height:34px; padding:0 11px 0 32px; border-radius:var(--r-sm); border:1px solid var(--edge);
+    background:var(--card); color:var(--txt); font:inherit; font-size:13px; transition:.15s var(--ease);
+  }
+  .search input::placeholder { color:var(--faint); }
+  .search input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+
+  /* Sans cette ligne, rien n'indique que la liste est déplaçable. */
+  .howto {
+    flex:none; display:flex; align-items:center; gap:7px; padding:8px 10px; border-radius:var(--r-sm);
+    background:var(--accent-soft); color:var(--accent); font-size:11px; line-height:1.35; font-weight:500;
+  }
+  .howto svg { width:13px; height:13px; flex:none; }
+
+  .palette { flex:1; overflow-y:auto; margin:0 -6px; padding:0 6px 4px; min-height:0; }
+  .grp { margin:13px 4px 6px; }
+  .grp:first-child { margin-top:2px; }
+  .act {
+    display:flex; align-items:center; gap:10px; padding:7px 8px; border-radius:var(--r-sm);
+    margin-bottom:3px; cursor:grab; user-select:none; border:1px solid transparent;
+    transition:background .14s var(--ease), border-color .14s var(--ease), transform .1s var(--ease);
+  }
+  .act:hover { background:var(--card); border-color:var(--edge-2); }
+  .act:active { cursor:grabbing; transform:scale(.98); }
+  .act .ico {
+    width:28px; height:28px; border-radius:7px; flex:none; display:flex; align-items:center; justify-content:center;
+    background:var(--card-2); border:1px solid var(--edge); color:var(--dim); transition:.14s var(--ease);
+  }
+  .act:hover .ico { background:var(--accent-soft); border-color:transparent; color:var(--accent); }
+  .act .ico svg { width:15px; height:15px; }
+  .act .n { font-size:12.5px; font-weight:500; flex:1; min-width:0; }
+  .act .grip { width:12px; color:var(--edge-2); opacity:0; transition:.14s var(--ease); flex:none; }
+  .act:hover .grip { opacity:1; }
+  .act .grip svg { width:12px; height:12px; display:block; }
+
+  /* ---------------- Zone principale ---------------- */
+  .main { display:flex; flex-direction:column; min-width:0; min-height:0; }
+  .top { flex:none; min-height:62px; display:flex; align-items:center; gap:18px; padding:0 22px; border-bottom:1px solid var(--edge); }
+  .crumb { font-size:12px; color:var(--faint); }
+  .crumb b { color:var(--accent); font-weight:500; }
+
+  .bright { display:flex; align-items:center; gap:10px; height:32px; padding:0 12px; border-radius:var(--r-sm); background:var(--card); border:1px solid var(--edge); flex:none; }
+  .bright svg { width:13px; height:13px; color:var(--accent); }
+  .bright .pct { font-size:11px; color:var(--dim); font-family:var(--mono); min-width:30px; text-align:right; }
+  /* La portion parcourue est peinte en orange : sans elle, seule la pastille était colorée et
+     le niveau ne se lisait pas. `--pct` est tenu à jour par paintBright(). */
+  input[type=range] {
+    -webkit-appearance:none; width:76px; height:4px; border-radius:99px; cursor:pointer;
+    background:linear-gradient(to right, var(--accent) var(--pct,70%), rgba(255,255,255,.15) var(--pct,70%));
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--accent); cursor:pointer;
+    box-shadow:0 0 0 3px rgba(255,162,87,.28), 0 1px 5px rgba(0,0,0,.55); transition:box-shadow .15s var(--ease);
+  }
+  input[type=range]::-webkit-slider-thumb:hover { box-shadow:0 0 0 5px rgba(255,162,87,.34), 0 1px 5px rgba(0,0,0,.55); }
+
+  .center { flex:1; overflow:auto; padding:22px; display:flex; flex-direction:column; align-items:center; }
+
+  /* ---------------- Carte deck ---------------- */
+  /* `margin:auto 0` plutôt que `justify-content:center` : avec `overflow:auto`, le centrage par
+     justify-content rogne le haut du contenu dès qu'il dépasse et le rend inatteignable au
+     défilement. Les marges automatiques retombent à 0 dans ce cas. */
+  /* Verre dépoli : la carte laisse passer le fond au lieu de poser un noir opaque.
+     `backdrop-filter` n'agit que si aucun ancêtre opaque ne s'interpose — d'où le fond
+     transparent de .center et .main. */
+  .card {
+    border-radius:var(--r); width:fit-content; min-width:620px; margin:auto 0;
+    background:rgba(255,255,255,.05);
+    backdrop-filter:blur(28px) saturate(175%);
+    -webkit-backdrop-filter:blur(28px) saturate(175%);
+    border:1px solid rgba(255,255,255,.10);
+    box-shadow:0 26px 64px -26px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.09);
+  }
+  .card-head { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid rgba(255,255,255,.08); }
+  /* Creux plus marqué : c'est le contraste avec ce fond qui fait ressortir l'onglet actif. */
+  .seg { display:flex; gap:2px; padding:2px; border-radius:99px; background:rgba(0,0,0,.38); margin-left:auto; }
+  .tab {
+    height:26px; padding:0 11px; border-radius:99px; border:none; background:none; cursor:pointer; font:inherit;
+    font-size:12px; color:var(--dim); white-space:nowrap; transition:.15s var(--ease);
+    display:flex; align-items:center; gap:5px;
+  }
+  .tab:hover { color:var(--txt); }
+  /* Texte sombre sur l'orange clair : en blanc le rapport de contraste tombe sous 2:1 et la
+     page sélectionnée devient illisible. En sombre il dépasse 8:1. */
+  .tab.on { background:var(--accent); color:#241a12; font-weight:700; box-shadow:0 2px 16px rgba(255,162,87,.55); }
+  .tab.add { color:var(--faint); font-size:15px; padding:0 11px; }
+  /* Sans cette croix, la suppression d'une page n'était accessible que par un double-clic
+     puis un nom vide — introuvable. */
+  .tx {
+    width:14px; height:14px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    opacity:0; margin-right:-3px; transition:.13s var(--ease); flex:none;
+  }
+  .tab:hover .tx { opacity:.55; }
+  .tx:hover { opacity:1 !important; background:rgba(0,0,0,.28); }
+  .tx svg { width:8px; height:8px; }
+
+  /* Aucune surface propre ici : la face du boîtier, c'est le verre de la carte. Un fond
+     opaque annulerait la transparence. */
+  .deck-wrap {
+    padding:30px; display:flex; flex-direction:column; align-items:center; gap:16px;
+    border-radius:0 0 var(--r) var(--r);
+  }
+  .deck { display:grid; gap:11px; }
+  .key {
+    aspect-ratio:1; width:94px; border-radius:11px; background:#000; cursor:pointer; position:relative;
+    overflow:visible; outline:2px solid transparent; outline-offset:2px;
+    transition:outline-color .14s var(--ease), filter .14s var(--ease);
+  }
+  .key img { width:100%; height:100%; display:block; border-radius:11px; pointer-events:none; }
+  /* Aucune transformation au survol : déplacer la touche décalerait le bouton de retrait sous
+     le curseur, ce qui faisait perdre le survol et sauter le bouton. Le retour visuel passe
+     donc par le contour et la luminosité, qui n'affectent pas la géométrie. */
+  .key:hover { outline-color:rgba(255,255,255,.20); filter:brightness(1.1); }
+  /* Un emplacement libre se creuse dans le verre plutôt que d'y poser un carré gris. */
+  .key.empty { background:rgba(0,0,0,.28); box-shadow:inset 0 0 0 1px rgba(255,255,255,.08); display:flex; align-items:center; justify-content:center; }
+  .key.empty::after {
+    content:""; width:14px; height:14px; opacity:.35; background:var(--faint);
+    -webkit-mask:linear-gradient(#000,#000) center/100% 1.5px no-repeat,linear-gradient(#000,#000) center/1.5px 100% no-repeat;
+  }
+  .key.sel { outline-color:var(--accent); }
+  /* Cible de dépôt : bordure claire et franche, SANS transformation. Un scale ici modifierait
+     la géométrie sous le curseur et relancerait des dragenter/dragleave en boucle. */
+  .key.drop { outline-color:#fff; box-shadow:0 0 0 5px rgba(255,255,255,.14); }
+  .key.dragging { opacity:.3; }
+
+  /* Pendant un glisser, tout ce qui bouge ou capte le pointeur fait clignoter la cible :
+     on fige le survol et on neutralise les enfants de la touche. */
+  body.dnd .key { transition:outline-color .1s var(--ease), box-shadow .1s var(--ease); }
+  body.dnd .key:hover { filter:none; outline-color:transparent; }
+  body.dnd .kx { opacity:0 !important; pointer-events:none; }
+  /* Placé DANS la touche : à cheval sur le bord, le pointeur l'atteignait avant d'entrer dans
+     la touche, ce qui déclenchait un cycle survol/perte de survol. Ni translation ni mise à
+     l'échelle non plus — le bouton ne doit jamais bouger sous le curseur. */
+  .kx {
+    position:absolute; top:5px; right:5px; width:22px; height:22px; border-radius:50%;
+    background:var(--down); color:#fff; border:none; cursor:pointer; padding:0;
+    display:flex; align-items:center; justify-content:center;
+    opacity:0; pointer-events:none;   /* invisible ET inatteignable tant que la touche n'est pas survolée */
+    transition:opacity .13s var(--ease), background .13s var(--ease);
+    z-index:2; box-shadow:0 2px 7px rgba(0,0,0,.65);
+  }
+  .key:hover .kx { opacity:1; pointer-events:auto; }
+  .kx:hover { background:#ff5a5a; }
+  .kx svg { width:11px; height:11px; }
+
+  .hint { font-size:11.5px; color:var(--faint); text-align:center; transition:.2s var(--ease); }
+  .hint.warn { color:var(--warn); }
+  kbd { padding:1px 5px; border-radius:4px; background:var(--card-3); font:inherit; font-size:10.5px; color:var(--dim); }
+
+  /* ---------------- Tiroir de réglages ---------------- */
+  .drawer {
+    position:fixed; top:0; right:0; bottom:0; width:332px; z-index:40;
+    background:var(--bg); border-left:1px solid var(--edge);
+    display:flex; flex-direction:column;
+    transform:translateX(100%); transition:transform .26s var(--ease);
+    box-shadow:-18px 0 40px -20px rgba(0,0,0,.8);
+  }
+  .drawer.open { transform:none; }
+  .drawer-head { flex:none; display:flex; align-items:center; gap:10px; height:62px; padding:0 18px; border-bottom:1px solid var(--edge); }
+  .saved { font-size:10.5px; color:var(--up); font-weight:600; opacity:0; transition:.28s var(--ease); }
+  .saved.show { opacity:1; }
+  .close {
+    margin-left:auto; width:28px; height:28px; border-radius:7px; border:1px solid var(--edge);
+    background:var(--card); color:var(--dim); cursor:pointer; padding:0;
+    display:flex; align-items:center; justify-content:center; transition:.14s var(--ease);
+  }
+  .close:hover { border-color:var(--edge-2); color:var(--txt); }
+  .close svg { width:12px; height:12px; }
+  .drawer-body { flex:1; overflow-y:auto; padding:18px; }
+
+  .insp-title { display:flex; align-items:center; gap:10px; font-size:15.5px; font-weight:600; letter-spacing:-.02em; }
+  .insp-title .ico { width:30px; height:30px; border-radius:8px; flex:none; display:flex; align-items:center; justify-content:center; background:var(--accent-soft); color:var(--accent); }
+  .insp-title .ico svg { width:16px; height:16px; }
+  .insp-title .sub { font-size:11px; color:var(--faint); font-weight:500; margin-top:1px; }
+
+  .field { margin-top:16px; }
+  label { display:block; font-size:11.5px; color:var(--dim); margin-bottom:6px; font-weight:500; }
+  input[type=text], input[type=number], select, textarea {
+    width:100%; height:35px; padding:0 11px; background:var(--card); color:var(--txt);
+    border:1px solid var(--edge); border-radius:var(--r-sm); font:inherit; font-size:13px; transition:.15s var(--ease);
+  }
+  input[type=number] { font-family:var(--mono); }
+  select {
+    appearance:none; cursor:pointer; padding-right:30px;
+    background-image:linear-gradient(45deg,transparent 50%,var(--faint) 50%),linear-gradient(135deg,var(--faint) 50%,transparent 50%);
+    background-position:calc(100% - 15px) 15px,calc(100% - 10px) 15px; background-size:5px 5px; background-repeat:no-repeat;
+  }
+  textarea { height:auto; min-height:74px; padding:9px 11px; resize:vertical; font-family:var(--mono); font-size:12.5px; line-height:1.55; }
+  input:hover, select:hover, textarea:hover { border-color:var(--edge-2); }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  .help { font-size:11px; color:var(--faint); margin-top:5px; line-height:1.45; }
+
+  .empty { text-align:center; color:var(--faint); font-size:12.5px; line-height:1.6; padding:34px 14px; }
+
+  .banner { position:fixed; top:0; left:0; right:0; z-index:60; padding:8px; text-align:center; font-size:12.5px; font-weight:600; color:#141414; background:var(--warn); transform:translateY(-100%); transition:transform .28s var(--ease); }
+  .banner.show { transform:none; }
+</style>
+</head>
+<body>
+
+<div class="banner" id="banner">Hôte déconnecté — reconnexion en cours…</div>
+
+<aside>
+  <div class="head">
+    <div class="brand">
+      <span class="mark"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg></span>
+      <span class="n">TradeDeck</span>
+    </div>
+  </div>
+
+  <div class="search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <input id="q" placeholder="Rechercher une action…" autocomplete="off" spellcheck="false">
+  </div>
+
+  <div class="howto">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+    Glissez sur une touche, ou cliquez pour l'ajouter
+  </div>
+
+  <div class="palette" id="palette"></div>
+</aside>
+
+<div class="main">
+  <div class="top">
+    <div class="crumb">Configuration <b>·</b> Deck</div>
+    <div class="statusbar">
+      <span class="st"><span class="dot" id="d-dev"></span>Boîtier<em id="r-dev">—</em></span>
+      <span class="st"><span class="dot" id="d-br"></span>Bridge<em id="r-br">—</em></span>
+      <span class="st"><span class="dot" id="d-nt"></span>NinjaTrader<em id="r-nt">—</em></span>
+    </div>
+    <div class="bright">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      <input type="range" id="bright" min="10" max="100">
+      <span class="pct" id="brightval">—</span>
+    </div>
+  </div>
+
+  <div class="center">
+    <div class="card">
+      <div class="card-head">
+        <span class="lbl">Pages</span>
+        <div class="seg" id="tabs"></div>
+      </div>
+      <div class="deck-wrap">
+        <div class="deck" id="deck"></div>
+        <div class="hint" id="hint">Glissez une action · Déplacez pour réorganiser · <kbd>Suppr</kbd> pour retirer</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <span class="lbl">Réglages</span>
+    <span class="saved" id="saved">Enregistré</span>
+    <button class="close" id="close" title="Fermer"></button>
+  </div>
+  <div class="drawer-body" id="insp"></div>
+</div>
+
+<script>
+const $ = (i) => document.getElementById(i);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+
+/* Une icône par action : dans une liste de 24 entrées, le libellé seul se lit mal. */
+const P = {
+  up:'<path d="M12 19V5M5 12l7-7 7 7"/>', down:'<path d="M12 5v14M19 12l-7 7-7-7"/>',
+  limitUp:'<path d="M12 16V6M8 10l4-4 4 4M4 20h16"/>', limitDn:'<path d="M12 8v10M8 14l4 4 4-4M4 4h16"/>',
+  square:'<rect x="5" y="5" width="14" height="14" rx="2"/>', cross:'<path d="M18 6L6 18M6 6l12 12"/>',
+  swap:'<path d="M17 3l4 4-4 4M21 7H8M7 21l-4-4 4-4M3 17h13"/>',
+  shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  chevUp:'<path d="M18 15l-6-6-6 6"/>', chevDn:'<path d="M6 9l6 6 6-6"/>',
+  plus:'<path d="M12 5v14M5 12h14"/>', minus:'<path d="M5 12h14"/>',
+  reset:'<path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.7L3 8"/><path d="M3 3v5h5"/>',
+  tag:'<path d="M20.6 13.4l-7.2 7.2a2 2 0 01-2.8 0L3 13V3h10l7.6 7.6a2 2 0 010 2.8z"/><circle cx="7.5" cy="7.5" r="1.2"/>',
+  user:'<path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  pulse:'<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  layers:'<path d="M12 2l9 5-9 5-9-5 9-5z"/><path d="M3 12l9 5 9-5M3 17l9 5 9-5"/>',
+  cursor:'<path d="M5 3l14 8-6 1.5L10 19z"/>',
+  grip:'<circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/>',
+};
+const N = 'com.trader.ninjatrader.';
+const ICONS = {
+  [N+'buymarket']:P.up, [N+'sellmarket']:P.down, [N+'buylimit']:P.limitUp, [N+'selllimit']:P.limitDn,
+  [N+'flatten']:P.square, [N+'cancelorders']:P.square, [N+'cancelworkingorders']:P.cross,
+  [N+'reverse']:P.swap, [N+'breakeven']:P.shield,
+  [N+'stopplus']:P.chevUp, [N+'stopminus']:P.chevDn,
+  [N+'targetplus']:P.chevUp, [N+'targetminus']:P.chevDn,
+  [N+'beplus']:P.chevUp, [N+'beminus']:P.chevDn,
+  [N+'qtyplus']:P.plus, [N+'qtyminus']:P.minus, [N+'qtyreset']:P.reset,
+  [N+'instrument']:P.tag, [N+'account']:P.user,
+  [N+'status']:P.pulse, [N+'cooldown']:P.clock, [N+'safety']:P.shield,
+  'host.navigate':P.layers,
+};
+const iconOf = (id) => svg(ICONS[id] ?? P.square);
+$('close').innerHTML = svg(P.cross);
+
+let catalog = [], byId = new Map(), layout = null, snap = null, sel = null, filter = '';
+let ws = null, saveTimer = null, hintTimer = null;
+
+/* ---------------- Connexion ---------------- */
+function connect() {
+  ws = new WebSocket(`ws://${location.host}`);
+  ws.onopen = () => $('banner').classList.remove('show');
+  ws.onclose = () => { $('banner').classList.add('show'); setTimeout(connect, 1500); };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'hello') {
+      catalog = m.catalog; byId = new Map(catalog.map(a => [a.id, a]));
+      layout = m.layout; snap = m.snapshot;
+      $('bright').value = layout.brightness ?? 80;
+      paintBright();
+      renderPalette(); renderAll();
+    } else if (m.type === 'layout') {
+      layout = m.layout; renderTabs(); renderDeck();
+      // Ne pas redessiner pendant une saisie : cela volerait le focus.
+      if (!inspHasFocus()) renderInsp();
+    } else if (m.type === 'snapshot') {
+      const avant = snap?.currentPage;
+      snap = m.snapshot;
+      // La page courante est décidée par l'hôte (clic sur un onglet, mais aussi macro de
+      // navigation pressée sur le boîtier). Sans ce redessin, l'onglet actif restait figé sur
+      // celui rendu au chargement. On ne le refait qu'au changement : le snapshot arrive toutes
+      // les 2 s et rerendre en continu casserait le survol.
+      if (snap.currentPage !== avant) renderTabs();
+      renderDeck(); renderStatus();
+    }
+  };
+}
+const inspHasFocus = () => $('insp').contains(document.activeElement);
+
+function save(now = false) {
+  clearTimeout(saveTimer);
+  const go = () => {
+    ws.send(JSON.stringify({ type: 'saveLayout', layout }));
+    $('saved').classList.add('show');
+    setTimeout(() => $('saved').classList.remove('show'), 1200);
+  };
+  now ? go() : (saveTimer = setTimeout(go, 260));
+}
+
+const HINT = 'Glissez une action · Déplacez pour réorganiser · <kbd>Suppr</kbd> pour retirer';
+function flash(msg) {
+  clearTimeout(hintTimer);
+  $('hint').innerHTML = msg; $('hint').classList.add('warn');
+  hintTimer = setTimeout(() => { $('hint').innerHTML = HINT; $('hint').classList.remove('warn'); }, 2600);
+}
+
+/* Le tiroir ne s'ouvre que s'il a quelque chose à montrer : une action sans réglage
+   n'a aucune raison d'occuper l'écran. */
+const hasSettings = (id) => (byId.get(id)?.settings?.length ?? 0) > 0;
+const openDrawer = () => $('drawer').classList.add('open');
+const closeDrawer = () => $('drawer').classList.remove('open');
+$('close').onclick = closeDrawer;
+
+function select(i) {
+  sel = i;
+  const a = page().slots[String(i)];
+  a && hasSettings(a.actionId) ? openDrawer() : closeDrawer();
+  renderDeck(); renderInsp();
+}
+
+/* ---------------- Palette ---------------- */
+function renderPalette() {
+  const q = filter.trim().toLowerCase();
+  const shown = catalog.filter(a => !q || a.name.toLowerCase().includes(q)
+    || a.description.toLowerCase().includes(q) || a.group.toLowerCase().includes(q));
+  const groups = {};
+  for (const a of shown) (groups[a.group] ||= []).push(a);
+
+  $('palette').innerHTML = !shown.length
+    ? `<div class="empty">Aucune action ne correspond.</div>`
+    : Object.entries(groups).map(([g, items]) => `
+      <div class="grp lbl">${esc(g)}</div>
+      ${items.map(a => `<div class="act" draggable="true" data-id="${esc(a.id)}" title="${esc(a.description)}">
+        <span class="ico">${iconOf(a.id)}</span><span class="n">${esc(a.name)}</span>
+        <span class="grip">${svg(P.grip)}</span></div>`).join('')}`).join('');
+
+  for (const el of $('palette').querySelectorAll('.act')) {
+    el.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', 'new:' + el.dataset.id);
+      e.dataTransfer.effectAllowed = 'move';
+      beginDrag();
+    });
+    el.addEventListener('dragend', endDrag);
+    // Ajout au clic : viser un emplacement libre à la souris est inutilement pénible.
+    el.addEventListener('click', () => addToFirstFree(el.dataset.id));
+  }
+}
+$('q').addEventListener('input', e => { filter = e.target.value; renderPalette(); });
+
+function addToFirstFree(id) {
+  if (!byId.has(id) || !snap) return;
+  const slots = page().slots;
+  for (let i = 0; i < snap.columns * snap.rows; i++) {
+    if (!slots[String(i)]) {
+      slots[String(i)] = { actionId: id, settings: defaults(id) };
+      save(true); select(i);
+      return;
+    }
+  }
+  flash('Aucun emplacement libre sur cette page — ajoutez-en une, ou retirez une touche.');
+}
+
+/* ---------------- Pages ---------------- */
+const pageIdx = () => Math.min(snap?.currentPage ?? 0, (layout?.pages.length ?? 1) - 1);
+const page = () => layout.pages[pageIdx()];
+
+function renderTabs() {
+  const multi = layout.pages.length > 1;
+  $('tabs').innerHTML = layout.pages.map((p, i) =>
+    `<button class="tab ${i === pageIdx() ? 'on' : ''}" data-p="${i}" title="Double-clic pour renommer">
+      ${esc(p.name || 'Page ' + (i + 1))}
+      ${multi ? `<span class="tx" data-del="${i}" title="Supprimer la page">${svg(P.cross)}</span>` : ''}
+    </button>`).join('') + `<button class="tab add" data-add="1" title="Ajouter une page">+</button>`;
+
+  for (const el of $('tabs').querySelectorAll('.tab')) {
+    el.onclick = () => {
+      if (el.dataset.add) { layout.pages.push({ name: 'Page ' + (layout.pages.length + 1), slots: {} }); save(true); }
+      else { ws.send(JSON.stringify({ type: 'setPage', page: +el.dataset.p })); sel = null; closeDrawer(); }
+    };
+    el.ondblclick = () => {
+      if (el.dataset.add) return;
+      const i = +el.dataset.p;
+      const nom = prompt('Nom de la page', layout.pages[i].name);
+      if (nom === null) return;
+      layout.pages[i].name = nom.trim() || 'Page ' + (i + 1);
+      save(true);
+    };
+  }
+  for (const x of $('tabs').querySelectorAll('.tx')) {
+    x.onclick = (e) => {
+      e.stopPropagation();
+      const i = +x.dataset.del, p = layout.pages[i];
+      const n = Object.keys(p.slots || {}).length;
+      // On ne confirme que si la page contient quelque chose à perdre.
+      if (n && !confirm(`Supprimer « ${p.name} » et ses ${n} touche(s) ?`)) return;
+      layout.pages.splice(i, 1);
+      sel = null; closeDrawer();
+      if (pageIdx() >= layout.pages.length) ws.send(JSON.stringify({ type: 'setPage', page: layout.pages.length - 1 }));
+      save(true);
+    };
+  }
+}
+
+/* ---------------- Glisser-déposer ----------------
+   Une seule cible active à la fois, suivie ici plutôt que par des `dragleave` sur chaque
+   touche : c'est ce qui garantit une bordure stable tant que le pointeur reste sur la même
+   case, quel que soit l'enfant survolé. */
+let dropEl = null;
+function setDrop(el) {
+  if (dropEl === el) return;            // idempotent : `dragover` se répète des dizaines de fois
+  dropEl?.classList.remove('drop');
+  dropEl = el;
+  el?.classList.add('drop');
+}
+const beginDrag = () => document.body.classList.add('dnd');
+const endDrag = () => { document.body.classList.remove('dnd'); setDrop(null); };
+
+// Sortie du deck, abandon du glisser, ou dépôt hors cible : la bordure doit disparaître.
+$('deck').addEventListener('dragleave', (e) => {
+  if (!$('deck').contains(e.relatedTarget)) setDrop(null);
+});
+document.addEventListener('dragend', endDrag);
+// preventDefault est indispensable : sans lui, un dépôt hors cible fait quitter l'interface au
+// navigateur. Mais autoriser partout tromperait — le curseur passe donc à « interdit » dès qu'on
+// n'est pas sur une touche, en cohérence avec la bordure.
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  if (!e.target?.closest?.('.key')) e.dataTransfer.dropEffect = 'none';
+});
+document.addEventListener('drop', (e) => { e.preventDefault(); endDrag(); });
+
+/* ---------------- Deck ---------------- */
+function renderDeck() {
+  if (!layout || !snap) return;
+  const { columns, rows } = snap, deck = $('deck'), slots = page().slots || {};
+  deck.style.gridTemplateColumns = `repeat(${columns},94px)`;
+
+  deck.innerHTML = Array.from({ length: columns * rows }, (_, i) => {
+    const a = slots[String(i)], img = snap.previews[String(i)];
+    const cls = ['key', a ? '' : 'empty', sel === i ? 'sel' : ''].filter(Boolean).join(' ');
+    const t = a ? (byId.get(a.actionId)?.name ?? a.actionId) : 'Emplacement libre';
+    return `<div class="${cls}" data-s="${i}" draggable="${!!a}" title="${esc(t)}">
+      ${img ? `<img src="${img}" alt="">` : ''}
+      ${a ? `<button class="kx" data-x="${i}" title="Retirer">${svg(P.cross)}</button>` : ''}</div>`;
+  }).join('');
+
+  for (const el of deck.querySelectorAll('.key')) {
+    const s = +el.dataset.s;
+    el.onclick = () => select(s);
+    el.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', 'move:' + s);
+      e.dataTransfer.effectAllowed = 'move';
+      el.classList.add('dragging'); beginDrag();
+    });
+    el.addEventListener('dragend', () => { el.classList.remove('dragging'); endDrag(); });
+    // Pas de `dragleave` par touche : il se déclenche aussi en entrant dans un enfant
+    // (l'image), ce qui retirait la bordure puis la remettait — le clignotement.
+    // La cible courante est suivie globalement et ne change qu'en changeant de touche.
+    el.addEventListener('dragenter', e => { e.preventDefault(); setDrop(el); });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      // Sans cette ligne le curseur alterne entre autorisé et interdit.
+      e.dataTransfer.dropEffect = 'move';
+      setDrop(el);
+    });
+    el.addEventListener('drop', e => {
+      e.preventDefault(); endDrag();
+      const d = e.dataTransfer.getData('text/plain'), sl = page().slots;
+      if (d.startsWith('new:')) {
+        const id = d.slice(4);
+        if (!byId.has(id)) return;
+        sl[String(s)] = { actionId: id, settings: defaults(id) };
+      } else if (d.startsWith('move:')) {
+        const from = +d.slice(5);
+        if (from === s) return;
+        // Échange : déposer sur une touche occupée ne doit pas la faire disparaître.
+        const a = sl[String(from)], b = sl[String(s)];
+        if (b) sl[String(from)] = b; else delete sl[String(from)];
+        sl[String(s)] = a;
+      }
+      save(true); select(s);
+    });
+  }
+  for (const b of deck.querySelectorAll('.kx')) {
+    b.onclick = (e) => { e.stopPropagation(); removeSlot(+b.dataset.x); };
+    b.setAttribute('draggable', 'false');
+  }
+}
+
+function removeSlot(i) {
+  delete page().slots[String(i)];
+  if (sel === i) { sel = null; closeDrawer(); }
+  save(true); renderDeck(); renderInsp();
+}
+
+function defaults(id) {
+  const d = {};
+  for (const f of (byId.get(id)?.settings ?? []))
+    d[f.key] = f.type === 'number' ? (f.min ?? 0) : (f.type === 'select' ? (f.options?.[0]?.value ?? '') : '');
+  return d;
+}
+
+/* ---------------- Réglages ---------------- */
+function renderInsp() {
+  const box = $('insp');
+  const a = sel === null ? null : page().slots[String(sel)];
+  if (!a) { box.innerHTML = `<div class="empty">Sélectionnez une touche réglable.</div>`; return; }
+
+  const def = byId.get(a.actionId), fields = def?.settings ?? [];
+  a.settings ||= {};
+
+  // En-tête minimal : de quelle touche il s'agit, rien de plus. La description est déjà
+  // dans l'infobulle de la palette et n'apporte rien une fois la touche posée.
+  box.innerHTML = `
+    <div class="insp-title">
+      <span class="ico">${iconOf(a.actionId)}</span>
+      <span>${esc(def?.name ?? a.actionId)}<div class="sub">Touche ${sel + 1}</div></span>
+    </div>
+    ${fields.map(f => field(f, a.settings[f.key])).join('')
+      || '<div class="empty">Aucun réglage pour cette action.</div>'}`;
+
+  for (const el of box.querySelectorAll('[data-f]')) {
+    const f = fields.find(x => x.key === el.dataset.f);
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      // Relire l'affectation à chaque frappe, et non celle capturée au rendu : après chaque
+      // enregistrement le serveur rediffuse le layout et le client remplace son objet. Une
+      // référence capturée pointerait alors sur un objet détaché, et les frappes suivantes
+      // seraient écrites dans le vide — c'est ce qui empêchait de saisir une valeur à deux
+      // chiffres.
+      const cur = sel === null ? null : page().slots[String(sel)];
+      if (!cur || cur.actionId !== a.actionId) return;
+      (cur.settings ||= {})[f.key] = f.type === 'number' ? clamp(Number(el.value), f) : el.value;
+      save();
+    });
+  }
+}
+
+const clamp = (v, f) => Number.isFinite(v) ? Math.min(f.max ?? Infinity, Math.max(f.min ?? -Infinity, v)) : (f.min ?? 0);
+
+/** Les destinations dépendent des pages réelles : le catalogue ne peut pas les connaître. */
+function optionsFor(f) {
+  if (f.key !== 'targetPage') return f.options;
+  return [...f.options, ...layout.pages.map((p, i) => ({ value: String(i + 1), label: p.name || `Page ${i + 1}` }))];
+}
+
+function field(f, v) {
+  const val = v ?? '';
+  let ctl;
+  if (f.type === 'select') {
+    ctl = `<select data-f="${esc(f.key)}">${optionsFor(f).map(o =>
+      `<option value="${esc(o.value)}"${String(o.value) === String(val) ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
+  } else if (f.type === 'textarea') {
+    ctl = `<textarea data-f="${esc(f.key)}" placeholder="${esc(f.placeholder)}">${esc(val)}</textarea>`;
+  } else {
+    const lim = f.type === 'number' ? `min="${f.min ?? ''}" max="${f.max ?? ''}"` : '';
+    ctl = `<input type="${f.type}" data-f="${esc(f.key)}" value="${esc(val)}" placeholder="${esc(f.placeholder)}" ${lim}>`;
+  }
+  return `<div class="field"><label>${esc(f.label)}</label>${ctl}${f.help ? `<div class="help">${esc(f.help)}</div>` : ''}</div>`;
+}
+
+/* ---------------- État ---------------- */
+function renderStatus() {
+  if (!snap) return;
+  $('d-dev').classList.toggle('on', snap.deviceConnected);
+  $('d-br').classList.toggle('on', snap.bridgeConnected);
+  $('d-nt').classList.toggle('on', snap.ntConnected);
+  $('r-dev').textContent = snap.deviceConnected ? `${snap.columns}×${snap.rows}` : 'absent';
+  $('r-br').textContent = snap.bridgeConnected ? 'ok' : 'hors ligne';
+
+  // La temporisation est la seule information d'état qui mérite d'apparaître ici : elle
+  // conditionne l'acceptation des ordres.
+  const s = snap.state;
+  $('r-nt').textContent = s?.cooldownActive ? `${s.cooldownSecondsRemaining}s` : snap.ntConnected ? 'ok' : 'hors ligne';
+}
+
+/* ---------------- Divers ---------------- */
+/** Repeint la portion parcourue et le libellé : un `input[type=range]` ne le fait pas seul. */
+function paintBright() {
+  const el = $('bright');
+  const pct = ((el.value - el.min) / (el.max - el.min)) * 100;
+  el.style.setProperty('--pct', pct + '%');
+  $('brightval').textContent = el.value + '%';
+}
+$('bright').addEventListener('input', e => {
+  layout.brightness = +e.target.value;
+  paintBright();
+  save();
+});
+
+document.addEventListener('keydown', e => {
+  if (inspHasFocus() || e.target.id === 'q') return;
+  if (e.key === 'Escape') { sel = null; closeDrawer(); renderDeck(); renderInsp(); }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && sel !== null && page().slots[String(sel)]) removeSlot(sel);
+});
+
+function renderAll() { renderTabs(); renderDeck(); renderInsp(); renderStatus(); }
+connect();
+</script>
+</body>
+</html>

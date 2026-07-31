@@ -68,7 +68,8 @@
       "Bash(taskkill //F //PID 24116)",
       "Bash(taskkill //IM \"escape-node-job.exe\" //F)",
       "Read(//c/Users/pixel/AppData/**)",
-      "Bash(start \"\" \"C:/Users/pixel/Desktop/stream deck/src/StreamDeckBridge/bin/Debug/net8.0/StreamDeckBridge.exe\")"
+      "Bash(start \"\" \"C:/Users/pixel/Desktop/stream deck/src/StreamDeckBridge/bin/Debug/net8.0/StreamDeckBridge.exe\")",
+      "PowerShell(Remove-Item -Recurse -Force \"C:\\Users\\pixel\\Documents\\NinjaTrader 8\\bin\\Custom\\AddOns\\StreamDeck\\*)"
     ],
     "additionalDirectories": [
       "C:\\Users\\pixel\\Desktop\\stream deck\\$USERPROFILE\\Documents\\NinjaTrader 8\\bin\\Custom\\AddOns",
