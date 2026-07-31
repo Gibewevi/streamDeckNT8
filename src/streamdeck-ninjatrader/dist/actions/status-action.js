@@ -56,6 +56,11 @@ export class StatusDisplayAction extends BaseAction {
             case 'connection':
                 bgColor = state.ntConnected ? Colors.buyGreen : Colors.sellRed;
                 break;
+            case 'safety': {
+                const safety = state.safety;
+                bgColor = !safety?.armed ? Colors.disabled : safety.entriesBlocked ? Colors.sellRed : Colors.buyGreen;
+                break;
+            }
             default:
                 bgColor = Colors.statusDark;
         }
@@ -96,6 +101,17 @@ export class StatusDisplayAction extends BaseAction {
             case 'connection': {
                 const nt = state.ntConnected ? '🟢' : '🔴';
                 return { title: `NT ${nt}`, subtitle: state.ntConnected ? 'Connected' : 'Disconnected' };
+            }
+            case 'safety': {
+                const safety = state.safety;
+                if (!safety?.armed)
+                    return { title: 'OFF', subtitle: 'Safety' };
+                const trades = safety.maxTradesWhenLosing > 0
+                    ? `${safety.tradeCount}/${safety.maxTradesWhenLosing}`
+                    : `${safety.tradeCount}`;
+                // No '&' here: this string is injected as raw SVG text
+                const pnl = safety.pnlAvailable ? `${Math.round(safety.sessionPnl)}` : '?';
+                return { title: trades, subtitle: `PnL ${pnl}` };
             }
             default:
                 return { title: '?', subtitle: '' };

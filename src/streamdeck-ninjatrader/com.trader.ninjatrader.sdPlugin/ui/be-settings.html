@@ -22,21 +22,14 @@
     <div class="hint">0 = exact break-even. 2 = BE + 2 ticks profit.</div>
   </div>
 
+  <script src="pi.js"></script>
   <script>
     const $offset = document.getElementById('offsetTicks');
 
-    window.addEventListener('message', (event) => {
-      if (event.data?.type === 'loadSettings') {
-        const s = event.data.settings || {};
-        if (s.offsetTicks !== undefined) $offset.value = s.offsetTicks;
-      }
-    });
+    PI.onSettings((s) => { $offset.value = s.offsetTicks ?? 0; });
 
     $offset.addEventListener('change', () => {
-      window.parent.postMessage({
-        type: 'saveSettings',
-        settings: { offsetTicks: parseInt($offset.value, 10) || 0 }
-      }, '*');
+      PI.save({ offsetTicks: parseInt($offset.value, 10) || 0 });
     });
   </script>
 </body>

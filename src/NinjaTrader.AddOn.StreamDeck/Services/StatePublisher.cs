@@ -17,10 +17,24 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private readonly ContextResolver _resolver;
         private readonly BridgeClient _bridgeClient;
         private readonly AddOnConfig _config;
+        private readonly OrderMonitor _orderMonitor;
         private Timer _stateTimer;
         private string _trackedAccount;
         private string _trackedInstrument;
         private bool _disposed;
+
+        // Timer callbacks overlap when a publish takes longer than the interval. Two
+        // overlapping publishes mean two concurrent sends, so only one may run at a time.
+        private int _publishing;
+
+        // State is republished several times a second. Logging every tick would drown the file,
+        // so only transitions are recorded at INFO — that is what a post-mortem reads.
+        private string _lastPositionSignature;
+        private string _lastProtectionSignature;
+
+        // Consecutive skipped ticks: one is normal jitter, a run of them means the publish path
+        // is stuck (NT8 not answering, send blocked) and the deck is showing stale data.
+        private int _consecutiveSkips;
 
         public string TrackedAccount
         {
@@ -32,11 +46,12 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             get { return _trackedInstrument; }
         }
 
-        public StatePublisher(ContextResolver resolver, BridgeClient bridgeClient, AddOnConfig config)
+        public StatePublisher(ContextResolver resolver, BridgeClient bridgeClient, AddOnConfig config, OrderMonitor orderMonitor)
         {
             _resolver = resolver;
             _bridgeClient = bridgeClient;
             _config = config;
+            _orderMonitor = orderMonitor;
         }
 
         public void Start(string accountName, string instrumentName)
@@ -70,6 +85,32 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         {
             if (!_bridgeClient.IsConnected) return;
 
+            // Skip this tick if the previous publish is still running
+            if (Interlocked.CompareExchange(ref _publishing, 1, 0) != 0)
+            {
+                _consecutiveSkips++;
+                // The first skip is routine; a sustained run means the deck is frozen on stale
+                // data, which the trader sees as "the buttons stopped updating".
+                if (_consecutiveSkips == 5 || _consecutiveSkips % 50 == 0)
+                {
+                    SdLogger.EventWarn("StatePublish",
+                        "State publish stalled — {0} consecutive ticks skipped ({1}ms interval); the deck is showing stale data",
+                        _consecutiveSkips, _config.StateUpdateIntervalMs);
+                }
+                else
+                {
+                    SdLogger.TraceEvent("StatePublish", "Tick skipped — previous publish still in flight");
+                }
+                return;
+            }
+
+            if (_consecutiveSkips > 0)
+            {
+                SdLogger.Event("StatePublish", "State publishing resumed after {0} skipped tick(s)", _consecutiveSkips);
+                _consecutiveSkips = 0;
+            }
+
+            bool sendStarted = false;
             try
             {
                 var availableAccounts = _resolver.GetAccountNames();
@@ -89,14 +130,102 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 var account = _resolver.FindAccount(_trackedAccount);
                 var instrument = _resolver.FindInstrument(_trackedInstrument);
 
+                // Keep order-rejection reporting bound to the account actually being traded
+                if (_orderMonitor != null) _orderMonitor.Track(account);
+
                 var state = BuildState(account, instrument, availableAccounts);
+                LogStateTransitions(state as Dictionary<string, object>);
+
                 var msg = BridgeMessage.CreateEvent("stateUpdate", state);
-                _bridgeClient.SendAsync(msg).ConfigureAwait(false);
+
+                var sendTask = _bridgeClient.SendAsync(msg);
+                sendStarted = true;
+                // Release the guard only once the send has actually completed
+                sendTask.ContinueWith(_ => Interlocked.Exchange(ref _publishing, 0));
             }
             catch (Exception ex)
             {
-                SdLogger.Error(ex, "Failed to publish state");
+                SdLogger.Fail("StatePublish", ex, "Failed to publish state for {0} / {1}",
+                    _trackedAccount, _trackedInstrument);
             }
+            finally
+            {
+                if (!sendStarted) Interlocked.Exchange(ref _publishing, 0);
+            }
+        }
+
+        /// <summary>
+        /// Logs the position and its protective orders whenever they change.
+        ///
+        /// This is the trading narrative of the day: entries, exits, stop and target moves, all
+        /// timestamped. It is written from the published state rather than from the commands so
+        /// it also captures what happened outside the deck (a manual NinjaTrader action, a stop
+        /// being hit) — exactly the events that make a deck display look "wrong" later on.
+        /// </summary>
+        private void LogStateTransitions(Dictionary<string, object> state)
+        {
+            if (state == null) return;
+
+            try
+            {
+                object positionObj;
+                if (!state.TryGetValue("position", out positionObj)) return;
+
+                var position = positionObj as Dictionary<string, object>;
+                if (position == null)
+                {
+                    // No account or no instrument resolved — nothing to compare against.
+                    if (_lastPositionSignature != null)
+                    {
+                        SdLogger.Event("Position", "Position tracking lost — account or instrument unresolved ({0} / {1})",
+                            _trackedAccount, _trackedInstrument);
+                        _lastPositionSignature = null;
+                        _lastProtectionSignature = null;
+                    }
+                    return;
+                }
+
+                var direction = Text(position, "direction");
+                var quantity = Text(position, "quantity");
+                var averagePrice = Text(position, "averagePrice");
+
+                var positionSignature = direction + "|" + quantity + "|" + averagePrice;
+                if (positionSignature != _lastPositionSignature)
+                {
+                    SdLogger.Event("Position", "Position {0} → {1} qty={2} avgPrice={3} unrealizedPnl={4}",
+                        _lastPositionSignature ?? "(unknown)", direction, quantity, averagePrice,
+                        Text(position, "unrealizedPnl"));
+                    _lastPositionSignature = positionSignature;
+                }
+
+                var protectionSignature = string.Join("|", new[]
+                {
+                    Text(position, "stopOrderCount"), Text(position, "stopPrice"),
+                    Text(position, "targetOrderCount"), Text(position, "targetPrice"),
+                    Text(position, "activeOrderCount")
+                });
+
+                if (protectionSignature != _lastProtectionSignature)
+                {
+                    SdLogger.Event("Protection", "Orders changed — stops={0} @ {1}, targets={2} @ {3}, active={4}",
+                        Text(position, "stopOrderCount"), Text(position, "stopPrice"),
+                        Text(position, "targetOrderCount"), Text(position, "targetPrice"),
+                        Text(position, "activeOrderCount"));
+                    _lastProtectionSignature = protectionSignature;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Diagnostics must never break the publish they observe.
+                SdLogger.Fail("StatePublish", ex, "Failed to log state transition");
+            }
+        }
+
+        private static string Text(Dictionary<string, object> dict, string key)
+        {
+            object value;
+            if (dict == null || !dict.TryGetValue(key, out value) || value == null) return "-";
+            return Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
         }
 
         private object BuildState(Account account, Instrument instrument, List<string> availableAccounts)
@@ -107,6 +236,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
             Dictionary<string, object> instrumentDict = null;
             Dictionary<string, object> positionDict = null;
+            double positionUnrealized = 0;
 
             if (instrument != null)
             {
@@ -131,15 +261,26 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                         var targets = _resolver.FindTargetOrders(account, instrument);
                         var allActive = _resolver.FindActiveOrders(account, instrument);
 
+                        positionUnrealized = position.GetUnrealizedProfitLoss(PerformanceUnit.Currency);
+
+                        // Show the stop that actually protects the position (tightest), not an
+                        // arbitrary one, and the nearest target in the position's direction.
+                        var tightestStop = _resolver.FindTightestStopOrder(account, instrument, position.MarketPosition);
+                        var nearestTarget = targets.Count == 0
+                            ? null
+                            : position.MarketPosition == MarketPosition.Long ? targets[0] : targets[targets.Count - 1];
+
                         positionDict["exists"] = true;
                         positionDict["direction"] = position.MarketPosition.ToString();
                         positionDict["quantity"] = (int)Math.Abs(position.Quantity);
                         positionDict["averagePrice"] = position.AveragePrice;
-                        positionDict["unrealizedPnl"] = position.GetUnrealizedProfitLoss(PerformanceUnit.Currency);
+                        positionDict["unrealizedPnl"] = positionUnrealized;
                         positionDict["hasStopOrder"] = stops.Count > 0;
-                        positionDict["stopPrice"] = stops.Count > 0 ? stops[0].StopPrice : 0.0;
+                        positionDict["stopPrice"] = tightestStop != null ? tightestStop.StopPrice : 0.0;
+                        positionDict["stopOrderCount"] = stops.Count;
                         positionDict["hasTargetOrder"] = targets.Count > 0;
-                        positionDict["targetPrice"] = targets.Count > 0 ? targets[0].LimitPrice : 0.0;
+                        positionDict["targetPrice"] = nearestTarget != null ? nearestTarget.LimitPrice : 0.0;
+                        positionDict["targetOrderCount"] = targets.Count;
                         positionDict["activeOrderCount"] = allActive.Count;
                     }
                     else
@@ -158,6 +299,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 }
             }
 
+            AddAccountPnl(accountDict, account, positionUnrealized);
+
             var state = new Dictionary<string, object>();
             state["connected"] = true;
             state["account"] = accountDict;
@@ -165,6 +308,58 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             state["position"] = positionDict;
             state["availableAccounts"] = availableAccounts;
             return state;
+        }
+
+        /// <summary>
+        /// Publishes the account-wide realized/unrealized P&amp;L. The bridge's safety macro
+        /// measures the daily loss from these, so realized P&amp;L matters as much as open P&amp;L.
+        /// pnlAvailable=false tells the bridge the P&amp;L-based rules have no data to work with,
+        /// which surfaces on the Stream Deck instead of failing silently.
+        /// </summary>
+        private static DateTime _lastPnlWarning = DateTime.MinValue;
+
+        private static void AddAccountPnl(Dictionary<string, object> accountDict, Account account, double positionUnrealized)
+        {
+            double realized = 0;
+            double unrealized = positionUnrealized;
+            bool available = false;
+
+            if (account != null)
+            {
+                try
+                {
+                    var denomination = account.Denomination;
+                    realized = account.Get(AccountItem.RealizedProfitLoss, denomination);
+                    available = true;
+
+                    try
+                    {
+                        unrealized = account.Get(AccountItem.UnrealizedProfitLoss, denomination);
+                    }
+                    catch
+                    {
+                        // Not every provider exposes account-level open P&L — the tracked
+                        // position's unrealized P&L is the closest available substitute.
+                        unrealized = positionUnrealized;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Throttled: this runs on every publish tick, so an unsupported provider
+                    // would otherwise write the same warning several times a second all day.
+                    if ((DateTime.UtcNow - _lastPnlWarning).TotalMinutes >= 1)
+                    {
+                        _lastPnlWarning = DateTime.UtcNow;
+                        SdLogger.EventWarn("Pnl",
+                            "Account P&L unavailable for {0}: {1} — {2} (safety macro loss limits have no data)",
+                            account.Name, ex.GetType().Name, ex.Message);
+                    }
+                }
+            }
+
+            accountDict["realizedPnl"] = realized;
+            accountDict["unrealizedPnl"] = unrealized;
+            accountDict["pnlAvailable"] = available;
         }
 
         public void Dispose()

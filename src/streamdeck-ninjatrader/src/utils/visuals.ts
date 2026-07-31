@@ -46,6 +46,7 @@ export interface ButtonVisual {
   textColor: string;
   subtitle?: string;
   subtitleColor?: string;
+  detail?: string;      // third line, used by the 3-line layouts
   badge?: string;       // small indicator top-right
   badgeColor?: string;
 }
@@ -106,6 +107,14 @@ export function renderButtonSvg(visual: ButtonVisual): string {
       <text x="72" y="58" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">BE</text>
       <text x="72" y="100" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="${sc}">${sub}</text>`;
 
+  } else if (t.startsWith('SAFETY')) {
+    // Safety macro — status word ("SAFETY:<word>"), lock countdown, then trades / session P&L
+    const word = t.split(':')[1] || 'GUARD';
+    contentSvg = `
+      <text x="72" y="42" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="bold" fill="${tc}">${word}</text>
+      <text x="72" y="86" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${sub}</text>
+      <text x="72" y="122" text-anchor="middle" font-family="sans-serif" font-size="18" fill="${sc}">${visual.detail || ''}</text>`;
+
   } else if (t === 'COUNTDOWN') {
     // Cooldown countdown — SVG is background-only; native setTitle renders the number
     contentSvg = ``;
@@ -156,6 +165,10 @@ export function buildTitle(visual: ButtonVisual): string {
     const isBE = visual.title.startsWith('QTY_BE_');
     const label = isStop ? 'Stop' : isBE ? 'BE' : 'Target';
     return `${label}\n${visual.subtitle || ''}`;
+  }
+  if (visual.title.startsWith('SAFETY')) {
+    const word = visual.title.split(':')[1] || 'GUARD';
+    return [word, visual.subtitle, visual.detail].filter(Boolean).join('\n');
   }
   if (visual.title === 'COUNTDOWN') return visual.subtitle || '';
   // Standard 2-line title

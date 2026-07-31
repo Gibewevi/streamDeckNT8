@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj": {}
+    "c:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj": {}
   },
   "projects": {
-    "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj": {
+    "c:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
+        "projectUniqueName": "c:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
         "projectName": "StreamDeckBridge",
-        "projectPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
+        "projectPath": "c:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
         "packagesPath": "C:\\Users\\pixel\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\obj\\",
+        "outputPath": "c:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\pixel\\AppData\\Roaming\\NuGet\\NuGet.Config"

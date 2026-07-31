@@ -160,6 +160,7 @@ public sealed class BridgeServer : BackgroundService
                 _stateManager.SetNtConnected(true);
                 _logger.LogInformation("NinjaTrader Add-On connected");
 
+                await PushSelectedInstrument(ct);
                 await HandleAddonSession(_addonSocket, ct);
             }
             catch (OperationCanceledException) { break; }
@@ -214,7 +215,8 @@ public sealed class BridgeServer : BackgroundService
                     await SendToPlugin(localResponse, ct);
 
                     // For qty/instrument changes, also broadcast updated state
-                    if (msg.Action is "qtySet" or "qtyAdjust" or "qtyReset" or "setInstrument" or "setAccount" or "toggleCooldown")
+                    if (msg.Action is "qtySet" or "qtyAdjust" or "qtyReset" or "setInstrument" or "setAccount"
+                        or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety" or "configureSafety")
                     {
                         await BroadcastState(ct);
                     }
@@ -267,7 +269,14 @@ public sealed class BridgeServer : BackgroundService
 
                 var json = Encoding.UTF8.GetString(messageBuffer.ToArray());
                 messageBuffer.SetLength(0);
-                _logger.LogDebug("AddOn → Bridge: {Json}", json);
+
+                // NT8 publishes state several times a second; keep that at Trace so the Debug
+                // file stays about commands, orders and errors. Cheap substring test on purpose:
+                // this runs on every frame, before deserialization.
+                if (json.Contains("\"stateUpdate\""))
+                    _logger.LogTrace("AddOn → Bridge: {Json}", json);
+                else
+                    _logger.LogDebug("AddOn → Bridge: {Json}", json);
 
                 BridgeMessage? msg;
                 try
@@ -302,6 +311,30 @@ public sealed class BridgeServer : BackgroundService
             _stateManager.SetNtConnected(false);
             _logger.LogInformation("NinjaTrader Add-On disconnected");
         }
+    }
+
+    /// <summary>
+    /// Tells the freshly connected add-on which instrument the trader selected, so NinjaTrader
+    /// tracks it straight away instead of whatever it defaulted to at startup.
+    /// </summary>
+    private async Task PushSelectedInstrument(CancellationToken ct)
+    {
+        var state = _stateManager.GetSnapshot();
+        if (string.IsNullOrWhiteSpace(state.Instrument)) return;
+
+        var msg = new BridgeMessage
+        {
+            Type = "command",
+            Version = "1.0",
+            RequestId = Guid.NewGuid().ToString(),
+            Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+            Source = "bridge",
+            Action = "setInstrument",
+            Payload = JsonSerializer.SerializeToElement(new { instrument = state.Instrument })
+        };
+
+        _logger.LogInformation("Pushing selected instrument to NT8: {Instrument}", state.Instrument);
+        await SendToAddon(msg, ct);
     }
 
     private async Task BroadcastStateLoop(CancellationToken ct)
@@ -342,7 +375,14 @@ public sealed class BridgeServer : BackgroundService
             var json = JsonSerializer.Serialize(msg, JsonOpts);
             var bytes = Encoding.UTF8.GetBytes(json);
             await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
-            _logger.LogDebug("Bridge → Plugin: {Json}", json);
+
+            // The state broadcast fires every StateUpdateIntervalMs and dwarfs everything else
+            // in the log. It stays available at Trace, one level below the file default, so a
+            // day of logs remains readable without losing the ability to replay the stream.
+            if (msg.Action == "stateUpdate")
+                _logger.LogTrace("Bridge → Plugin: {Json}", json);
+            else
+                _logger.LogDebug("Bridge → Plugin: {Json}", json);
         }
         catch (WebSocketException ex)
         {

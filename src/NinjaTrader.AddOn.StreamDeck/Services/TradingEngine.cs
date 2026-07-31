@@ -94,20 +94,37 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             if (qty < 1)
                 return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_QUANTITY", "Quantity must be >= 1");
 
+            double tickSize = ctx.Instrument.MasterInstrument.TickSize;
+            if (tickSize <= 0)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                    $"Invalid tick size for {ctx.Instrument.FullName} — cannot compute a limit price.");
+
+            // Without a market data subscription GetLastPrice returns 0, which would place the
+            // limit a few ticks from zero. A sell limit there fills instantly at market, so the
+            // order must be refused instead of submitted.
+            double lastPrice = GetLastPrice(ctx.Instrument);
+            if (lastPrice <= 0)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                    $"No market data for {ctx.Instrument.FullName} — cannot compute a limit price. Open a chart or data window for this instrument.");
+
             try
             {
-                double lastPrice = GetLastPrice(ctx.Instrument);
-                double tickSize = ctx.Instrument.MasterInstrument.TickSize;
                 double limitPrice = lastPrice + (offsetTicks * tickSize);
 
                 // Round to tick size
                 limitPrice = Math.Round(limitPrice / tickSize) * tickSize;
 
+                if (limitPrice <= 0)
+                    return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                        $"Computed limit price {limitPrice} is not valid for {ctx.Instrument.FullName}.");
+
                 var order = ctx.Account.CreateOrder(
                     ctx.Instrument,
                     orderAction,
                     OrderType.Limit,
-                    TimeInForce.Gtc,
+                    // Day, like market orders: a forgotten GTC entry could fill unattended
+                    // in a later session.
+                    TimeInForce.Day,
                     qty,
                     limitPrice,
                     0,
@@ -160,6 +177,50 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             }
         }
 
+        /// <summary>
+        /// Cancels the working orders for the instrument WITHOUT touching the position.
+        /// This is what "cancel pending orders" means — use <see cref="CancelOrders"/> (Close All)
+        /// to also close the position.
+        /// </summary>
+        public BridgeMessage CancelWorkingOrders(BridgeMessage cmd)
+        {
+            var ctx = ResolveContext(cmd);
+            if (ctx.Error != null) return ctx.Error;
+
+            try
+            {
+                var orders = _resolver.FindActiveOrders(ctx.Account, ctx.Instrument);
+                if (orders.Count == 0)
+                {
+                    return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
+                    {
+                        ordersCancelled = 0,
+                        message = $"No working order for {ctx.Instrument.FullName}"
+                    });
+                }
+
+                ctx.Account.Cancel(orders);
+
+                SdLogger.Info("[REQ:{0}] Cancelled {1} working order(s) for {2} on {3} (position untouched)",
+                    cmd.RequestId, orders.Count, ctx.Instrument.FullName, ctx.Account.Name);
+
+                return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
+                {
+                    ordersCancelled = orders.Count,
+                    message = $"Cancelled {orders.Count} order(s) for {ctx.Instrument.FullName}"
+                });
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Error(ex, $"[REQ:{cmd.RequestId}] Cancel working orders failed");
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "ORDER_REJECTED", ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// "Close All": cancels every pending order AND closes the position.
+        /// Kept deliberately destructive — this backs the Close All key.
+        /// </summary>
         public BridgeMessage CancelOrders(BridgeMessage cmd)
         {
             var ctx = ResolveContext(cmd);
@@ -201,6 +262,20 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 var reverseAction = currentDirection == MarketPosition.Long ? OrderAction.Sell : OrderAction.Buy;
                 var reverseQty = currentQty * 2; // Close current + open same size opposite
 
+                // Cancel the protective orders of the position being closed first. Submitting
+                // the reversal alone leaves them working: a stop from the old long is a sell
+                // stop, which after the reversal would ADD to the new short instead of
+                // protecting it.
+                int cancelled = 0;
+                var stale = _resolver.FindActiveOrders(ctx.Account, ctx.Instrument);
+                if (stale.Count > 0)
+                {
+                    ctx.Account.Cancel(stale);
+                    cancelled = stale.Count;
+                    SdLogger.Info("[REQ:{0}] Reverse: cancelled {1} working order(s) before reversing",
+                        cmd.RequestId, cancelled);
+                }
+
                 var order = ctx.Account.CreateOrder(
                     ctx.Instrument,
                     reverseAction,
@@ -219,7 +294,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                 return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
                 {
-                    message = $"Reverse from {currentDirection} {currentQty} → {reverseAction} {reverseQty}"
+                    ordersCancelled = cancelled,
+                    message = cancelled > 0
+                        ? $"Reverse from {currentDirection} {currentQty} → {reverseAction} {reverseQty} ({cancelled} order(s) cancelled)"
+                        : $"Reverse from {currentDirection} {currentQty} → {reverseAction} {reverseQty}"
                 });
             }
             catch (Exception ex)
@@ -248,6 +326,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
             var offsetTicks = cmd.GetPayloadInt("offsetTicks") ?? 0;
             double tickSize = ctx.Instrument.MasterInstrument.TickSize;
+            if (tickSize <= 0)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                    $"Invalid tick size for {ctx.Instrument.FullName}.");
+
             double avgPrice = position.AveragePrice;
 
             double bePrice;
@@ -258,6 +340,23 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
             // Round to tick size
             bePrice = Math.Round(bePrice / tickSize) * tickSize;
+
+            // A stop must stay on the protective side of the market. When the trade is at a
+            // loss, break-even would put it on the wrong side and NinjaTrader rejects the
+            // change with an opaque message — say so explicitly instead.
+            double marketPrice = GetLastPrice(ctx.Instrument);
+            if (marketPrice > 0)
+            {
+                bool wrongSide = position.MarketPosition == MarketPosition.Long
+                    ? bePrice >= marketPrice
+                    : bePrice <= marketPrice;
+
+                if (wrongSide)
+                {
+                    return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_STOP_PRICE",
+                        $"Break-even price {bePrice} is on the wrong side of the market ({marketPrice}) — the trade is not in profit yet.");
+                }
+            }
 
             try
             {
@@ -318,42 +417,61 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_PAYLOAD", "deltaTicks must be non-zero.");
 
             double tickSize = ctx.Instrument.MasterInstrument.TickSize;
+            if (tickSize <= 0)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                    $"Invalid tick size for {ctx.Instrument.FullName}.");
 
             try
             {
-                // Move the closest stop order (most conservative)
-                var stop = stopOrders[0]; // Already sorted by proximity
+                // Shift EVERY working stop by the same delta. Picking one of them was
+                // arbitrary on a scaled position, and left part of the position unprotected
+                // at the old level. This matches how break-even treats all stops.
+                var moved = new List<Order>();
+                double firstOld = 0, firstNew = 0;
 
-                double currentPrice = stop.StopPrice;
-                double newPrice;
-
-                // Positive deltaTicks = move stop away from price (give more room)
-                // Negative deltaTicks = move stop closer to price (tighten)
-                if (position.MarketPosition == MarketPosition.Long)
-                    newPrice = currentPrice + (deltaTicks * tickSize);
-                else
-                    newPrice = currentPrice - (deltaTicks * tickSize);
-
-                newPrice = Math.Round(newPrice / tickSize) * tickSize;
-
-                stop.StopPriceChanged = newPrice;
-                // For StopLimit orders, maintain the original offset between stop and limit
-                if (stop.OrderType == OrderType.StopLimit)
+                foreach (var stop in stopOrders)
                 {
-                    double limitOffset = stop.LimitPrice - stop.StopPrice;
-                    stop.LimitPriceChanged = newPrice + limitOffset;
-                }
-                ctx.Account.Change(new[] { stop });
+                    double currentPrice = stop.StopPrice;
 
-                SdLogger.Info("[REQ:{0}] Stop moved {1} tick(s): {2} → {3}",
-                    cmd.RequestId, deltaTicks, currentPrice, newPrice);
+                    // Positive deltaTicks tightens the stop (moves it toward the market),
+                    // negative gives the trade more room — in both directions.
+                    double newPrice = position.MarketPosition == MarketPosition.Long
+                        ? currentPrice + (deltaTicks * tickSize)
+                        : currentPrice - (deltaTicks * tickSize);
+
+                    newPrice = Math.Round(newPrice / tickSize) * tickSize;
+                    if (newPrice <= 0) continue;
+
+                    stop.StopPriceChanged = newPrice;
+                    // For StopLimit orders, maintain the original offset between stop and limit
+                    if (stop.OrderType == OrderType.StopLimit)
+                    {
+                        double limitOffset = stop.LimitPrice - stop.StopPrice;
+                        stop.LimitPriceChanged = newPrice + limitOffset;
+                    }
+
+                    if (moved.Count == 0) { firstOld = currentPrice; firstNew = newPrice; }
+                    moved.Add(stop);
+                }
+
+                if (moved.Count == 0)
+                    return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_STOP_PRICE",
+                        "The requested move would put the stop at an invalid price.");
+
+                ctx.Account.Change(moved);
+
+                SdLogger.Info("[REQ:{0}] {1} stop(s) moved {2} tick(s): {3} → {4}",
+                    cmd.RequestId, moved.Count, deltaTicks, firstOld, firstNew);
 
                 return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
                 {
-                    oldPrice = currentPrice,
-                    newPrice,
+                    oldPrice = firstOld,
+                    newPrice = firstNew,
                     deltaTicks,
-                    message = $"Stop moved from {currentPrice} to {newPrice}"
+                    stopsModified = moved.Count,
+                    message = moved.Count > 1
+                        ? $"{moved.Count} stops moved by {deltaTicks} tick(s)"
+                        : $"Stop moved from {firstOld} to {firstNew}"
                 });
             }
             catch (Exception ex)
@@ -381,33 +499,52 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_PAYLOAD", "deltaTicks must be non-zero.");
 
             double tickSize = ctx.Instrument.MasterInstrument.TickSize;
+            if (tickSize <= 0)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                    $"Invalid tick size for {ctx.Instrument.FullName}.");
 
             try
             {
-                var target = targetOrders[0];
-                double currentPrice = target.LimitPrice;
-                double newPrice;
+                // Shift every working target, for the same reason as MoveStop
+                var moved = new List<Order>();
+                double firstOld = 0, firstNew = 0;
 
-                // Positive deltaTicks = move target further from entry (increase profit target)
-                if (position.MarketPosition == MarketPosition.Long)
-                    newPrice = currentPrice + (deltaTicks * tickSize);
-                else
-                    newPrice = currentPrice - (deltaTicks * tickSize);
+                foreach (var target in targetOrders)
+                {
+                    double currentPrice = target.LimitPrice;
 
-                newPrice = Math.Round(newPrice / tickSize) * tickSize;
+                    // Positive deltaTicks = move target further from entry (increase profit target)
+                    double newPrice = position.MarketPosition == MarketPosition.Long
+                        ? currentPrice + (deltaTicks * tickSize)
+                        : currentPrice - (deltaTicks * tickSize);
 
-                target.LimitPriceChanged = newPrice;
-                ctx.Account.Change(new[] { target });
+                    newPrice = Math.Round(newPrice / tickSize) * tickSize;
+                    if (newPrice <= 0) continue;
 
-                SdLogger.Info("[REQ:{0}] Target moved {1} tick(s): {2} → {3}",
-                    cmd.RequestId, deltaTicks, currentPrice, newPrice);
+                    target.LimitPriceChanged = newPrice;
+
+                    if (moved.Count == 0) { firstOld = currentPrice; firstNew = newPrice; }
+                    moved.Add(target);
+                }
+
+                if (moved.Count == 0)
+                    return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_STOP_PRICE",
+                        "The requested move would put the target at an invalid price.");
+
+                ctx.Account.Change(moved);
+
+                SdLogger.Info("[REQ:{0}] {1} target(s) moved {2} tick(s): {3} → {4}",
+                    cmd.RequestId, moved.Count, deltaTicks, firstOld, firstNew);
 
                 return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
                 {
-                    oldPrice = currentPrice,
-                    newPrice,
+                    oldPrice = firstOld,
+                    newPrice = firstNew,
                     deltaTicks,
-                    message = $"Target moved from {currentPrice} to {newPrice}"
+                    targetsModified = moved.Count,
+                    message = moved.Count > 1
+                        ? $"{moved.Count} targets moved by {deltaTicks} tick(s)"
+                        : $"Target moved from {firstOld} to {firstNew}"
                 });
             }
             catch (Exception ex)

@@ -22,21 +22,14 @@
     <div class="hint">Positive = away from price (more room). Negative = closer to price (tighter).</div>
   </div>
 
+  <script src="pi.js"></script>
   <script>
     const $delta = document.getElementById('deltaTicks');
 
-    window.addEventListener('message', (event) => {
-      if (event.data?.type === 'loadSettings') {
-        const s = event.data.settings || {};
-        if (s.deltaTicks !== undefined) $delta.value = s.deltaTicks;
-      }
-    });
+    PI.onSettings((s) => { $delta.value = s.deltaTicks ?? 0; });
 
     $delta.addEventListener('change', () => {
-      window.parent.postMessage({
-        type: 'saveSettings',
-        settings: { deltaTicks: parseInt($delta.value, 10) || 0 }
-      }, '*');
+      PI.save({ deltaTicks: parseInt($delta.value, 10) || 0 });
     });
   </script>
 </body>

@@ -4,7 +4,11 @@ import { Colors } from '../utils/visuals.js';
 import * as log from '../utils/logger.js';
 export class InstrumentSelectAction extends BaseAction {
     async onKeyDown(context, settings) {
-        const instrument = settings.instrument || 'ES 06-25';
+        // No hardcoded contract: an unconfigured key must do nothing rather than
+        // switch the deck to some other instrument.
+        const instrument = settings.instrument || '';
+        if (!instrument)
+            return;
         const cmd = createCommand('setInstrument', { instrument });
         log.info(`Switching instrument to ${instrument}`, cmd.requestId ?? undefined);
         const resp = await this.bridge.sendCommand(cmd);

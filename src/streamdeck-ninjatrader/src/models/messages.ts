@@ -27,7 +27,47 @@ export interface TradingState {
   cooldownEnabled: boolean;
   cooldownActive: boolean;
   cooldownSecondsRemaining: number;
+  safety: SafetyStatus;
 }
+
+/**
+ * State of the lockable safety macro, as published by the bridge.
+ * The bridge owns and enforces these rules — the plugin only displays them.
+ */
+export interface SafetyStatus {
+  armed: boolean;
+  /** True while the macro cannot be disarmed. */
+  locked: boolean;
+  lockSecondsRemaining: number;
+  lockDurationHours: number;
+  /** Max trades allowed once the session P&L is negative. 0 = rule off. */
+  maxTradesWhenLosing: number;
+  /** Max session loss, positive number. 0 = rule off. */
+  dailyLossLimit: number;
+  tradeCount: number;
+  sessionPnl: number;
+  /** False when NinjaTrader does not expose account P&L — the loss rules are then inert. */
+  pnlAvailable: boolean;
+  /** True when the bridge is currently refusing position-opening actions. */
+  entriesBlocked: boolean;
+  blockReason: '' | 'dailyLoss' | 'tradeLimit';
+  tradingDay: string;
+}
+
+export const DEFAULT_SAFETY_STATUS: SafetyStatus = {
+  armed: false,
+  locked: false,
+  lockSecondsRemaining: 0,
+  lockDurationHours: 6,
+  maxTradesWhenLosing: 15,
+  dailyLossLimit: 300,
+  tradeCount: 0,
+  sessionPnl: 0,
+  pnlAvailable: false,
+  entriesBlocked: false,
+  blockReason: '',
+  tradingDay: '',
+};
 
 export interface PositionState {
   exists: boolean;
@@ -36,10 +76,29 @@ export interface PositionState {
   averagePrice: number;
   unrealizedPnl: number;
   hasStopOrder: boolean;
+  /** Price of the stop that protects the position most tightly. */
   stopPrice: number;
+  /** Number of working stops — greater than 1 on a scaled position. */
+  stopOrderCount: number;
   hasTargetOrder: boolean;
+  /** Price of the nearest target in the position's direction. */
   targetPrice: number;
+  targetOrderCount: number;
   activeOrderCount: number;
+}
+
+/** Payload of the `orderUpdate` event the add-on emits when NinjaTrader refuses an order. */
+export interface OrderUpdate {
+  orderId: string;
+  orderState: string;
+  rejected: boolean;
+  error: string;
+  reason: string;
+  quantity: number;
+  orderType?: string;
+  orderAction?: string;
+  name?: string;
+  instrument?: string;
 }
 
 export interface InstrumentInfo {

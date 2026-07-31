@@ -25,25 +25,19 @@
       <option value="pnl">Unrealized P&L</option>
       <option value="quantity">Current Quantity</option>
       <option value="connection">Connection Status</option>
+      <option value="safety">Safety Macro (trades / session P&L)</option>
     </select>
     <div class="hint">What this button displays</div>
   </div>
 
+  <script src="pi.js"></script>
   <script>
     const $type = document.getElementById('statusType');
 
-    window.addEventListener('message', (event) => {
-      if (event.data?.type === 'loadSettings') {
-        const s = event.data.settings || {};
-        if (s.statusType) $type.value = s.statusType;
-      }
-    });
+    PI.onSettings((s) => { if (s.statusType) $type.value = s.statusType; });
 
     $type.addEventListener('change', () => {
-      window.parent.postMessage({
-        type: 'saveSettings',
-        settings: { statusType: $type.value }
-      }, '*');
+      PI.save({ statusType: $type.value });
     });
   </script>
 </body>

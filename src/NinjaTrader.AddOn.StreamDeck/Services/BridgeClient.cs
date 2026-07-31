@@ -15,6 +15,13 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
     public class BridgeClient : IDisposable
     {
         private readonly AddOnConfig _config;
+
+        // ClientWebSocket on .NET Framework 4.8 allows only ONE outstanding SendAsync:
+        // a concurrent send throws InvalidOperationException and aborts the socket, which
+        // silently loses order responses and forces a reconnect. The state publisher timer
+        // thread and the receive thread both send, so every send must be serialized.
+        private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
+
         private ClientWebSocket _ws;
         private CancellationTokenSource _cts;
         private bool _disposed;
@@ -56,6 +63,15 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             {
                 try
                 {
+                    // Dispose the previous socket before replacing it, otherwise every
+                    // reconnect leaks a ClientWebSocket for the life of the session.
+                    var previous = _ws;
+                    if (previous != null)
+                    {
+                        _ws = null;
+                        try { previous.Dispose(); } catch { }
+                    }
+
                     _ws = new ClientWebSocket();
                     await _ws.ConnectAsync(new Uri(_config.BridgeUrl), ct);
                     SdLogger.Info("Connected to bridge at {0}", _config.BridgeUrl);
@@ -69,7 +85,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 }
                 catch (Exception ex)
                 {
-                    SdLogger.Warn("Bridge connection lost: {0}", ex.Message);
+                    // Type included: a SocketException (bridge not started) and a
+                    // WebSocketException (bridge died mid-session) call for different fixes.
+                    SdLogger.EventWarn("Connection", "Bridge connection lost: {0} — {1}",
+                        ex.GetType().Name, ex.Message);
                     if (OnConnectionChanged != null) OnConnectionChanged(false);
                 }
 
@@ -111,13 +130,17 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                         var msg = BridgeMessage.FromJson(json);
                         if (msg != null)
                         {
-                            SdLogger.Debug("Received: {0} / {1}", msg.Type, msg.Action);
+                            SdLogger.Debug("Received: {0} / {1} {2}", msg.Type, msg.Action, json);
                             if (OnMessageReceived != null) OnMessageReceived(msg);
+                        }
+                        else
+                        {
+                            SdLogger.EventWarn("Wire", "Bridge frame ignored — not a JSON object: {0}", json);
                         }
                     }
                     catch (Exception ex)
                     {
-                        SdLogger.Warn("Invalid JSON from bridge: {0}", ex.Message);
+                        SdLogger.Fail("Wire", ex, "Invalid JSON from bridge: {0}", json);
                     }
                 }
             }
@@ -125,22 +148,44 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         public async Task SendAsync(BridgeMessage message)
         {
-            if (_ws == null || _ws.State != WebSocketState.Open)
+            var socket = _ws;
+            if (socket == null || socket.State != WebSocketState.Open)
             {
                 SdLogger.Warn("Cannot send — not connected to bridge");
                 return;
             }
 
+            // Serialize every send: a second concurrent SendAsync would abort the socket.
+            await _sendLock.WaitAsync().ConfigureAwait(false);
             try
             {
+                if (socket.State != WebSocketState.Open)
+                {
+                    SdLogger.Warn("Cannot send — socket closed while waiting for the send lock");
+                    return;
+                }
+
                 var json = message.ToJson();
                 var bytes = Encoding.UTF8.GetBytes(json);
-                await _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
-                SdLogger.Debug("Sent: {0} / {1} [REQ:{2}]", message.Type, message.Action, message.RequestId ?? "n/a");
+                await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None)
+                    .ConfigureAwait(false);
+
+                // State is published several times a second and would bury everything else;
+                // it stays available one level down, with the serialized frame for replay.
+                if (message.Action == "stateUpdate")
+                    SdLogger.TraceEvent("Wire", "Sent stateUpdate: {0}", json);
+                else
+                    SdLogger.Debug("Sent: {0} / {1} [REQ:{2}] {3}",
+                        message.Type, message.Action, message.RequestId ?? "n/a", json);
             }
             catch (Exception ex)
             {
-                SdLogger.Error(ex, "Failed to send message to bridge");
+                SdLogger.Fail("Wire", ex, "Failed to send {0}/{1} to bridge",
+                    message.Type, message.Action);
+            }
+            finally
+            {
+                _sendLock.Release();
             }
         }
 

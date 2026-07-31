@@ -198,6 +198,117 @@
 - **Préconditions** : `allowLiveAccounts = false`, account = "Sim101"
 - **Résultat** : Ordre soumis normalement
 
+## 7bis. Tests des garde-fous d'exécution
+
+### T-60 : Ordre limite sans flux de prix
+- **Préconditions** : Instrument suivi sans souscription de données (aucun chart ouvert)
+- **Action** : Buy Limit puis Sell Limit
+- **Résultat** : Refusé avec `NO_MARKET_DATA`, **aucun ordre transmis**.
+  Régression visée : la limite partait à `0 + offset × tick`, et une limite vendeuse
+  sous le marché s'exécutait instantanément au marché
+
+### T-61 : Rejet NinjaTrader remonté
+- **Préconditions** : Provoquer un rejet (quantité au-delà de la marge, ou marché fermé)
+- **Action** : Buy Market
+- **Résultat** : Log `ORDER REJECTED by NinjaTrader: … — <raison>`, `showAlert` sur les
+  touches, `REJECTED` affiché 5 s **sans griser** la touche (grisé = bloqué, jamais rejeté)
+
+### T-62 : Break-even sur trade en perte
+- **Préconditions** : Position Long en perte, stop actif
+- **Action** : BE
+- **Résultat** : `INVALID_STOP_PRICE` avec un message indiquant que le trade n'est pas en
+  profit — et non un `ORDER_REJECTED` opaque
+
+### T-63 : Move Stop sur position scalée
+- **Préconditions** : Position avec 2 stops actifs à des prix différents
+- **Action** : Stop +1
+- **Résultat** : **Les deux** stops décalés de 1 tick, `stopsModified: 2`.
+  Régression visée : un seul stop arbitraire était déplacé, laissant une partie de la
+  position protégée à l'ancien niveau
+
+### T-64 : Reverse avec protections actives
+- **Préconditions** : Long 2 avec stop et target actifs
+- **Action** : Reverse
+- **Résultat** : Les ordres de protection sont annulés **avant** le retournement
+  (`ordersCancelled` > 0), puis Short 2. Aucun ordre orphelin ne subsiste
+
+### T-65 : Cancel Orders ne ferme pas la position
+- **Préconditions** : Position ouverte + 1 limite d'entrée en attente
+- **Action** : Cancel Orders
+- **Résultat** : La limite est annulée, **la position reste ouverte**.
+  À comparer avec Close All, qui ferme tout
+
+### T-66 : Aucune confirmation d'ordre perdue sous charge
+- **Préconditions** : Add-on connecté, publication d'état toutes les 500 ms
+- **Action** : 30 pressions Buy/Sell Market espacées de ~200 ms
+- **Résultat** : 30 réponses reçues, aucun `TIMEOUT`, aucune déconnexion NT8.
+  Régression visée : un envoi concurrent abortait la socket
+  (`InvalidOperationException` → état `Aborted`), la réponse était perdue et le trader
+  re-pressait la touche sur un ordre déjà exécuté
+
+### T-67 : Position fantôme
+- **Préconditions** : Position ouverte, puis rendre l'instrument non résoluble
+- **Résultat** : La position disparaît du deck au lieu de rester figée avec un Close
+  qui échouerait en `INSTRUMENT_NOT_FOUND`
+
+## 8bis. Tests macro de sécurité verrouillable
+
+Réglages utilisés : `maxTradesWhenLosing = 3`, `dailyLossLimit = 300`,
+`lockDurationHours = 0.05` (3 min — minimum autorisé, pour ne pas attendre 6h).
+
+### T-72 : Configuration puis armement
+- **Préconditions** : Macro désarmée
+- **Action** : Régler les 3 champs dans le Property Inspector, presser Safety Macro
+- **Résultat** : Touche verte, compte à rebours affiché, `armed=true`, `locked=true`
+
+### T-73 : Désarmement refusé pendant le verrou
+- **Préconditions** : Macro armée, verrou en cours
+- **Action** : Presser Safety Macro
+- **Résultat** : `SAFETY_MACRO_LOCKED`, `showAlert` sur la touche, macro toujours armée
+
+### T-74 : Reconfiguration refusée pendant le verrou
+- **Préconditions** : Macro armée
+- **Action** : Modifier `dailyLossLimit` dans le Property Inspector
+- **Résultat** : `SAFETY_MACRO_LOCKED`, les limites verrouillées restent en vigueur
+
+### T-75 : Limite de trades atteinte en perte
+- **Préconditions** : Macro armée, 3 trades ouverts/fermés, PnL de session négatif
+- **Action** : Buy Market
+- **Résultat** : `SAFETY_TRADE_LIMIT_REACHED`, **aucun ordre transmis à NT8**,
+  touches d'entrée affichent `MAX TRADES`
+
+### T-76 : Limite de trades inerte si PnL positif
+- **Préconditions** : Macro armée, 3 trades, PnL de session positif
+- **Action** : Buy Market
+- **Résultat** : Ordre soumis normalement
+
+### T-77 : Perte journalière atteinte
+- **Préconditions** : Macro armée, PnL de session à -300 (réalisé et/ou latent)
+- **Action** : Buy Market / Sell Limit / Reverse
+- **Résultat** : `SAFETY_DAILY_LOSS_REACHED` pour les 3, touches affichent `LOSS LIMIT`
+
+### T-78 : Les sorties restent disponibles
+- **Préconditions** : Macro armée et bloquante, position ouverte
+- **Action** : Close, Cancel, BE, Stop ±, Target ±
+- **Résultat** : Toutes fonctionnent — aucune erreur `SAFETY_*`
+
+### T-79 : Redémarrage du bridge ne déverrouille pas
+- **Préconditions** : Macro armée, verrou en cours
+- **Action** : Tuer `StreamDeckBridge.exe`, le relancer
+- **Résultat** : Au démarrage, log `Safety macro is ARMED and locked for another …`.
+  `armed`, `locked`, `tradeCount`, limites et référence PnL sont conservés ;
+  le désarmement reste refusé
+
+### T-79b : Expiration du verrou
+- **Préconditions** : Macro armée, attendre la fin du verrou
+- **Résultat** : Log `Safety macro DISARMED (lock expired)`, touche grise `OFF`,
+  désarmement et reconfiguration à nouveau autorisés, paramètres conservés
+
+### T-79c : PnL du compte indisponible
+- **Préconditions** : Add-on publiant `pnlAvailable = false`
+- **Résultat** : Touche affiche `PNL?`, les règles PnL sont inertes (pas de blocage
+  silencieux ni de faux blocage)
+
 ## 9. Tests de robustesse
 
 ### T-80 : Pressions rapides répétées
@@ -240,6 +351,13 @@ Tests unitaires (xUnit / Jest) :
   - StateManager : qty operations, bounds checking
   - DuplicateGuard : window expiry, detection
   - MessageRouter : routing logic, local actions
+  - SafetyMacro : arm/disarm/configure sous verrou, évaluation des 2 règles,
+    comptage des trades, bascule de jour, persistance et rechargement
+  - BridgeClient (add-on) : envois concurrents sérialisés — à tester sur **net48**,
+    net8 sérialise en interne et masque le bug
+  - TradingEngine : refus sans flux de prix, BE du mauvais côté du marché,
+    Move Stop/Target sur plusieurs ordres, Reverse annulant les protections
+  - SimpleJson : NaN/Infinity ne doivent jamais produire du JSON invalide
   - StatusDisplayAction.getDisplayText : toutes les variantes
 
 Tests d'intégration :

@@ -18,36 +18,31 @@
 
   <div class="field">
     <label>Instrument Name</label>
-    <input type="text" id="instrument" value="ES 06-25" />
-    <div class="hint">Full NinjaTrader instrument name (e.g. "ES 06-25", "NQ 06-25")</div>
+    <input type="text" id="instrument" value="" placeholder="MNQ  or  MNQ 09-26" />
+    <div class="hint">Full contract ("MNQ 09-26") or root symbol ("MNQ") — a root is resolved to the front-month contract by the add-on.</div>
   </div>
 
   <div class="field">
     <label>Display Label</label>
-    <input type="text" id="displayLabel" value="ES" />
+    <input type="text" id="displayLabel" value="" placeholder="defaults to the instrument name" />
     <div class="hint">Short label shown on the button</div>
   </div>
 
+  <script src="pi.js"></script>
   <script>
     const $instrument = document.getElementById('instrument');
     const $label = document.getElementById('displayLabel');
 
-    window.addEventListener('message', (event) => {
-      if (event.data?.type === 'loadSettings') {
-        const s = event.data.settings || {};
-        if (s.instrument) $instrument.value = s.instrument;
-        if (s.displayLabel) $label.value = s.displayLabel;
-      }
+    PI.onSettings((s) => {
+      $instrument.value = s.instrument ?? '';
+      $label.value = s.displayLabel ?? '';
     });
 
     function save() {
-      window.parent.postMessage({
-        type: 'saveSettings',
-        settings: {
-          instrument: $instrument.value,
-          displayLabel: $label.value,
-        }
-      }, '*');
+      PI.save({
+        instrument: $instrument.value.trim(),
+        displayLabel: $label.value.trim(),
+      });
     }
 
     $instrument.addEventListener('change', save);

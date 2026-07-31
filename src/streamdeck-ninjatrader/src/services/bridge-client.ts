@@ -46,7 +46,7 @@ export class BridgeClient {
     if (this.running) return;
     this.running = true;
     this.connect();
-    log.info(`Bridge client started, connecting to ${this.url}`);
+    log.event('Connection', 'Bridge client started', { url: this.url, reconnectDelayMs: this.reconnectDelay });
   }
 
   stop(): void {
@@ -56,7 +56,7 @@ export class BridgeClient {
       this.reconnectTimer = null;
     }
     this.closeSocket();
-    log.info('Bridge client stopped');
+    log.event('Connection', 'Bridge client stopped');
   }
 
   onMessage(handler: MessageHandler): void {
@@ -76,6 +76,10 @@ export class BridgeClient {
    */
   async sendCommand(msg: BridgeMessage, timeoutMs = 10000): Promise<BridgeMessage> {
     if (!this.isConnected) {
+      log.eventWarn('Wire', `Command ${msg.action} not sent — bridge is not connected`, {
+        req: msg.requestId ?? '',
+        url: this.url,
+      });
       return {
         type: 'error',
         version: '1.0',
@@ -91,6 +95,11 @@ export class BridgeClient {
     return new Promise<BridgeMessage>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(msg.requestId!);
+        // A timeout means the command may or may not have reached the market: the bridge
+        // never answered. This is the single most important line to find afterwards.
+        log.eventWarn('Wire', `Command ${msg.action} TIMED OUT after ${timeoutMs}ms — outcome unknown`, {
+          req: msg.requestId ?? '',
+        });
         resolve({
           type: 'error',
           version: '1.0',
@@ -107,7 +116,7 @@ export class BridgeClient {
 
       const json = JSON.stringify(msg);
       this.ws!.send(json);
-      log.debug(`Sent: ${msg.action} [REQ:${msg.requestId}]`);
+      log.traceEvent('Wire', `→ bridge: ${msg.action}`, { req: msg.requestId ?? '', frame: json });
     });
   }
 
@@ -116,12 +125,12 @@ export class BridgeClient {
    */
   send(msg: BridgeMessage): void {
     if (!this.isConnected) {
-      log.warn('Cannot send — not connected to bridge');
+      log.eventWarn('Wire', `Fire-and-forget ${msg.action} dropped — bridge is not connected`);
       return;
     }
     const json = JSON.stringify(msg);
     this.ws!.send(json);
-    log.debug(`Sent: ${msg.action}`);
+    log.traceEvent('Wire', `→ bridge: ${msg.action} (no response expected)`, { frame: json });
   }
 
   private connect(): void {
@@ -129,30 +138,36 @@ export class BridgeClient {
       this.ws = new WebSocket(this.url);
 
       this.ws.on('open', () => {
-        log.info('Connected to bridge');
+        log.event('Connection', 'WebSocket open to bridge', { url: this.url });
         this.notifyConnection(true);
       });
 
       this.ws.on('message', (data: WebSocket.Data) => {
+        const raw = data.toString();
         try {
-          const msg: BridgeMessage = JSON.parse(data.toString());
+          const msg: BridgeMessage = JSON.parse(raw);
           this.handleMessage(msg);
         } catch (err) {
-          log.warn(`Invalid JSON from bridge: ${err}`);
+          log.fail('Wire', err, 'Invalid JSON from bridge — frame dropped', { frame: raw.slice(0, 500) });
         }
       });
 
-      this.ws.on('close', () => {
-        log.info('Disconnected from bridge');
+      this.ws.on('close', (code: number, reason: Buffer) => {
+        log.eventWarn('Connection', 'WebSocket closed by the bridge', {
+          code,
+          reason: reason?.toString() || '(none)',
+        });
         this.notifyConnection(false);
         this.scheduleReconnect();
       });
 
       this.ws.on('error', (err: Error) => {
-        log.warn(`WebSocket error: ${err.message}`);
+        // ECONNREFUSED on every retry while the bridge is down is expected noise, so this
+        // stays at warn rather than error — the connection state change tells the real story.
+        log.eventWarn('Connection', `WebSocket error: ${err.message}`, { url: this.url });
       });
     } catch (err) {
-      log.error(`Connection failed: ${err}`);
+      log.fail('Connection', err, 'Could not open a WebSocket to the bridge', { url: this.url });
       this.scheduleReconnect();
     }
   }
@@ -171,20 +186,31 @@ export class BridgeClient {
     if (msg.type === 'event' && msg.action === 'stateUpdate' && msg.payload) {
       this._lastState = msg.payload as unknown as TradingState;
       for (const handler of this.stateHandlers) {
-        try { handler(this._lastState); } catch (e) { /* skip */ }
+        try { handler(this._lastState); }
+        catch (e) { log.fail('Wire', e, 'A state handler threw — the deck may be showing stale data'); }
       }
       return;
     }
 
+    // A response nobody is waiting for: the request already timed out, or the bridge answered
+    // twice. Either way the key gave up before this arrived, which is worth knowing.
+    if (msg.type === 'response' && msg.requestId) {
+      log.eventWarn('Wire', `Late or unmatched response for ${msg.action}`, {
+        req: msg.requestId,
+        error: msg.error ? `${msg.error.code}: ${msg.error.message}` : undefined,
+      });
+    }
+
     // Generic message handlers
     for (const handler of this.messageHandlers) {
-      try { handler(msg); } catch (e) { /* skip */ }
+      try { handler(msg); }
+      catch (e) { log.fail('Wire', e, `A message handler threw while processing ${msg.type}/${msg.action}`); }
     }
   }
 
   private scheduleReconnect(): void {
     if (!this.running) return;
-    log.info(`Reconnecting in ${this.reconnectDelay}ms...`);
+    log.debugEvent('Connection', `Reconnecting in ${this.reconnectDelay}ms`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.running) this.connect();
@@ -202,7 +228,8 @@ export class BridgeClient {
 
   private notifyConnection(connected: boolean): void {
     for (const handler of this.connectionHandlers) {
-      try { handler(connected); } catch (e) { /* skip */ }
+      try { handler(connected); }
+      catch (e) { log.fail('Connection', e, `A connection handler threw (connected=${connected})`); }
     }
   }
 }

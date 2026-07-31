@@ -1,6 +1,6 @@
 is_global = true
 build_property.RootNamespace = NinjaTrader.NinjaScript.AddOns
-build_property.ProjectDir = C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\
+build_property.ProjectDir = c:\Users\pixel\Desktop\stream deck\src\NinjaTrader.AddOn.StreamDeck\
 build_property.EnableComHosting = 
 build_property.EnableGeneratedComInterfaceComImportInterop = 
 build_property.CsWinRTUseWindowsUIXamlProjections = false

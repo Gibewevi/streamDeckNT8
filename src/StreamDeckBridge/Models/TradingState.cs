@@ -17,6 +17,7 @@ public sealed class TradingState
     public bool CooldownEnabled { get; set; }
     public bool CooldownActive { get; set; }
     public int CooldownSecondsRemaining { get; set; }
+    public SafetyStatus Safety { get; set; } = new();
 }
 
 public sealed class PositionState
@@ -27,9 +28,19 @@ public sealed class PositionState
     public double AveragePrice { get; set; }
     public double UnrealizedPnl { get; set; }
     public bool HasStopOrder { get; set; }
+
+    /// <summary>Price of the stop that protects the position most tightly.</summary>
     public double StopPrice { get; set; }
+
+    /// <summary>Number of working stops — greater than 1 on a scaled position.</summary>
+    public int StopOrderCount { get; set; }
+
     public bool HasTargetOrder { get; set; }
+
+    /// <summary>Price of the nearest target in the position's direction.</summary>
     public double TargetPrice { get; set; }
+
+    public int TargetOrderCount { get; set; }
     public int ActiveOrderCount { get; set; }
 }
 

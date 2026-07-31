@@ -11,6 +11,7 @@ namespace StreamDeckBridge;
 public sealed class StateManager
 {
     private readonly BridgeConfig _config;
+    private readonly SafetyMacro _safety;
     private readonly ILogger<StateManager> _logger;
     private readonly object _lock = new();
     private readonly TradingState _state;
@@ -22,10 +23,12 @@ public sealed class StateManager
     private DateTime? _cooldownUntil;
     private bool _previousPositionExists;
     private double _previousUnrealizedPnl;
+    private string _previousPositionInstrument = string.Empty;
 
-    public StateManager(BridgeConfig config, ILogger<StateManager> logger)
+    public StateManager(BridgeConfig config, SafetyMacro safety, ILogger<StateManager> logger)
     {
         _config = config;
+        _safety = safety;
         _logger = logger;
         _state = new TradingState
         {
@@ -34,6 +37,63 @@ public sealed class StateManager
             Quantity = config.DefaultQuantity,
             DefaultQuantity = config.DefaultQuantity
         };
+
+        _sessionPath = ResolveSessionPath(config);
+
+        var savedInstrument = LoadSavedInstrument();
+        if (!string.IsNullOrWhiteSpace(savedInstrument))
+        {
+            _state.Instrument = savedInstrument;
+            _logger.LogInformation("Restored selected instrument: {Instrument}", savedInstrument);
+        }
+    }
+
+    private readonly string _sessionPath;
+
+    private static string ResolveSessionPath(BridgeConfig config)
+    {
+        if (!string.IsNullOrWhiteSpace(config.SessionStatePath))
+            return config.SessionStatePath;
+
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "StreamDeckTrader", "session.json");
+    }
+
+    private string? LoadSavedInstrument()
+    {
+        try
+        {
+            if (!File.Exists(_sessionPath)) return null;
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(_sessionPath));
+            if (doc.RootElement.TryGetProperty("instrument", out var value) && value.ValueKind == JsonValueKind.String)
+                return value.GetString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not read the session file {Path}: {Error}", _sessionPath, ex.Message);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Remembers the selected instrument so a restart does not silently fall back to
+    /// another one. Called whenever the trader picks an instrument on the deck.
+    /// </summary>
+    private void SaveSelectedInstrument(string instrument)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(_sessionPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(_sessionPath, JsonSerializer.Serialize(new { instrument }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not persist the selected instrument: {Error}", ex.Message);
+        }
     }
 
     public TradingState GetSnapshot()
@@ -58,7 +118,8 @@ public sealed class StateManager
                 AvailableAccounts = new List<string>(_state.AvailableAccounts),
                 CooldownEnabled = _cooldownEnabled,
                 CooldownActive = cooldownActive,
-                CooldownSecondsRemaining = cooldownRemaining
+                CooldownSecondsRemaining = cooldownRemaining,
+                Safety = _safety.GetStatus()
             };
         }
     }
@@ -111,6 +172,7 @@ public sealed class StateManager
         {
             _state.Instrument = instrument;
             _instrumentSetAt = DateTime.UtcNow;
+            SaveSelectedInstrument(instrument);
             _logger.LogInformation("Instrument set to {Instrument} (guarded for {Secs}s)", instrument, OverrideGuard.TotalSeconds);
             return _state.Instrument;
         }
@@ -156,8 +218,25 @@ public sealed class StateManager
             _previousPositionExists = _state.Position?.Exists ?? false;
             _previousUnrealizedPnl = _state.Position?.UnrealizedPnl ?? 0;
 
-            if (statePayload.TryGetProperty("position", out var pos))
+            // Account-wide P&L feeds the safety macro's loss rules
+            UpdateSafetyPnl(statePayload);
+
+            if (!statePayload.TryGetProperty("position", out var pos) || pos.ValueKind == JsonValueKind.Null)
             {
+                // NT8 omits "position" when the account or instrument cannot be resolved.
+                // Keeping the last value would leave a phantom position on the deck whose
+                // Close would fail with INSTRUMENT_NOT_FOUND — drop it instead.
+                if (_state.Position != null)
+                    _logger.LogInformation("Position cleared — NT8 published no position for the tracked context");
+
+                _state.Position = null;
+                _previousPositionInstrument = ReadInstrumentName(statePayload);
+            }
+            else
+            {
+                var previousInstrument = _previousPositionInstrument;
+                _previousPositionInstrument = ReadInstrumentName(statePayload);
+
                 _state.Position = JsonSerializer.Deserialize<PositionState>(pos.GetRawText(), CamelCase);
 
                 // Detect position closed with a loss → trigger cooldown
@@ -166,6 +245,15 @@ public sealed class StateManager
                 {
                     _cooldownUntil = DateTime.UtcNow.AddSeconds(60);
                     _logger.LogWarning("Cooldown activated for 60s after losing trade (PnL: {Pnl})", _previousUnrealizedPnl);
+                }
+
+                // Flat → open on the same instrument counts as one trade for the safety macro.
+                // Requiring the same instrument avoids counting a phantom trade when the
+                // tracked instrument switches to one that already has an open position.
+                if (!_previousPositionExists && currentExists &&
+                    string.Equals(previousInstrument, _previousPositionInstrument, StringComparison.OrdinalIgnoreCase))
+                {
+                    _safety.RecordTradeOpened();
                 }
             }
             if (statePayload.TryGetProperty("instrument", out var inst))
@@ -264,6 +352,46 @@ public sealed class StateManager
             // Allow protective/management actions even during cooldown
             return action is "buyMarket" or "sellMarket" or "buyLimit" or "sellLimit" or "reverse";
         }
+    }
+
+    /// <summary>
+    /// Forwards the account-wide P&amp;L (realized + unrealized) published by NT8 to the safety macro.
+    /// Silently skipped when NT8 could not read it, which the macro reports as pnlAvailable=false.
+    /// </summary>
+    private void UpdateSafetyPnl(JsonElement statePayload)
+    {
+        if (!statePayload.TryGetProperty("account", out var account) || account.ValueKind != JsonValueKind.Object)
+            return;
+
+        if (account.TryGetProperty("pnlAvailable", out var available) && available.ValueKind == JsonValueKind.False)
+            return;
+
+        var realized = GetDouble(account, "realizedPnl");
+        var unrealized = GetDouble(account, "unrealizedPnl");
+        if (realized == null && unrealized == null)
+            return;
+
+        _safety.UpdatePnl((realized ?? 0) + (unrealized ?? 0));
+    }
+
+    private static string ReadInstrumentName(JsonElement statePayload)
+    {
+        if (statePayload.TryGetProperty("instrument", out var instrument) &&
+            instrument.ValueKind == JsonValueKind.Object &&
+            instrument.TryGetProperty("name", out var name) &&
+            name.ValueKind == JsonValueKind.String)
+        {
+            return name.GetString() ?? string.Empty;
+        }
+
+        return string.Empty;
+    }
+
+    private static double? GetDouble(JsonElement element, string key)
+    {
+        if (element.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number)
+            return prop.GetDouble();
+        return null;
     }
 
     private static bool IsOrderAction(string action) =>

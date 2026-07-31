@@ -1,62 +1,156 @@
-# Stratégie de Logs V1
+# Stratégie de logs
 
-## Principes
+Chaque interaction, événement, action, refus, erreur ou comportement anormal est écrit
+automatiquement dans un fichier, **un fichier par jour et par composant**.
 
-1. **Corrélation** : tout requestId est loggé à chaque couche pour permettre le suivi d'une action de bout en bout
-2. **Lisibilité** : chaque log contient le contexte suffisant pour comprendre ce qui se passe sans aller lire un autre log
-3. **Niveaux** : INFO pour les événements normaux, WARN pour les refus / anomalies, ERROR pour les exceptions
-4. **Préfixes** : chaque composant a un préfixe distinct
+## Où sont les logs
 
-## Format par composant
-
-### Bridge
 ```
-[timestamp] [LEVEL] [StreamDeckBridge] message
-```
-Exemple :
-```
-2025-06-15 14:30:00.123 [INFO] [StreamDeckBridge] [REQ:a1b2c3d4] Received command: buyMarket
-2025-06-15 14:30:00.124 [INFO] [StreamDeckBridge] [REQ:a1b2c3d4] Forwarding buyMarket to NT8
-2025-06-15 14:30:00.125 [WARN] [StreamDeckBridge] [REQ:e5f6g7h8] Validation failed: INVALID_QUANTITY - Quantity must be >= 1
+%APPDATA%\StreamDeckTrader\logs\
+    plugin-2026-07-31.log     ← plugin Stream Deck (Node.js)
+    bridge-2026-07-31.log     ← bridge (C# .NET 8)
+    addon-2026-07-31.log      ← add-on NinjaTrader 8 (C# .NET 4.8)
 ```
 
-### NinjaTrader Add-On
+Soit, en clair : `C:\Users\<vous>\AppData\Roaming\StreamDeckTrader\logs\`.
+
+Les trois fichiers partagent le **même format de ligne** et la **même horloge locale**, donc les
+trois fichiers d'une même journée peuvent être triés ensemble pour rejouer une session complète
+de bout en bout (touche pressée → bridge → NinjaTrader → retour).
+
+Un nouveau fichier est créé automatiquement au premier événement suivant minuit. Les fichiers de
+plus de **30 jours** sont supprimés à ce moment-là. Si un fichier dépasse **25 Mo** dans la même
+journée, la suite est écrite dans `plugin-2026-07-31.1.log`, `.2.log`, etc. — la journée n'est
+jamais perdue, mais un emballement ne peut pas remplir le disque avec un seul fichier illisible.
+
+## Format d'une ligne
+
 ```
-[StreamDeck] LEVEL | message
-```
-Exemple :
-```
-[StreamDeck] INFO  | [REQ:a1b2c3d4] Dispatching: buyMarket
-[StreamDeck] INFO  | [REQ:a1b2c3d4] Buy 2 ES 06-25 Market submitted (OrderId: NT-12345)
-[StreamDeck] WARN  | [REQ:x9y0z1] Account not found: FakeAccount
-[StreamDeck] ERROR | [REQ:b2c3d4] Failed to submit market order — InvalidOperationException: ...
+2026-07-31 14:23:45.123 | INFO  | plugin | KeyDown | BuyMarket pressed | uuid=…buymarket qty=2 instrument=MNQ 09-26
+└─ horodatage local ─┘   │       │        │         │                   └─ contexte clé=valeur ─┘
+      (à la ms)          │       │        │         └─ message
+                         │       │        └─ catégorie d'événement
+                         │       └─ composant : plugin | bridge | addon
+                         └─ niveau
 ```
 
-### Stream Deck Plugin
+Une exception ajoute son type et son message sur la ligne, puis la pile d'appels sur les lignes
+suivantes, indentées de 4 espaces :
+
 ```
-[timestamp] [NTDeck][LEVEL][REQ:id] message
+2026-07-31 14:23:45.201 | ERROR | addon | Session | Test d'exception | exception=InvalidOperationException message=échec simulé
+    System.InvalidOperationException: échec simulé
+       à NinjaTrader.NinjaScript.AddOns.StreamDeck.Services.TradingEngine.BuyMarket(…)
 ```
-Exemple :
-```
-2025-06-15T14:30:00.123Z [NTDeck][INFO][REQ:a1b2c3d4] Sending buyMarket
-2025-06-15T14:30:00.225Z [NTDeck][INFO][REQ:a1b2c3d4] buyMarket succeeded: Buy 2 ES Market submitted
-2025-06-15T14:30:01.000Z [NTDeck][WARN][REQ:e5f6g7h8] buyMarket failed: INVALID_QUANTITY — Quantity must be >= 1
-```
+
+Les fichiers sont en UTF-8 avec BOM : les accents s'affichent correctement dans le Bloc-notes,
+VS Code et `Get-Content`.
+
+## Niveaux
+
+| Niveau  | Usage |
+|---------|-------|
+| `TRACE` | Trafic répétitif : état republié plusieurs fois par seconde, rafraîchissements de touches inchangées, trames WebSocket brutes. **Pas écrit par défaut.** |
+| `DEBUG` | Détail utile au diagnostic : trames de commandes, changement d'affichage d'une touche, apparition/disparition d'une touche. |
+| `INFO`  | Le déroulé normal : touche pressée, commande envoyée/acceptée, ordre soumis, position modifiée, connexion établie. |
+| `WARN`  | Refus et anomalies **attendues** : macro de sécurité qui bloque, cooldown actif, ordre rejeté par NinjaTrader, timeout, déconnexion. |
+| `ERROR` | Exceptions et échecs inattendus, avec pile d'appels. |
+
+Le niveau par défaut des fichiers est `DEBUG`. `TRACE` reste disponible à la demande pour rejouer
+le flux WebSocket complet, mais il représente des dizaines de milliers de lignes par jour.
+
+## Catégories d'événements
+
+| Catégorie | Ce qu'on y trouve |
+|-----------|-------------------|
+| `Session` | Démarrage/arrêt d'un composant, version, configuration, chemin du fichier de log |
+| `KeyDown` | Chaque appui sur une touche, avec quantité, instrument, compte et réglages au moment de l'appui |
+| `Command` | Commande envoyée, acceptée, refusée (avec le code d'erreur) ou terminée, avec sa durée |
+| `Order` | Cycle de vie des ordres côté NinjaTrader : soumis, accepté, exécuté, annulé, **rejeté** |
+| `Position` / `Protection` | Changements de position et d'ordres de protection (stops, targets) |
+| `Safety` | Macro de sécurité : armement, blocage des entrées, refus de désarmement |
+| `Cooldown` | Activation/désactivation et démarrage/fin du cooldown |
+| `Connection` | Connexions et pertes de connexion entre les trois composants |
+| `Wire` | Trames WebSocket, JSON invalide, réponses tardives, timeouts |
+| `Visual` | Ce que chaque touche affiche, journalisé **au changement** uniquement |
+| `State` | Transitions d'état : compte, instrument, quantité, NinjaTrader connecté ou non |
+| `StatePublish` | Santé de la publication d'état côté NT8 (ticks sautés = deck figé sur des données périmées) |
+
+## Ce qui est journalisé automatiquement
+
+- **Toute interaction** : chaque appui de touche, chaque changement de réglage dans le
+  Property Inspector, chaque apparition/disparition de touche sur le deck.
+- **Toute action** : commande envoyée, enrichie par le bridge, dispatchée par l'add-on, ordre
+  soumis à NinjaTrader — avec le `requestId` commun aux trois composants et la durée d'exécution.
+- **Tout refus** : validation, doublon de requête, macro de sécurité, cooldown, NinjaTrader
+  déconnecté, rejet de l'ordre par le broker — toujours avec le code et le motif.
+- **Tout événement** : changement de position, de compte, d'instrument, de quantité, connexions,
+  état de la macro de sécurité.
+- **Toute erreur** : exception avec type, message et pile d'appels — y compris les exceptions non
+  interceptées, les rejets de promesse non gérés et les tâches de fond qui plantent, dans les
+  trois composants.
+- **Tout comportement anormal** : timeout d'une commande (résultat inconnu), réponse arrivée
+  après l'abandon, publication d'état bloquée, P&L indisponible, JSON invalide, exécutable du
+  bridge introuvable.
+
+## Réglages
+
+Les trois composants lisent les mêmes variables d'environnement :
+
+| Variable | Effet | Défaut |
+|----------|-------|--------|
+| `STREAMDECK_TRADER_LOG_DIR` | Répertoire des logs | `%APPDATA%\StreamDeckTrader\logs` |
+| `STREAMDECK_TRADER_LOG_LEVEL` | Niveau minimum (`TRACE`…`ERROR`) — plugin et add-on | `DEBUG` |
+| `STREAMDECK_TRADER_LOG_RETENTION_DAYS` | Rétention en jours | `30` |
+
+Le bridge accepte en plus ses propres réglages `SDBRIDGE_` (prioritaires) :
+`SDBRIDGE_LogDirectory`, `SDBRIDGE_FileLogLevel`, `SDBRIDGE_LogRetentionDays`,
+`SDBRIDGE_MaxLogFileSizeMb`.
+
+> Le plugin est lancé par Stream Deck et l'add-on par NinjaTrader : pour qu'une variable les
+> atteigne, il faut la définir au niveau de l'utilisateur Windows (`setx`) puis redémarrer
+> l'application concernée.
 
 ## Scénarios de diagnostic
 
-### "Mon action ne fait rien"
-1. Vérifier le log plugin : est-ce que le message est envoyé ?
-2. Vérifier le log bridge : est-ce que le message y arrive ? Est-il validé ?
-3. Vérifier le log NT8 : est-ce que l'action arrive au dispatcher ?
-4. Chercher le requestId dans les 3 logs
+### « J'ai appuyé, il ne s'est rien passé »
 
-### "Mon ordre est rejeté"
-1. Chercher le requestId dans le log NT8
-2. Vérifier le code erreur retourné (ACCOUNT_NOT_FOUND, NO_POSITION, etc.)
-3. Vérifier les préconditions (position existe, stop existe, etc.)
+```powershell
+Select-String "KeyDown" "$env:APPDATA\StreamDeckTrader\logs\plugin-2026-07-31.log"
+```
 
-### "La connexion est instable"
-1. Log bridge : chercher les patterns "connected" / "disconnected"
-2. Log NT8 : "Connected to bridge" / "Disconnected from bridge"
-3. Vérifier qu'aucun firewall ne bloque les ports 8218/8219 sur localhost
+L'appui est-il enregistré ? Sinon, Stream Deck n'a pas transmis l'événement (touche mal
+configurée, plugin planté — chercher `Process` / `Session` dans le même fichier).
+S'il l'est, la ligne `Command` juste après donne le verdict : `accepted`, `refused` avec un code,
+ou `TIMED OUT` (dans ce dernier cas, **l'ordre a peut-être été passé quand même** : vérifier
+`Order` dans le log add-on).
+
+### « Mon ordre a été refusé »
+
+Récupérer le `req=…` de la ligne `Command` du plugin, puis le chercher dans les trois fichiers :
+
+```powershell
+Select-String "a1b2c3d4" "$env:APPDATA\StreamDeckTrader\logs\*-2026-07-31.log"
+```
+
+Le refus apparaît dans le composant qui l'a décidé : le bridge (validation, macro de sécurité,
+cooldown, NT8 déconnecté), l'add-on (contexte introuvable, pas de position, pas de flux de prix)
+ou NinjaTrader lui-même (ligne `ORDER REJECTED`, motif du broker : marge, marché fermé…).
+
+### « Le deck affiche des données périmées »
+
+Chercher `StatePublish` dans le log add-on (ticks sautés) et `Connection` dans les trois
+fichiers. Un deck figé vient presque toujours d'une connexion perdue ou d'une publication d'état
+bloquée, et les deux sont journalisées avec leur horodatage.
+
+### « Ça a planté »
+
+`ERROR` dans les trois fichiers, plus la catégorie `Process` (plugin) et `Session` (add-on,
+bridge) qui encadrent chaque démarrage et chaque arrêt. Un fichier qui s'arrête net sans ligne
+d'arrêt signale un processus tué.
+
+## Corrélation entre composants
+
+Le `requestId` généré par le plugin est repris tel quel par le bridge (`[REQ:…]`) et par l'add-on
+(`[REQ:…]`). Une commande se suit donc de bout en bout par une seule recherche, et les durées
+mesurées de chaque côté permettent de situer une lenteur : réseau local, bridge, ou NinjaTrader.

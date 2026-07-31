@@ -15,10 +15,11 @@ public sealed class MessageValidator
     private static readonly HashSet<string> KnownActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "buyMarket", "sellMarket", "buyLimit", "sellLimit",
-        "flatten", "cancelOrders", "reverse",
+        "flatten", "cancelOrders", "cancelWorkingOrders", "reverse",
         "breakeven", "moveStop", "moveTarget",
         "qtySet", "qtyAdjust", "qtyReset",
-        "setInstrument", "setAccount", "getState", "toggleCooldown"
+        "setInstrument", "setAccount", "getState", "toggleCooldown",
+        "armSafety", "disarmSafety", "toggleSafety", "configureSafety"
     };
 
     private static readonly HashSet<string> PositionRequiredActions = new(StringComparer.OrdinalIgnoreCase)
@@ -67,8 +68,11 @@ public sealed class MessageValidator
         if (message.Action == "setAccount")
             return ValidateRequiredPayloadString(message, "account", "account is required for setAccount.");
 
-        if (message.Action is "getState" or "toggleCooldown")
+        if (message.Action is "getState" or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety")
             return (true, null, null);
+
+        if (message.Action == "configureSafety")
+            return ValidateSafetyConfig(message);
 
         // All trading actions need instrument context at minimum
         return ValidateTradingAction(message);
@@ -121,6 +125,39 @@ public sealed class MessageValidator
         return (true, null, null);
     }
 
+    private static (bool, string?, string?) ValidateSafetyConfig(BridgeMessage message)
+    {
+        var maxTrades = GetPayloadInt(message, "maxTradesWhenLosing");
+        var dailyLoss = GetPayloadDouble(message, "dailyLossLimit");
+        var lockHours = GetPayloadDouble(message, "lockDurationHours");
+
+        if (maxTrades == null && dailyLoss == null && lockHours == null)
+        {
+            return (false, "INVALID_PAYLOAD",
+                "configureSafety requires at least one of maxTradesWhenLosing, dailyLossLimit, lockDurationHours.");
+        }
+
+        if (maxTrades is < 0 or > SafetyMacro.MaxTradeLimit)
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"maxTradesWhenLosing must be between 0 and {SafetyMacro.MaxTradeLimit} (0 disables the rule).");
+        }
+
+        if (dailyLoss is < 0 or > SafetyMacro.MaxDailyLossLimit)
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"dailyLossLimit must be between 0 and {SafetyMacro.MaxDailyLossLimit} (0 disables the rule).");
+        }
+
+        if (lockHours is < SafetyMacro.MinLockHours or > SafetyMacro.MaxLockHours)
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"lockDurationHours must be between {SafetyMacro.MinLockHours} and {SafetyMacro.MaxLockHours}.");
+        }
+
+        return (true, null, null);
+    }
+
     private (bool, string?, string?) ValidateRequiredPayloadString(BridgeMessage message, string key, string errorMessage)
     {
         var value = GetPayloadString(message, key);
@@ -145,6 +182,14 @@ public sealed class MessageValidator
         if (msg.Payload is not JsonElement el) return null;
         if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number)
             return prop.GetInt32();
+        return null;
+    }
+
+    private static double? GetPayloadDouble(BridgeMessage msg, string key)
+    {
+        if (msg.Payload is not JsonElement el) return null;
+        if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number)
+            return prop.GetDouble();
         return null;
     }
 }

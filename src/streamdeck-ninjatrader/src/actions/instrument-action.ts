@@ -5,7 +5,10 @@ import * as log from '../utils/logger.js';
 
 export class InstrumentSelectAction extends BaseAction {
   async onKeyDown(context: string, settings: Record<string, unknown>): Promise<void> {
-    const instrument = (settings.instrument as string) || 'ES 06-25';
+    // No hardcoded contract: an unconfigured key must do nothing rather than
+    // switch the deck to some other instrument.
+    const instrument = (settings.instrument as string) || '';
+    if (!instrument) return;
     const cmd = createCommand('setInstrument', { instrument });
     log.info(`Switching instrument to ${instrument}`, cmd.requestId ?? undefined);
 

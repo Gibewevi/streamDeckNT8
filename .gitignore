@@ -1,0 +1,9 @@
+# Sortie de `dotnet publish` utilisée pour le déploiement — régénérable, 2,5 Mo dupliqués
+src/StreamDeckBridge/publish/
+
+# Logs d'exécution : Stream Deck en écrit dans le dossier du plugin pendant le développement.
+# Les logs applicatifs du cockpit vivent dans %APPDATA%\StreamDeckTrader\logs, hors du dépôt.
+logs/
+
+# Note : bin/, obj/ et dist/ sont volontairement versionnés dans ce dépôt et le restent.
+# Les ajouter ici n'aurait aucun effet — .gitignore ne s'applique pas aux fichiers déjà suivis.

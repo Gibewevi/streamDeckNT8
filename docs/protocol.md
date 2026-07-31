@@ -103,7 +103,10 @@ Tous les messages échangés entre les 3 composants utilisent le même enveloppe
 }
 ```
 
-#### `cancelOrders`
+#### `cancelOrders` — « Close All » (destructif)
+⚠️ Annule **tous** les ordres en attente **et ferme la position** (appelle `Account.Flatten`).
+C'est l'action derrière la touche « Close All ». Pour n'annuler que les ordres, utiliser
+`cancelWorkingOrders`.
 ```json
 {
   "type": "command",
@@ -115,7 +118,24 @@ Tous les messages échangés entre les 3 composants utilisent le même enveloppe
 }
 ```
 
+#### `cancelWorkingOrders` — annule les ordres seulement
+Annule les ordres actifs de l'instrument **sans toucher à la position**. Idempotent :
+succès avec `ordersCancelled: 0` s'il n'y a rien à annuler.
+```json
+{
+  "type": "command",
+  "action": "cancelWorkingOrders",
+  "payload": {
+    "account": "Sim101",
+    "instrument": "ES 06-25"
+  }
+}
+```
+
 #### `reverse`
+Annule d'abord les ordres de protection de la position en cours, puis envoie un ordre au
+marché de `2 × quantité` pour retourner. Sans cette annulation, le stop de l'ancienne
+position resterait actif et viendrait s'ajouter à la nouvelle au lieu de la protéger.
 ```json
 {
   "type": "command",
@@ -216,6 +236,68 @@ Tous les messages échangés entre les 3 composants utilisent le même enveloppe
 }
 ```
 
+### Macro de sécurité verrouillable
+
+Ces 4 actions sont traitées **localement par le bridge** (jamais transmises à NT8).
+Chaque réponse — succès ou refus — embarque l'état complet de la macro dans `payload`
+(voir `safety` dans `stateUpdate`), ce qui permet au plugin de rafraîchir ses touches
+en un seul aller-retour.
+
+#### `armSafety`
+Arme la macro et démarre le verrou. Idempotent si déjà armée (un double appui
+ne prolonge jamais un verrou en cours).
+```json
+{
+  "type": "command",
+  "action": "armSafety",
+  "payload": {}
+}
+```
+
+#### `disarmSafety`
+Désarme la macro. **Refusé avec `SAFETY_MACRO_LOCKED` tant que le verrou court** —
+il n'existe volontairement aucun paramètre de contournement.
+```json
+{
+  "type": "command",
+  "action": "disarmSafety",
+  "payload": {}
+}
+```
+
+#### `toggleSafety`
+Arme si désarmée, tente de désarmer si armée. C'est l'action derrière la touche
+Stream Deck « Safety Macro ».
+```json
+{
+  "type": "command",
+  "action": "toggleSafety",
+  "payload": {}
+}
+```
+
+#### `configureSafety`
+Modifie les règles. **Refusé avec `SAFETY_MACRO_LOCKED` tant que la macro est armée** :
+les limites ne peuvent pas être assouplies en cours de session. Au moins un champ est
+requis, les champs absents sont laissés inchangés.
+```json
+{
+  "type": "command",
+  "action": "configureSafety",
+  "payload": {
+    "maxTradesWhenLosing": 15,
+    "dailyLossLimit": 300,
+    "lockDurationHours": 6
+  }
+}
+```
+
+| Champ | Plage | Description |
+|-------|-------|-------------|
+| `maxTradesWhenLosing` | 0–999 | Trades max une fois le PnL de session négatif. `0` = règle désactivée |
+| `dailyLossLimit` | 0–1 000 000 | Perte de session max (nombre positif). `0` = règle désactivée |
+| `lockDurationHours` | 0.05–24 | Durée du verrou après armement. Défaut `6` |
+
 ### État
 
 #### `getState`
@@ -282,7 +364,10 @@ Envoyé périodiquement (toutes les 500ms) et à chaque changement significatif.
     "connected": true,
     "account": {
       "name": "Sim101",
-      "connected": true
+      "connected": true,
+      "realizedPnl": -120.00,
+      "unrealizedPnl": 275.00,
+      "pnlAvailable": true
     },
     "instrument": {
       "name": "ES 06-25",
@@ -298,13 +383,78 @@ Envoyé périodiquement (toutes les 500ms) et à chaque changement significatif.
       "unrealizedPnl": 275.00,
       "hasStopOrder": true,
       "stopPrice": 5415.00,
+      "stopOrderCount": 1,
       "hasTargetOrder": true,
-      "targetPrice": 5435.00
+      "targetPrice": 5435.00,
+      "targetOrderCount": 1
     },
     "quantity": 5
   }
 }
 ```
+
+Le bridge enrichit cet événement avant de le relayer au plugin et y ajoute l'état de la
+macro de sécurité :
+
+```json
+{
+  "safety": {
+    "armed": true,
+    "locked": true,
+    "lockSecondsRemaining": 19840,
+    "lockDurationHours": 6,
+    "maxTradesWhenLosing": 15,
+    "dailyLossLimit": 300,
+    "tradeCount": 13,
+    "sessionPnl": -145.50,
+    "pnlAvailable": true,
+    "entriesBlocked": false,
+    "blockReason": "",
+    "tradingDay": "2026-07-29"
+  }
+}
+```
+
+| Champ | Description |
+|-------|-------------|
+| `armed` | Macro active |
+| `locked` | Verrou en cours — la macro ne peut pas être désarmée |
+| `lockSecondsRemaining` | Secondes restantes avant déverrouillage automatique |
+| `tradeCount` | Trades ouverts depuis le début de `tradingDay` |
+| `sessionPnl` | PnL depuis le PnL de début de journée (réalisé + latent) |
+| `pnlAvailable` | `false` si NT8 n'expose pas le PnL du compte — les règles PnL sont alors inertes |
+| `entriesBlocked` | Les ouvertures de position sont actuellement refusées |
+| `blockReason` | `""`, `"dailyLoss"` ou `"tradeLimit"` |
+
+### `orderUpdate`
+Émis par l'add-on quand NinjaTrader **refuse** un ordre. `Account.Submit` est asynchrone :
+sans cet événement, la touche clignote « OK » pour un ordre qui n'a jamais atteint le marché.
+
+```json
+{
+  "type": "event",
+  "version": "1.0",
+  "requestId": null,
+  "timestamp": "...",
+  "source": "addon",
+  "action": "orderUpdate",
+  "payload": {
+    "orderId": "NT-12345",
+    "orderState": "Rejected",
+    "rejected": true,
+    "error": "OrderRejected",
+    "reason": "Insufficient margin",
+    "quantity": 2,
+    "orderType": "Market",
+    "orderAction": "Buy",
+    "instrument": "ES 06-25"
+  }
+}
+```
+
+Le plugin affiche `REJECTED` pendant 5 s sur les touches d'entrée et déclenche un
+`showAlert`. Le fond de la touche reste normal : un fond grisé signifie « bloqué », jamais
+« rejeté ».
 
 ### `connectionStatus`
 ```json
@@ -332,6 +482,8 @@ Envoyé périodiquement (toutes les 500ms) et à chaque changement significatif.
 | `INSTRUMENT_NOT_FOUND` | Instrument introuvable dans NT8 |
 | `NO_POSITION` | Aucune position ouverte (requis par l'action) |
 | `NO_STOP_ORDER` | Aucun ordre stop trouvé |
+| `NO_MARKET_DATA` | Pas de flux de prix / tick size invalide — impossible de calculer un prix |
+| `INVALID_STOP_PRICE` | Le prix demandé mettrait le stop/target du mauvais côté du marché |
 | `NO_TARGET_ORDER` | Aucun ordre target trouvé |
 | `INVALID_QUANTITY` | Quantité ≤ 0 |
 | `INVALID_PAYLOAD` | Payload mal formé |
@@ -340,6 +492,10 @@ Envoyé périodiquement (toutes les 500ms) et à chaque changement significatif.
 | `DUPLICATE_REQUEST` | requestId déjà traité récemment |
 | `QUEUE_FULL` | File d'attente du bridge saturée |
 | `LIVE_ACCOUNT_BLOCKED` | Compte réel bloqué par safe mode |
+| `SAFETY_DAILY_LOSS_REACHED` | Perte journalière max atteinte — ouverture refusée par la macro |
+| `SAFETY_TRADE_LIMIT_REACHED` | Nombre max de trades en perte atteint — ouverture refusée par la macro |
+| `SAFETY_MACRO_LOCKED` | Désarmement / reconfiguration impossible avant la fin du verrou |
+| `COOLDOWN_ACTIVE` | Cooldown actif après un trade perdant |
 | `CONTEXT_MISSING` | Contexte insuffisant pour résoudre l'action |
 | `ORDER_REJECTED` | NT8 a rejeté l'ordre |
 | `INTERNAL_ERROR` | Erreur interne inattendue |

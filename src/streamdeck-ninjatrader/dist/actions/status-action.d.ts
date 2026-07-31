@@ -1,6 +1,6 @@
 import { BaseAction } from './base-action.js';
 import { TradingState } from '../models/messages.js';
-export type StatusType = 'account' | 'instrument' | 'position' | 'pnl' | 'quantity' | 'connection';
+export type StatusType = 'account' | 'instrument' | 'position' | 'pnl' | 'quantity' | 'connection' | 'safety';
 /**
  * Generic status display action.
  * What it shows depends on the 'statusType' setting.

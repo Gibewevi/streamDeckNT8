@@ -42,6 +42,7 @@ export interface ButtonVisual {
     textColor: string;
     subtitle?: string;
     subtitleColor?: string;
+    detail?: string;
     badge?: string;
     badgeColor?: string;
 }

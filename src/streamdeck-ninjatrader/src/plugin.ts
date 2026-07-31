@@ -16,12 +16,27 @@ class NTAction {
   manifestId: string | undefined;
   onWillAppear?: (ev: any) => void;
   onWillDisappear?: (ev: any) => void;
+  onDidReceiveSettings?: (ev: any) => void;
   onKeyDown?: (ev: any) => Promise<void> | void;
 }
 import { BridgeClient } from './services/bridge-client.js';
-import { DEFAULT_GLOBAL_SETTINGS, GlobalSettings, TradingState, createCommand } from './models/messages.js';
+import {
+  BridgeMessage,
+  DEFAULT_GLOBAL_SETTINGS,
+  DEFAULT_SAFETY_STATUS,
+  GlobalSettings,
+  OrderUpdate,
+  SafetyStatus,
+  TradingState,
+  createCommand,
+} from './models/messages.js';
 import { renderButtonSvg, Colors } from './utils/visuals.js';
+import * as log from './utils/logger.js';
 import { StatusDisplayAction as StatusLogic, type StatusType } from './actions/status-action.js';
+
+// Installed before anything else runs: a crash during startup is exactly the case where the
+// log has to survive.
+log.installProcessHandlers();
 
 // --- Global State ---
 const gs: GlobalSettings = { ...DEFAULT_GLOBAL_SETTINGS };
@@ -41,7 +56,15 @@ const DISCONNECTED_STATE: TradingState = {
   cooldownEnabled: false,
   cooldownActive: false,
   cooldownSecondsRemaining: 0,
+  safety: { ...DEFAULT_SAFETY_STATUS },
 };
+
+// Safety macro settings last seen on a Safety key, re-pushed to the bridge on reconnect
+let safetySettings: Record<string, unknown> = {};
+
+// Last order rejection reported by NinjaTrader, shown briefly on the entry keys
+const REJECTION_BANNER_MS = 5000;
+let lastRejection: { reason: string; at: number } | null = null;
 
 // Cooldown countdown timer — ticks locally every second for smooth display
 let cooldownTimer: ReturnType<typeof setInterval> | null = null;
@@ -142,7 +165,59 @@ function getAccountCycleList(settings: Record<string, unknown>, state: TradingSt
   return configuredActiveAccounts.length > 0 ? configuredActiveAccounts : availableAccounts;
 }
 
+/**
+ * What to show on an entry key instead of its normal caption.
+ * The safety macro wins over the cooldown because it is the rule the trader cannot lift.
+ * `dimmed` distinguishes a real block (key does nothing) from a transient notice
+ * (key still works) — a greyed-out key must never mean "your order was rejected".
+ */
+type EntryStatus = { label: string; dimmed: boolean } | null;
+
+function entryStatus(state: TradingState): EntryStatus {
+  if (state.safety?.entriesBlocked) {
+    return {
+      label: state.safety.blockReason === 'dailyLoss' ? 'LOSS LIMIT' : 'MAX TRADES',
+      dimmed: true,
+    };
+  }
+  if (state.cooldownActive) return { label: 'BLOCKED', dimmed: true };
+  // NinjaTrader refused the last order: notify, but the key remains usable
+  if (lastRejection && Date.now() - lastRejection.at < REJECTION_BANNER_MS) {
+    return { label: 'REJECTED', dimmed: false };
+  }
+  return null;
+}
+
+function formatLockRemaining(seconds: number): string {
+  if (seconds <= 0) return '--';
+  if (seconds >= 3600) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours}h${String(minutes).padStart(2, '0')}`;
+  }
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m`;
+  return `${seconds}s`;
+}
+
+/** Bottom line of the Safety key: trades used and session P&L. */
+function formatSafetyDetail(safety: SafetyStatus): string {
+  const trades = safety.maxTradesWhenLosing > 0
+    ? `${safety.tradeCount}/${safety.maxTradesWhenLosing}`
+    : `${safety.tradeCount}T`;
+
+  // Avoid '&' — this string is injected into SVG text.
+  if (!safety.pnlAvailable) return `${trades} PNL?`;
+
+  const pnl = Math.round(safety.sessionPnl);
+  return `${trades} ${pnl >= 0 ? '+' : ''}${pnl}`;
+}
+
 // --- Visual update engine ---
+
+// What each key currently shows. Visuals are recomputed on every state push (several times a
+// second across a dozen keys); logging each one would bury the file, so only actual changes
+// are recorded — which is also the only thing worth reading when a key "looks wrong".
+const lastVisualSignature = new Map<string, string>();
 
 function pushVisual(id: string) {
   const t = tracked.get(id);
@@ -151,14 +226,28 @@ function pushVisual(id: string) {
   const visual = computeVisual(t.uuid, t.settings, state);
   if (visual) {
     const svg = renderButtonSvg(visual);
-    streamDeck.logger.info(`pushVisual ${t.uuid}: title=${visual.title}, bg=${visual.bgColor}, svgLen=${svg.length}`);
-    t.sdAction.setImage(svg).catch((e: any) => streamDeck.logger.error(`setImage error: ${e}`));
+    const detail = 'detail' in visual ? visual.detail : '';
+    const signature = `${visual.title}|${visual.subtitle}|${detail}|${visual.bgColor}`;
+
+    if (lastVisualSignature.get(id) !== signature) {
+      lastVisualSignature.set(id, signature);
+      log.debugEvent('Visual', `Key display changed: ${t.uuid}`, {
+        title: visual.title,
+        subtitle: visual.subtitle,
+        bg: visual.bgColor,
+        svgLen: svg.length,
+      });
+    } else {
+      log.traceEvent('Visual', `Key refreshed unchanged: ${t.uuid}`, { title: visual.title });
+    }
+
+    t.sdAction.setImage(svg).catch((e: any) => log.fail('Visual', e, `setImage failed for ${t.uuid}`));
     // COUNTDOWN: use native title for the big number (SDK controls font size via setFeedbackLayout isn't available on Keypad)
     // All other actions: clear native title so only SVG text shows
     if (visual.title === 'COUNTDOWN') {
-      t.sdAction.setTitle(`${visual.subtitle || ''}`).catch((e: any) => streamDeck.logger.error(`setTitle error: ${e}`));
+      t.sdAction.setTitle(`${visual.subtitle || ''}`).catch((e: any) => log.fail('Visual', e, `setTitle failed for ${t.uuid}`));
     } else {
-      t.sdAction.setTitle('').catch((e: any) => streamDeck.logger.error(`setTitle error: ${e}`));
+      t.sdAction.setTitle('').catch((e: any) => log.fail('Visual', e, `setTitle failed for ${t.uuid}`));
     }
   }
 }
@@ -178,35 +267,35 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
 
   switch (uuid) {
     case 'com.trader.ninjatrader.buymarket': {
-      const blocked = state.cooldownActive ?? false;
+      const st = entryStatus(state);
       return {
-        title: 'MKT', subtitle: blocked ? 'BLOCKED' : `Buy ×${qty}`,
-        bgColor: blocked ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
-        textColor: blocked ? Colors.textDim : '#FFFFFF',
+        title: 'MKT', subtitle: st?.label ?? `Buy ×${qty}`,
+        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
+        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
       };
     }
     case 'com.trader.ninjatrader.sellmarket': {
-      const blocked = state.cooldownActive ?? false;
+      const st = entryStatus(state);
       return {
-        title: 'MKT', subtitle: blocked ? 'BLOCKED' : `Sell ×${qty}`,
-        bgColor: blocked ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
-        textColor: blocked ? Colors.textDim : '#FFFFFF',
+        title: 'MKT', subtitle: st?.label ?? `Sell ×${qty}`,
+        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
+        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
       };
     }
     case 'com.trader.ninjatrader.buylimit': {
-      const blocked = state.cooldownActive ?? false;
+      const st = entryStatus(state);
       return {
-        title: 'LMT', subtitle: blocked ? 'BLOCKED' : `Buy ×${qty}`,
-        bgColor: blocked ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
-        textColor: blocked ? Colors.textDim : '#FFFFFF',
+        title: 'LMT', subtitle: st?.label ?? `Buy ×${qty}`,
+        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
+        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
       };
     }
     case 'com.trader.ninjatrader.selllimit': {
-      const blocked = state.cooldownActive ?? false;
+      const st = entryStatus(state);
       return {
-        title: 'LMT', subtitle: blocked ? 'BLOCKED' : `Sell ×${qty}`,
-        bgColor: blocked ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
-        textColor: blocked ? Colors.textDim : '#FFFFFF',
+        title: 'LMT', subtitle: st?.label ?? `Sell ×${qty}`,
+        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
+        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
       };
     }
     case 'com.trader.ninjatrader.flatten':
@@ -222,11 +311,24 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
         textColor: posQty > 0 ? '#FFFFFF' : '#000000',
       };
     }
-    case 'com.trader.ninjatrader.reverse':
+    case 'com.trader.ninjatrader.cancelworkingorders': {
+      // Cancels working orders only — the position is left untouched
+      const orders = pos?.activeOrderCount ?? 0;
       return {
-        title: 'Invert', subtitle: `Qty ${pos?.quantity ?? 0}`,
-        bgColor: '#FFFFFF', textColor: '#000000',
+        title: 'CANCEL', subtitle: orders > 0 ? `${orders} order${orders > 1 ? 's' : ''}` : 'none',
+        bgColor: orders > 0 ? Colors.cancelYellow : Colors.cancelYellowDim,
+        textColor: orders > 0 ? '#000000' : Colors.textDim,
       };
+    }
+    case 'com.trader.ninjatrader.reverse': {
+      // Reverse opens a position in the other direction, so the safety macro gates it too
+      const st = entryStatus(state);
+      return {
+        title: 'Invert', subtitle: st?.label ?? `Qty ${pos?.quantity ?? 0}`,
+        bgColor: st?.dimmed ? Colors.disabled : '#FFFFFF',
+        textColor: st?.dimmed ? Colors.textDim : '#000000',
+      };
+    }
     case 'com.trader.ninjatrader.breakeven': {
       const offset = (settings.offsetTicks as number) ?? 0;
       return {
@@ -342,6 +444,11 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
         }
         case 'quantity': bgColor = Colors.qtySlate; break;
         case 'connection': bgColor = state.ntConnected ? Colors.buyGreen : Colors.sellRed; break;
+        case 'safety': {
+          const safety = state.safety;
+          bgColor = !safety?.armed ? Colors.disabled : safety.entriesBlocked ? Colors.sellRed : Colors.buyGreen;
+          break;
+        }
         default: bgColor = Colors.statusDark;
       }
       return { title, subtitle, bgColor, textColor };
@@ -359,6 +466,34 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
         textColor: enabled ? '#FFFFFF' : Colors.textDim,
       };
     }
+    case 'com.trader.ninjatrader.safety': {
+      const safety = state.safety ?? DEFAULT_SAFETY_STATUS;
+
+      if (!safety.armed) {
+        return {
+          title: 'SAFETY:GUARD', subtitle: 'OFF',
+          detail: `${safety.maxTradesWhenLosing || '--'} / ${safety.dailyLossLimit || '--'}`,
+          bgColor: Colors.disabled, textColor: Colors.textDim,
+        };
+      }
+
+      // Armed and a limit is hit — entries are refused for the rest of the lock
+      if (safety.entriesBlocked) {
+        return {
+          title: safety.blockReason === 'dailyLoss' ? 'SAFETY:LOSS' : 'SAFETY:MAX',
+          subtitle: formatLockRemaining(safety.lockSecondsRemaining),
+          detail: formatSafetyDetail(safety),
+          bgColor: Colors.sellRed, textColor: Colors.textWhite,
+        };
+      }
+
+      return {
+        title: 'SAFETY:LOCK',
+        subtitle: formatLockRemaining(safety.lockSecondsRemaining),
+        detail: formatSafetyDetail(safety),
+        bgColor: Colors.buyGreen, textColor: Colors.textWhite,
+      };
+    }
     default:
       return null;
   }
@@ -366,18 +501,44 @@ function computeVisual(uuid: string, settings: Record<string, unknown>, state: T
 
 // --- SDK Action factory ---
 
-function createSDAction(uuid: string, actionName: string, handler: (settings: Record<string, unknown>) => Promise<void>) {
+function createSDAction(
+  uuid: string,
+  actionName: string,
+  handler: (settings: Record<string, unknown>) => Promise<void>,
+  onSettings?: (settings: Record<string, unknown>) => Promise<void>
+) {
   const action = new NTAction();
   action.manifestId = uuid;
 
+  const applySettings = (settings: Record<string, unknown>) => {
+    if (!onSettings) return;
+    onSettings(settings).catch((err: any) =>
+      log.fail('Settings', err, `${actionName}: applying settings failed`, { settings }));
+  };
+
   action.onWillAppear = (ev: any) => {
     const id = ev.action.id;
-    tracked.set(id, { sdAction: ev.action, uuid, settings: ev.payload.settings as Record<string, unknown> });
+    const settings = ev.payload.settings as Record<string, unknown>;
+    tracked.set(id, { sdAction: ev.action, uuid, settings });
+    log.debugEvent('Key', `${actionName} appeared on the deck`, { id, uuid, settings });
     pushVisual(id);
+    applySettings(settings);
   };
 
   action.onWillDisappear = (ev: any) => {
     tracked.delete(ev.action.id);
+    lastVisualSignature.delete(ev.action.id);
+    log.debugEvent('Key', `${actionName} removed from the deck`, { id: ev.action.id, uuid });
+  };
+
+  // Fired when the Property Inspector saves — used to push config to the bridge
+  action.onDidReceiveSettings = (ev: any) => {
+    const settings = ev.payload.settings as Record<string, unknown>;
+    const t = tracked.get(ev.action.id);
+    if (t) t.settings = settings;
+    log.event('Settings', `${actionName}: settings changed`, { id: ev.action.id, uuid, settings });
+    pushVisual(ev.action.id);
+    applySettings(settings);
   };
 
   action.onKeyDown = async (ev: any) => {
@@ -386,11 +547,24 @@ function createSDAction(uuid: string, actionName: string, handler: (settings: Re
     const t = tracked.get(ev.action.id);
     if (t) t.settings = settings;
 
+    // Every press is recorded before anything is attempted: a key that produced no order at
+    // all and a key whose order was refused look identical on the deck, and only this line
+    // tells them apart afterwards.
+    const startedAt = Date.now();
+    log.event('KeyDown', `${actionName} pressed`, {
+      uuid,
+      qty: lastState?.quantity ?? gs.defaultQuantity,
+      instrument: lastState?.instrument ?? '',
+      account: lastState?.account ?? '',
+      settings,
+    });
+
     try {
       await handler(settings);
       ev.action.showOk();
+      log.event('KeyDown', `${actionName} completed`, { uuid, elapsedMs: Date.now() - startedAt });
     } catch (err: any) {
-      streamDeck.logger.error(`${actionName} error: ${err}`);
+      log.fail('KeyDown', err, `${actionName} failed`, { uuid, elapsedMs: Date.now() - startedAt });
       ev.action.showAlert();
     }
   };
@@ -405,14 +579,36 @@ async function sendCmd(action: string, payload: Record<string, unknown>, setting
   const fallbackAccount = typeof settings.account === 'string' ? settings.account.trim() : '';
   const account = selectedAccount || fallbackAccount || gs.defaultAccount;
   const instrument = (settings.instrument as string) || lastState?.instrument || gs.defaultInstrument;
-  streamDeck.logger.info(`sendCmd ${action}: account=${account}, instrument=${instrument}, payload=${JSON.stringify(payload)}`);
   const cmd = createCommand(action, { account, instrument, ...payload });
+
+  log.event('Command', `Sending ${action}`, {
+    req: cmd.requestId ?? '',
+    account,
+    instrument,
+    payload,
+  });
+
+  const startedAt = Date.now();
   const resp = await bridge.sendCommand(cmd);
-  streamDeck.logger.info(`sendCmd ${action} response: ${JSON.stringify(resp)}`);
+  const elapsedMs = Date.now() - startedAt;
+
   if (resp.error) {
-    streamDeck.logger.error(`${action} failed: ${resp.error.code} — ${resp.error.message}`);
+    // Refusals are the normal way the bridge enforces safety, cooldown and NT8 availability:
+    // they are expected events, not crashes, and the code is what identifies which rule fired.
+    log.eventWarn('Command', `${action} refused`, {
+      req: cmd.requestId ?? '',
+      code: resp.error.code,
+      reason: resp.error.message,
+      elapsedMs,
+    });
     throw new Error(`${resp.error.code}: ${resp.error.message}`);
   }
+
+  log.event('Command', `${action} accepted`, {
+    req: cmd.requestId ?? '',
+    elapsedMs,
+    result: resp.result,
+  });
 }
 
 // Entry orders
@@ -433,8 +629,13 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.selllim
 streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.flatten', 'Flatten', async (s) => {
   await sendCmd('flatten', {}, s);
 }));
-streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.cancelorders', 'CancelOrders', async (s) => {
+// Close All — cancels every pending order AND closes the position
+streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.cancelorders', 'CloseAll', async (s) => {
   await sendCmd('cancelOrders', {}, s);
+}));
+// Cancel Orders — cancels working orders only, position untouched
+streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.cancelworkingorders', 'CancelWorkingOrders', async (s) => {
+  await sendCmd('cancelWorkingOrders', {}, s);
 }));
 streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.reverse', 'Reverse', async (s) => {
   await sendCmd('reverse', {}, s);
@@ -509,10 +710,12 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.account
   // Settings only reorder/filter accounts that are currently active in NT8.
   // They never reintroduce stale broker accounts that NT8 is not publishing.
   const accounts = getAccountCycleList(s, lastState);
-  streamDeck.logger.info(`Account button pressed, accounts: ${accounts.length}`);
 
   if (accounts.length === 0) {
-    streamDeck.logger.info('Account: no accounts available');
+    log.eventWarn('Account', 'Account key pressed but NinjaTrader publishes no active account', {
+      ntConnected: lastState?.ntConnected ?? false,
+      configured: s.accounts,
+    });
     return;
   }
 
@@ -520,7 +723,12 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.account
   const currentIdx = accounts.indexOf(currentAccount);
   const nextIdx = (currentIdx + 1) % accounts.length;
   const nextAccount = accounts[nextIdx];
-  streamDeck.logger.info(`Account cycle: current=${currentAccount}, idx=${currentIdx}, nextIdx=${nextIdx}, next=${nextAccount}, total=${accounts.length}`);
+  log.event('Account', 'Cycling account', {
+    from: currentAccount || '(none)',
+    to: nextAccount,
+    index: `${nextIdx + 1}/${accounts.length}`,
+    available: accounts.join(','),
+  });
 
   // Always update local state for immediate visual feedback
   if (!lastState) lastState = { ...DISCONNECTED_STATE };
@@ -546,6 +754,64 @@ streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.cooldow
   const cmd = createCommand('toggleCooldown', {});
   await bridge.sendCommand(cmd);
 }));
+
+// --- Safety macro ---
+
+/** Adopts the safety status the bridge attaches to every safety response. */
+function applySafetyResponse(resp: BridgeMessage): void {
+  const safety = resp.payload as unknown as SafetyStatus | undefined;
+  if (!safety || typeof safety.armed !== 'boolean') return;
+  if (!lastState) lastState = { ...DISCONNECTED_STATE };
+  lastState.safety = { ...DEFAULT_SAFETY_STATUS, ...safety };
+  pushAllVisuals();
+}
+
+/**
+ * Sends the Property Inspector values to the bridge, which owns and persists them.
+ * The bridge refuses the change while the macro is armed — that refusal is expected
+ * and simply means the locked settings stay in force.
+ */
+async function pushSafetyConfig(settings: Record<string, unknown>): Promise<void> {
+  const payload: Record<string, unknown> = {};
+  for (const key of ['maxTradesWhenLosing', 'dailyLossLimit', 'lockDurationHours']) {
+    const value = settings[key];
+    if (typeof value === 'number' && Number.isFinite(value)) payload[key] = value;
+  }
+
+  safetySettings = settings;
+  if (Object.keys(payload).length === 0 || !bridge.isConnected) return;
+
+  const resp = await bridge.sendCommand(createCommand('configureSafety', payload));
+  if (resp.error) {
+    // Expected while the macro is armed — the locked limits stay in force.
+    log.event('Safety', 'configureSafety refused by the bridge', {
+      code: resp.error.code,
+      reason: resp.error.message,
+      requested: payload,
+    });
+  } else {
+    log.event('Safety', 'Safety limits pushed to the bridge', { requested: payload });
+  }
+  applySafetyResponse(resp);
+}
+
+// Arms the macro, or attempts to disarm it once the lock has expired.
+// A refusal from the bridge surfaces as showAlert on the key.
+streamDeck.actions.registerAction(createSDAction('com.trader.ninjatrader.safety', 'Safety', async () => {
+  const resp = await bridge.sendCommand(createCommand('toggleSafety', {}));
+  applySafetyResponse(resp);
+  if (resp.error) {
+    log.eventWarn('Safety', 'toggleSafety refused (lock still running)', {
+      code: resp.error.code,
+      reason: resp.error.message,
+    });
+    throw new Error(`${resp.error.code}: ${resp.error.message}`);
+  }
+  log.event('Safety', 'Safety macro toggled', {
+    armed: lastState?.safety?.armed ?? false,
+    lockSecondsRemaining: lastState?.safety?.lockSecondsRemaining ?? 0,
+  });
+}, pushSafetyConfig));
 
 // --- Bridge state listener ---
 bridge.onStateUpdate((raw: any) => {
@@ -573,8 +839,10 @@ bridge.onStateUpdate((raw: any) => {
       unrealizedPnl: pos.unrealizedPnl || 0,
       hasStopOrder: pos.hasStopOrder || false,
       stopPrice: pos.stopPrice || 0,
+      stopOrderCount: pos.stopOrderCount || 0,
       hasTargetOrder: pos.hasTargetOrder || false,
       targetPrice: pos.targetPrice || 0,
+      targetOrderCount: pos.targetOrderCount || 0,
       activeOrderCount: pos.activeOrderCount || 0,
     } : null,
     instrumentInfo: inst.name ? {
@@ -589,6 +857,8 @@ bridge.onStateUpdate((raw: any) => {
     cooldownEnabled: raw.cooldownEnabled ?? false,
     cooldownActive: raw.cooldownActive ?? false,
     cooldownSecondsRemaining: raw.cooldownSecondsRemaining ?? 0,
+    // The bridge is the authority on the safety macro; never fabricate a permissive default
+    safety: { ...DEFAULT_SAFETY_STATUS, ...(raw.safety ?? {}) },
   };
 
   // If a pending account change was recently sent, keep the local account instead of the bridge's stale value
@@ -604,6 +874,7 @@ bridge.onStateUpdate((raw: any) => {
     state.cooldownSecondsRemaining = lastState.cooldownSecondsRemaining;
   }
 
+  const previous = lastState;
   lastState = state;
 
   // Manage cooldown countdown timer
@@ -613,13 +884,155 @@ bridge.onStateUpdate((raw: any) => {
     stopCooldownTimer();
   }
 
-  streamDeck.logger.info(`StateUpdate received: account=${state.account}, ntConnected=${state.ntConnected}, instrument=${state.instrument}, accounts=[${state.availableAccounts.join(',')}], tracked=${tracked.size}`);
+  logStateTransitions(previous, state);
+  log.traceEvent('State', 'State update applied', {
+    account: state.account,
+    ntConnected: state.ntConnected,
+    instrument: state.instrument,
+    quantity: state.quantity,
+    accounts: state.availableAccounts.join(','),
+    trackedKeys: tracked.size,
+  });
+
   pushAllVisuals();
 });
 
-bridge.onConnectionChange((connected) => {
-  streamDeck.logger.info(`Bridge: ${connected ? 'CONNECTED' : 'DISCONNECTED'}`);
+/**
+ * Logs only what changed between two state pushes.
+ *
+ * The bridge republishes the full state every couple of seconds; logging each push would add
+ * tens of thousands of identical lines a day and hide the handful that matter. Transitions —
+ * NinjaTrader going away, the account switching, a position opening or closing, the safety
+ * macro starting to refuse entries — are the timeline a diagnosis is actually built from.
+ */
+function logStateTransitions(prev: TradingState | null, next: TradingState): void {
+  if (!prev) {
+    log.event('State', 'First state received from the bridge', {
+      account: next.account,
+      instrument: next.instrument,
+      ntConnected: next.ntConnected,
+      accounts: next.availableAccounts.join(','),
+    });
+    return;
+  }
+
+  if (prev.ntConnected !== next.ntConnected) {
+    const message = next.ntConnected
+      ? 'NinjaTrader is connected'
+      : 'NinjaTrader is NOT connected — trading keys will be refused';
+    if (next.ntConnected) log.event('State', message);
+    else log.eventWarn('State', message);
+  }
+
+  if (prev.account !== next.account) {
+    log.event('State', 'Account changed', { from: prev.account || '(none)', to: next.account || '(none)' });
+  }
+
+  if (prev.instrument !== next.instrument) {
+    log.event('State', 'Instrument changed', { from: prev.instrument || '(none)', to: next.instrument || '(none)' });
+  }
+
+  if (prev.quantity !== next.quantity) {
+    log.event('State', 'Quantity changed', { from: prev.quantity, to: next.quantity });
+  }
+
+  const prevPos = prev.position;
+  const nextPos = next.position;
+  const prevSig = `${prevPos?.direction ?? 'none'}|${prevPos?.quantity ?? 0}|${prevPos?.averagePrice ?? 0}`;
+  const nextSig = `${nextPos?.direction ?? 'none'}|${nextPos?.quantity ?? 0}|${nextPos?.averagePrice ?? 0}`;
+  if (prevSig !== nextSig) {
+    log.event('State', 'Position changed', {
+      from: prevSig,
+      direction: nextPos?.direction ?? 'none',
+      quantity: nextPos?.quantity ?? 0,
+      averagePrice: nextPos?.averagePrice ?? 0,
+      unrealizedPnl: nextPos?.unrealizedPnl ?? 0,
+    });
+  }
+
+  const prevSafety = prev.safety ?? DEFAULT_SAFETY_STATUS;
+  const nextSafety = next.safety ?? DEFAULT_SAFETY_STATUS;
+  if (prevSafety.armed !== nextSafety.armed) {
+    log.event('Safety', nextSafety.armed ? 'Safety macro ARMED' : 'Safety macro disarmed', {
+      maxTradesWhenLosing: nextSafety.maxTradesWhenLosing,
+      dailyLossLimit: nextSafety.dailyLossLimit,
+      lockSecondsRemaining: nextSafety.lockSecondsRemaining,
+    });
+  }
+  if (prevSafety.entriesBlocked !== nextSafety.entriesBlocked) {
+    if (nextSafety.entriesBlocked) {
+      log.eventWarn('Safety', 'Entries are now BLOCKED by the safety macro', {
+        reason: nextSafety.blockReason,
+        tradeCount: nextSafety.tradeCount,
+        sessionPnl: nextSafety.sessionPnl,
+        lockSecondsRemaining: nextSafety.lockSecondsRemaining,
+      });
+    } else {
+      log.event('Safety', 'Entries are allowed again');
+    }
+  }
+
+  if (prev.cooldownEnabled !== next.cooldownEnabled) {
+    log.event('Cooldown', `Cooldown ${next.cooldownEnabled ? 'enabled' : 'disabled'}`);
+  }
+  if (prev.cooldownActive !== next.cooldownActive) {
+    log.event('Cooldown', next.cooldownActive ? 'Cooldown started — entries blocked' : 'Cooldown finished', {
+      seconds: next.cooldownSecondsRemaining,
+    });
+  }
+
+  const prevAccounts = prev.availableAccounts.join(',');
+  const nextAccounts = next.availableAccounts.join(',');
+  if (prevAccounts !== nextAccounts) {
+    log.event('State', 'Available accounts changed', { from: prevAccounts || '(none)', to: nextAccounts || '(none)' });
+  }
+}
+
+// --- Order rejections ---
+// Account.Submit is asynchronous: a refused order (margin, closed market, invalid price)
+// is reported later by NinjaTrader, long after the key already flashed OK. Surface it.
+bridge.onMessage((msg) => {
+  if (msg.type !== 'event' || msg.action !== 'orderUpdate') return;
+
+  const update = (msg.payload ?? {}) as unknown as OrderUpdate;
+  if (!update.rejected) return;
+
+  const detail = [update.orderAction, update.orderType, update.instrument].filter(Boolean).join(' ');
+  log.error(`ORDER REJECTED by NinjaTrader: ${detail || update.orderId}`, {
+    orderId: update.orderId,
+    reason: update.reason,
+    error: update.error,
+    orderAction: update.orderAction,
+    orderType: update.orderType,
+    instrument: update.instrument,
+  });
+
+  lastRejection = { reason: update.reason || update.error || 'Rejected', at: Date.now() };
+  for (const t of tracked.values()) {
+    t.sdAction.showAlert().catch(() => { /* key may have disappeared */ });
+  }
   pushAllVisuals();
+
+  // Clear the banner after a few seconds so the keys return to their normal display
+  setTimeout(() => {
+    if (lastRejection && Date.now() - lastRejection.at >= REJECTION_BANNER_MS) {
+      lastRejection = null;
+      pushAllVisuals();
+    }
+  }, REJECTION_BANNER_MS + 100);
+});
+
+bridge.onConnectionChange((connected) => {
+  if (connected) log.event('Connection', 'Bridge CONNECTED', { url: gs.bridgeUrl });
+  else log.eventWarn('Connection', 'Bridge DISCONNECTED — keys are inert until it comes back', { url: gs.bridgeUrl });
+  pushAllVisuals();
+
+  // Re-publish the configured limits so a bridge that started without a state file
+  // picks them up. Ignored by the bridge while a lock is running.
+  if (connected && Object.keys(safetySettings).length > 0) {
+    pushSafetyConfig(safetySettings).catch((err: any) =>
+      log.fail('Safety', err, 'Re-publishing safety limits after reconnect failed'));
+  }
 });
 
 // --- Auto-launch bridge if not running ---
@@ -629,7 +1042,7 @@ function launchBridge(): void {
   const bridgePath = join(pluginDir, '..', 'bridge', 'StreamDeckBridge.exe');
 
   if (!existsSync(bridgePath)) {
-    streamDeck.logger.warn(`Bridge exe not found at ${bridgePath}`);
+    log.eventWarn('Bridge', 'Bridge executable not found — no bridge will be started', { path: bridgePath });
     return;
   }
 
@@ -640,14 +1053,23 @@ function launchBridge(): void {
       windowsHide: true,
     });
     child.unref();
-    streamDeck.logger.info(`Bridge auto-launched (PID ${child.pid})`);
+    // stdio is ignored, so this PID is the only handle on that process: its own log file
+    // (bridge-YYYY-MM-DD.log, same folder) is where the rest of its story is written.
+    log.event('Bridge', 'Bridge auto-launched', { pid: child.pid, path: bridgePath });
   } catch (err: any) {
-    streamDeck.logger.error(`Failed to launch bridge: ${err.message}`);
+    log.fail('Bridge', err, 'Failed to launch the bridge executable', { path: bridgePath });
   }
 }
 
+// --- Start ---
+log.logSessionHeader({
+  bridgeUrl: gs.bridgeUrl,
+  defaultQuantity: gs.defaultQuantity,
+  defaultAccount: gs.defaultAccount,
+  defaultInstrument: gs.defaultInstrument,
+});
+
 launchBridge();
 
-// --- Start ---
 bridge.start();
 streamDeck.connect();

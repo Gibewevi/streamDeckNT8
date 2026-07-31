@@ -88,6 +88,16 @@
       ]
     },
     {
+      "Name": "Cancel Orders",
+      "UUID": "com.trader.ninjatrader.cancelworkingorders",
+      "Icon": "imgs/actions/cancel-orders",
+      "Tooltip": "Cancel working orders for the instrument WITHOUT closing the position",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/cancel-orders", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
+      ]
+    },
+    {
       "Name": "Reverse",
       "UUID": "com.trader.ninjatrader.reverse",
       "Icon": "imgs/actions/reverse",
@@ -240,6 +250,17 @@
       "States": [
         { "Image": "imgs/actions/status", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
       ]
+    },
+    {
+      "Name": "Safety Macro",
+      "UUID": "com.trader.ninjatrader.safety",
+      "Icon": "imgs/actions/status",
+      "Tooltip": "Arm the lockable safety macro (trade limit + daily loss). Cannot be disarmed before the lock expires.",
+      "Controllers": ["Keypad"],
+      "States": [
+        { "Image": "imgs/actions/status", "TitleAlignment": "middle", "FontSize": "12", "ShowTitle": false }
+      ],
+      "PropertyInspectorPath": "ui/safety-settings.html"
     }
   ]
 }

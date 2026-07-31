@@ -22,26 +22,15 @@
     <div class="hint">Optional. Separate accounts with commas or new lines to reorder/filter active accounts only.</div>
   </div>
 
+  <script src="pi.js"></script>
   <script>
     const $accounts = document.getElementById('accounts');
 
-    window.addEventListener('message', (event) => {
-      if (event.data && event.data.type === 'loadSettings') {
-        const s = event.data.settings || {};
-        if (s.accounts) $accounts.value = s.accounts;
-      }
+    PI.onSettings((s) => { $accounts.value = s.accounts ?? ''; });
+
+    $accounts.addEventListener('change', () => {
+      PI.save({ accounts: $accounts.value.trim() });
     });
-
-    function save() {
-      window.parent.postMessage({
-        type: 'saveSettings',
-        settings: {
-          accounts: $accounts.value || undefined,
-        },
-      }, '*');
-    }
-
-    $accounts.addEventListener('change', save);
   </script>
 </body>
 </html>

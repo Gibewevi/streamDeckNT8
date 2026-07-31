@@ -57,13 +57,17 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
 
             if (value is double d)
             {
-                sb.Append(d.ToString("G", CultureInfo.InvariantCulture));
+                // NaN/Infinity are not valid JSON: emitting them would make the receiver
+                // reject the whole message, taking the entire state feed down with it.
+                if (double.IsNaN(d) || double.IsInfinity(d)) sb.Append("null");
+                else sb.Append(d.ToString("G", CultureInfo.InvariantCulture));
                 return;
             }
 
             if (value is float f)
             {
-                sb.Append(f.ToString("G", CultureInfo.InvariantCulture));
+                if (float.IsNaN(f) || float.IsInfinity(f)) sb.Append("null");
+                else sb.Append(f.ToString("G", CultureInfo.InvariantCulture));
                 return;
             }
 

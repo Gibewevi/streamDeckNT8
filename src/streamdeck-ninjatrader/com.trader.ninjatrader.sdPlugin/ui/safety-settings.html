@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Safety Macro Settings</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; color: #ccc; background: #2d2d2d; margin: 0; padding: 12px; }
+    .field { margin-bottom: 12px; }
+    label { display: block; margin-bottom: 4px; color: #999; font-size: 11px; text-transform: uppercase; }
+    input { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #1a1a1a; border: 1px solid #444; color: #fff; border-radius: 4px; font-size: 12px; }
+    input:focus { border-color: #0078d4; outline: none; }
+    .hint { font-size: 10px; color: #666; margin-top: 2px; }
+    h3 { color: #fff; font-size: 13px; margin: 0 0 12px 0; border-bottom: 1px solid #444; padding-bottom: 8px; }
+    .warn { background: #3a2a15; border: 1px solid #6d4a00; color: #f9a825; border-radius: 4px; padding: 8px; font-size: 11px; line-height: 1.4; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <h3>Safety Macro</h3>
+
+  <div class="warn">
+    Once armed, the macro cannot be disarmed before its lock expires — there is no manual
+    unlock. These values can only be changed while it is disarmed.
+  </div>
+
+  <div class="field">
+    <label>Max trades while losing</label>
+    <input type="number" id="maxTradesWhenLosing" value="15" min="0" max="999" step="1" />
+    <div class="hint">Once the session P&amp;L is negative, entries are refused from this trade count on. 0 = rule off.</div>
+  </div>
+
+  <div class="field">
+    <label>Daily loss limit ($)</label>
+    <input type="number" id="dailyLossLimit" value="300" min="0" max="1000000" step="10" />
+    <div class="hint">Entries are refused as soon as the session loss reaches this amount. 0 = rule off.</div>
+  </div>
+
+  <div class="field">
+    <label>Lock duration (hours)</label>
+    <input type="number" id="lockDurationHours" value="6" min="0.05" max="24" step="0.25" />
+    <div class="hint">How long the macro stays locked after arming. Default 6h.</div>
+  </div>
+
+  <script src="pi.js"></script>
+  <script>
+    const $maxTrades = document.getElementById('maxTradesWhenLosing');
+    const $dailyLoss = document.getElementById('dailyLossLimit');
+    const $lockHours = document.getElementById('lockDurationHours');
+
+    PI.onSettings((s) => {
+      $maxTrades.value = s.maxTradesWhenLosing ?? 15;
+      $dailyLoss.value = s.dailyLossLimit ?? 300;
+      $lockHours.value = s.lockDurationHours ?? 6;
+    });
+
+    function clamp(value, min, max, fallback) {
+      if (!Number.isFinite(value)) return fallback;
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function save() {
+      PI.save({
+        maxTradesWhenLosing: clamp(parseInt($maxTrades.value, 10), 0, 999, 15),
+        dailyLossLimit: clamp(parseFloat($dailyLoss.value), 0, 1000000, 300),
+        lockDurationHours: clamp(parseFloat($lockHours.value), 0.05, 24, 6),
+      });
+    }
+
+    for (const input of [$maxTrades, $dailyLoss, $lockHours]) {
+      input.addEventListener('change', save);
+    }
+  </script>
+</body>
+</html>

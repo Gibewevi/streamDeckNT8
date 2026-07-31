@@ -28,26 +28,21 @@
     <div class="hint">For Qty Adjust: +1 to increase, -1 to decrease.</div>
   </div>
 
+  <script src="pi.js"></script>
   <script>
     const $qty = document.getElementById('quantity');
     const $delta = document.getElementById('delta');
 
-    window.addEventListener('message', (event) => {
-      if (event.data?.type === 'loadSettings') {
-        const s = event.data.settings || {};
-        if (s.quantity !== undefined) $qty.value = s.quantity;
-        if (s.delta !== undefined) $delta.value = s.delta;
-      }
+    PI.onSettings((s) => {
+      $qty.value = s.quantity ?? 1;
+      $delta.value = s.delta ?? 1;
     });
 
     function save() {
-      window.parent.postMessage({
-        type: 'saveSettings',
-        settings: {
-          quantity: parseInt($qty.value, 10) || 1,
-          delta: parseInt($delta.value, 10) || 1,
-        }
-      }, '*');
+      PI.save({
+        quantity: parseInt($qty.value, 10) || 1,
+        delta: parseInt($delta.value, 10) || 1,
+      });
     }
 
     $qty.addEventListener('change', save);

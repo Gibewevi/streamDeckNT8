@@ -22,6 +22,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private CommandDispatcher _dispatcher;
         private ContextResolver _resolver;
         private StatePublisher _statePublisher;
+        private OrderMonitor _orderMonitor;
         private AddOnConfig _config;
 
         protected override void OnStateChange()
@@ -50,9 +51,11 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             try
             {
-                SdLogger.Info("=== StreamDeck Add-On V1.0 initializing ===");
-
                 _config = new AddOnConfig();
+                SdLogger.LogSessionHeader(_config.BridgeUrl);
+                SdLogger.Event("Session", "Configuration: stateInterval={0}ms reconnectDelay={1}ms defaultInstrument='{2}'",
+                    _config.StateUpdateIntervalMs, _config.ReconnectDelayMs, _config.DefaultInstrument);
+
                 _resolver = new ContextResolver();
                 _tradingEngine = new TradingEngine(_resolver);
                 _dispatcher = new CommandDispatcher(_tradingEngine);
@@ -61,18 +64,21 @@ namespace NinjaTrader.NinjaScript.AddOns
                 _bridgeClient.OnMessageReceived += OnBridgeMessage;
                 _bridgeClient.OnConnectionChanged += OnConnectionChanged;
 
-                _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config);
+                _orderMonitor = new OrderMonitor(_bridgeClient);
+                _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor);
 
                 _bridgeClient.Start();
 
                 // Start state publishing with default tracking
-                _statePublisher.Start(GetInitialAccountName(), "ES 06-25");
+                var initialAccount = GetInitialAccountName();
+                _statePublisher.Start(initialAccount, _config.DefaultInstrument);
 
-                SdLogger.Info("StreamDeck Add-On initialized successfully");
+                SdLogger.Event("Session", "Add-On initialized — initialAccount='{0}'",
+                    string.IsNullOrEmpty(initialAccount) ? "(none)" : initialAccount);
             }
             catch (Exception ex)
             {
-                SdLogger.Error(ex, "Failed to initialize StreamDeck Add-On");
+                SdLogger.Fail("Session", ex, "Failed to initialize StreamDeck Add-On");
             }
         }
 
@@ -80,14 +86,15 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             try
             {
-                SdLogger.Info("StreamDeck Add-On shutting down...");
+                SdLogger.Event("Session", "Add-On shutting down (NinjaTrader closing or NinjaScript reload)");
                 if (_statePublisher != null) _statePublisher.Dispose();
+                if (_orderMonitor != null) _orderMonitor.Dispose();
                 if (_bridgeClient != null) _bridgeClient.Dispose();
-                SdLogger.Info("StreamDeck Add-On shut down");
+                SdLogger.Event("Session", "=== StreamDeck Add-On session ended ===");
             }
             catch (Exception ex)
             {
-                SdLogger.Error(ex, "Error during shutdown");
+                SdLogger.Fail("Session", ex, "Error during shutdown");
             }
         }
 
@@ -99,18 +106,51 @@ namespace NinjaTrader.NinjaScript.AddOns
                 return;
             }
 
-            if (message.Action == "setInstrument" || message.Action == "setAccount")
-            {
-                var trackingResponse = HandleTrackingCommand(message);
-                _bridgeClient.SendAsync(trackingResponse).ConfigureAwait(false);
-                return;
-            }
+            // Full payload on the way in: when an order goes wrong, the first question is always
+            // "what exactly was asked for?" — quantity, offset and resolved context included.
+            SdLogger.Event("Command", "[REQ:{0}] Received {1} payload={2}",
+                message.RequestId ?? "n/a", message.Action, DescribePayload(message));
 
-            // Dispatch to trading engine
-            var response = _dispatcher.Dispatch(message);
+            var startedAt = DateTime.UtcNow;
+            BridgeMessage response;
+
+            if (message.Action == "setInstrument" || message.Action == "setAccount")
+                response = HandleTrackingCommand(message);
+            else
+                response = _dispatcher.Dispatch(message);
+
+            LogCommandOutcome(message, response, startedAt);
 
             // Send response back to bridge
             _bridgeClient.SendAsync(response).ConfigureAwait(false);
+        }
+
+        private static string DescribePayload(BridgeMessage message)
+        {
+            if (message.Payload == null || message.Payload.Count == 0) return "{}";
+            try { return SimpleJson.Serialize(message.Payload); }
+            catch (Exception ex) { return "(unserializable: " + ex.Message + ")"; }
+        }
+
+        /// <summary>
+        /// Records what the add-on answered and how long NinjaTrader took. The duration matters:
+        /// a command that normally answers in a few ms and suddenly takes seconds points at NT8
+        /// itself (data feed, account lock) rather than at the deck.
+        /// </summary>
+        private static void LogCommandOutcome(BridgeMessage request, BridgeMessage response, DateTime startedAt)
+        {
+            var elapsedMs = (int)(DateTime.UtcNow - startedAt).TotalMilliseconds;
+
+            if (response != null && response.Error != null)
+            {
+                SdLogger.EventWarn("Command", "[REQ:{0}] {1} refused: {2} — {3} ({4}ms)",
+                    request.RequestId ?? "n/a", request.Action,
+                    response.Error.Code, response.Error.Message, elapsedMs);
+                return;
+            }
+
+            SdLogger.Event("Command", "[REQ:{0}] {1} completed ({2}ms)",
+                request.RequestId ?? "n/a", request.Action, elapsedMs);
         }
 
         private string GetInitialAccountName()
@@ -145,9 +185,10 @@ namespace NinjaTrader.NinjaScript.AddOns
         private void OnConnectionChanged(bool connected)
         {
             if (connected)
-                SdLogger.Info("Connected to bridge");
+                SdLogger.Event("Connection", "Connected to bridge at {0}", _config.BridgeUrl);
             else
-                SdLogger.Warn("Disconnected from bridge — will retry");
+                SdLogger.EventWarn("Connection", "Disconnected from bridge — will retry every {0}ms",
+                    _config.ReconnectDelayMs);
         }
     }
 }

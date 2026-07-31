@@ -34,32 +34,26 @@
     <div class="hint">Ticks from last price. Negative = below, Positive = above</div>
   </div>
 
+  <script src="pi.js"></script>
   <script>
-    // Basic PI ↔ Plugin communication skeleton
-    // In production, this wires to the SD SDK's property inspector API
     const $account = document.getElementById('account');
     const $instrument = document.getElementById('instrument');
     const $offset = document.getElementById('offsetTicks');
 
-    // Load settings from SD
-    window.addEventListener('message', (event) => {
-      if (event.data && event.data.type === 'loadSettings') {
-        const s = event.data.settings || {};
-        if (s.account) $account.value = s.account;
-        if (s.instrument) $instrument.value = s.instrument;
-        if (s.offsetTicks !== undefined) $offset.value = s.offsetTicks;
-      }
+    PI.onSettings((s) => {
+      $account.value = s.account ?? '';
+      $instrument.value = s.instrument ?? '';
+      $offset.value = s.offsetTicks ?? 0;
     });
 
-    // Save on change
     function save() {
-      const settings = {
-        account: $account.value || undefined,
-        instrument: $instrument.value || undefined,
+      PI.save({
+        account: $account.value.trim(),
+        instrument: $instrument.value.trim(),
         offsetTicks: parseInt($offset.value, 10) || 0,
-      };
-      window.parent.postMessage({ type: 'saveSettings', settings }, '*');
+      });
     }
+
     $account.addEventListener('change', save);
     $instrument.addEventListener('change', save);
     $offset.addEventListener('change', save);

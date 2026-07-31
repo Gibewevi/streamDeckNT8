@@ -36,6 +36,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                         return _engine.Flatten(cmd);
                     case "cancelOrders":
                         return _engine.CancelOrders(cmd);
+                    case "cancelWorkingOrders":
+                        return _engine.CancelWorkingOrders(cmd);
                     case "reverse":
                         return _engine.Reverse(cmd);
                     case "breakeven":
