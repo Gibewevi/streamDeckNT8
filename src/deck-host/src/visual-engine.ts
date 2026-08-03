@@ -61,7 +61,39 @@ function formatLockRemaining(seconds: number): string {
   return `${seconds}s`;
 }
 
-/** Bas de la touche Sécurité : trades consommés et P&L de session. */
+/**
+ * Bas de la touche Sécurité quand la macro est armée et que rien n'est encore atteint :
+ * ce qu'il RESTE, sous la forme `trades-montant`, décomptant vers `0-0`.
+ *
+ * Volontairement exprimé en restant et non en consommé. « 4/15 » oblige à faire la soustraction
+ * pour répondre à la seule question qui compte en séance — combien puis-je encore prendre — et
+ * la réponse doit être lisible d'un coup d'œil sur une touche de 144 pixels.
+ *
+ * `--` signale une règle désactivée (limite à 0), à ne pas confondre avec une règle épuisée.
+ */
+function formatSafetyRestant(safety: SafetyStatus): string {
+  const trades = safety.maxTradesWhenLosing > 0
+    ? String(Math.max(0, safety.maxTradesWhenLosing - safety.tradeCount))
+    : '--';
+
+  let perte: string;
+  if (safety.dailyLossLimit <= 0) {
+    perte = '--';
+  } else if (!safety.pnlAvailable) {
+    // Sans P&L publié par NinjaTrader la règle de perte n'a aucune donnée : le dire plutôt que
+    // d'afficher la limite entière, qui laisserait croire à une marge intacte.
+    perte = '?';
+  } else {
+    // Marge avant la limite : le P&L est signé, donc une perte de 120 sur une limite de 300
+    // laisse 300 + (-120) = 180. En profit la marge dépasse la limite, ce qui est exact —
+    // il faut d'abord rendre le gain avant d'entamer la limite.
+    perte = String(Math.max(0, Math.round(safety.dailyLossLimit + safety.sessionPnl)));
+  }
+
+  return `${trades}-${perte}`;
+}
+
+/** Bas de la touche Sécurité quand une limite est atteinte : trades consommés et P&L de session. */
 function formatSafetyDetail(safety: SafetyStatus): string {
   const trades = safety.maxTradesWhenLosing > 0
     ? `${safety.tradeCount}/${safety.maxTradesWhenLosing}`
@@ -302,22 +334,18 @@ export function computeVisual(
         };
       }
 
-      // Armée et rien à signaler. La touche bascule GUARD OFF → GUARD ON : un même mot dans les
-      // deux états, pour que l'œil lise l'état et non un vocabulaire qui change. « LOCK » disait
-      // la même chose mais obligeait à réfléchir.
+      // Armée et rien à signaler. Le fond vert dit déjà que la protection est active : la place
+      // de la deuxième ligne sert donc à ce qui change, le temps de verrou restant, plutôt qu'à
+      // un « ON » qui répète la couleur.
       //
-      // Compteur de trades et P&L de séance sont volontairement absents : tant que rien n'est
-      // atteint, ils encombrent sans rien apprendre. Ils réapparaissent dans la branche blocage
-      // ci-dessus, au moment précis où ils expliquent un refus.
+      // Le compte à rebours s'affiche aussi en mode développement. Il y a bien une nuance — le
+      // verrou peut alors être levé d'un appui, la durée n'engage donc à rien — mais c'est le
+      // badge DEV qui porte cet avertissement, l'écrire une seconde fois ne l'ajoutait pas.
       return {
         ...marque,
         title: 'SAFETY:GUARD',
-        subtitle: 'ON',
-        // Le compte à rebours s'affiche aussi en mode développement. Il y a bien une nuance — le
-        // verrou peut alors être levé d'un appui, la durée n'engage donc à rien — mais c'est le
-        // badge DEV qui porte cet avertissement. L'écrire une seconde fois ici coûtait la seule
-        // information de la ligne sans rien ajouter à celle du badge.
-        detail: formatLockRemaining(safety.lockSecondsRemaining),
+        subtitle: formatLockRemaining(safety.lockSecondsRemaining),
+        detail: formatSafetyRestant(safety),
         bgColor: Colors.buyGreen, textColor: Colors.textWhite,
       };
     }
