@@ -66,20 +66,41 @@ Copy-Item $node (Join-Path $InstallDir 'node.exe') -Force
 Info "Copié ($([math]::Round((Get-ChildItem $InstallDir -Recurse -File | Measure-Object Length -Sum).Sum/1MB,1)) Mo)"
 
 Step "3/6  Tâche planifiée (démarrage + relance automatique)"
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-$action = New-ScheduledTaskAction -Execute (Join-Path $InstallDir 'node.exe') `
-                                  -Argument 'dist\host.js' -WorkingDirectory $InstallDir
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-# RestartCount/RestartInterval : filet contre les PLANTAGES (sortie non nulle). Un arrêt propre
-# — port occupé, SIGTERM — sort en 0 et n'est volontairement pas relancé.
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-              -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-              -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-  -Settings $settings -Principal $principal `
-  -Description "TradeDeck — cockpit de trading NinjaTrader — pilote le Stream Deck sans l'application Elgato." | Out-Null
-Info "Tâche '$TaskName' enregistrée (au logon, relance toutes les minutes si arrêt)"
+# Réinstallation : une tâche déjà enregistrée refuse d'être supprimée sans élévation
+# (« Accès refusé »), et Register-ScheduledTask échoue alors sur « fichier déjà existant ».
+# Comme l'action ne dépend que de $InstallDir, une tâche existante qui pointe déjà au bon endroit
+# n'a rien à se faire réécrire : on la conserve au lieu de faire échouer toute l'installation.
+$wantExec = Join-Path $InstallDir 'node.exe'
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$upToDate = $existing -and
+            $existing.Actions.Execute -eq $wantExec -and
+            $existing.Actions.Arguments -eq 'dist\host.js'
+
+if ($upToDate) {
+  Info "Tâche '$TaskName' déjà enregistrée et pointant au bon endroit — conservée"
+} else {
+  if ($existing) {
+    try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop }
+    catch {
+      throw ("La tâche '$TaskName' existe déjà, pointe ailleurs, et ne peut pas être remplacée " +
+             "sans droits administrateur. Supprimez-la depuis le Planificateur de tâches " +
+             "(ou : Unregister-ScheduledTask -TaskName $TaskName) puis relancez ce script.")
+    }
+  }
+  $action = New-ScheduledTaskAction -Execute $wantExec `
+                                    -Argument 'dist\host.js' -WorkingDirectory $InstallDir
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+  # RestartCount/RestartInterval : filet contre les PLANTAGES (sortie non nulle). Un arrêt propre
+  # — port occupé, SIGTERM — sort en 0 et n'est volontairement pas relancé.
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+                -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew
+  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+    -Settings $settings -Principal $principal `
+    -Description "TradeDeck — cockpit de trading NinjaTrader — pilote le Stream Deck sans l'application Elgato." | Out-Null
+  Info "Tâche '$TaskName' enregistrée (au logon, relance toutes les minutes si plantage)"
+}
 
 Step "4/6  Démarrage automatique de Stream Deck"
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
