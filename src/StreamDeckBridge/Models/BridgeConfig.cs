@@ -11,7 +11,11 @@ public sealed class BridgeConfig
     public int MaxQuantity { get; set; } = 100;
     public bool AllowLiveAccounts { get; set; } = true;
     public int MaxQueueSize { get; set; } = 50;
-    public int StateUpdateIntervalMs { get; set; } = 2000;
+    // 200 ms et non 2000 : c'était le goulot dominant du délai perçu après un fill. Le chemin
+    // de commande est au plancher (bridge 0 ms, add-on 1 ms), mais l'affichage attendait
+    // jusqu'à 2 s la diffusion suivante. L'hôte ne réécrit que les touches modifiées, donc
+    // multiplier la cadence par dix ne coûte quasiment rien.
+    public int StateUpdateIntervalMs { get; set; } = 200;
     public int DuplicateRequestWindowSeconds { get; set; } = 60;
 
     // --- Safety macro (first-run defaults only; afterwards the persisted file wins) ---

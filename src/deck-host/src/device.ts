@@ -43,6 +43,12 @@ export interface DeckKeyEvent {
 type PressHandler = (ev: DeckKeyEvent) => void;
 type ConnectionHandler = (connected: boolean) => void;
 
+/**
+ * Le relâchement n'était pas écouté jusqu'ici : une action partait dès l'appui. Il devient
+ * nécessaire pour l'appui long, où c'est le relâchement prématuré qui annule.
+ */
+type ReleaseHandler = (ev: DeckKeyEvent) => void;
+
 export class DeckDevice {
   #deck: StreamDeck | null = null;
   #buttons: { index: number; column: number; row: number; pixelSize: { width: number; height: number } }[] = [];
@@ -50,6 +56,7 @@ export class DeckDevice {
   #painted = new Map<number, string>();
   #fontFiles = resolveFont();
   #pressHandlers: PressHandler[] = [];
+  #releaseHandlers: ReleaseHandler[] = [];
   #connHandlers: ConnectionHandler[] = [];
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #closing = false;
@@ -77,6 +84,10 @@ export class DeckDevice {
 
   onPress(fn: PressHandler): void {
     this.#pressHandlers.push(fn);
+  }
+
+  onRelease(fn: ReleaseHandler): void {
+    this.#releaseHandlers.push(fn);
   }
 
   onConnectionChange(fn: ConnectionHandler): void {
@@ -107,6 +118,11 @@ export class DeckDevice {
       deck.on('down', (c: any) => {
         if (c.type !== 'button') return;
         for (const fn of this.#pressHandlers) fn({ index: c.index, column: c.column, row: c.row });
+      });
+
+      deck.on('up', (c: any) => {
+        if (c.type !== 'button') return;
+        for (const fn of this.#releaseHandlers) fn({ index: c.index, column: c.column, row: c.row });
       });
 
       // Une erreur HID signifie presque toujours que le périphérique a disparu (débranchement,
@@ -182,16 +198,34 @@ export class DeckDevice {
     const button = this.#buttons.find((b) => b.index === slot);
     if (!button) return;
 
+    // `progress` fait partie de la signature : sans lui, la jauge d'appui long était calculée à
+    // chaque tic mais jamais réécrite, le rendu différentiel la jugeant identique. Elle
+    // s'affichait une fois puis restait figée.
     const signature = visual
-      ? `${visual.title}|${visual.subtitle ?? ''}|${visual.detail ?? ''}|${visual.bgColor}|${visual.textColor}|${visual.badge ?? ''}`
+      ? `${visual.title}|${visual.subtitle ?? ''}|${visual.detail ?? ''}|${visual.bgColor}|${visual.textColor}|${visual.badge ?? ''}|${visual.progress ?? ''}`
       : 'VIDE';
     if (this.#painted.get(slot) === signature) return;
 
+    // Le rastérisage est isolé de l'écriture USB : un SVG que resvg refuse est un défaut de
+    // contenu, pas une perte de périphérique. Les confondre transformait une touche mal libellée
+    // en boucle infinie de déconnexion/reconnexion du boîtier.
+    let pixels: Buffer | null = null;
+    if (visual) {
+      try {
+        pixels = this.#raster(visual, button.pixelSize.width);
+      } catch (err) {
+        log.fail('Visual', err, 'Rendu de touche impossible — touche laissée inchangée', {
+          slot, title: visual.title,
+        });
+        return;
+      }
+    }
+
     try {
-      if (!visual) {
+      if (!pixels) {
         await deck.fillKeyColor(slot, 0, 0, 0);
       } else {
-        await deck.fillKeyBuffer(slot, this.#raster(visual, button.pixelSize.width), { format: 'rgba' });
+        await deck.fillKeyBuffer(slot, pixels, { format: 'rgba' });
       }
       this.#painted.set(slot, signature);
       // Grâce au rendu différentiel, cette ligne ne paraît qu'au vrai changement : c'est la

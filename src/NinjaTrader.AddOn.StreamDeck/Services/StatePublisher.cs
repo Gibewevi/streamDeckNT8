@@ -324,8 +324,13 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                         positionDict["unrealizedPnl"] = 0.0;
                         positionDict["hasStopOrder"] = false;
                         positionDict["stopPrice"] = 0.0;
+                        // Counts must be present on BOTH branches: the protocol declares them
+                        // required, and omitting them made the protection signature flip between
+                        // "-" and a number on every open/close, logging a spurious transition.
+                        positionDict["stopOrderCount"] = 0;
                         positionDict["hasTargetOrder"] = false;
                         positionDict["targetPrice"] = 0.0;
+                        positionDict["targetOrderCount"] = 0;
                         positionDict["activeOrderCount"] = 0;
                     }
                 }

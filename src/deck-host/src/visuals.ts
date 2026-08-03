@@ -49,7 +49,19 @@ export interface ButtonVisual {
   detail?: string;      // third line, used by the 3-line layouts
   badge?: string;       // small indicator top-right
   badgeColor?: string;
+  /** 0..1 — hold-to-confirm progress. Drawn as a bar at the bottom, over any layout. */
+  progress?: number;
 }
+
+/**
+ * Un SVG est du XML : un « & » ou un « < » non échappé rend l'image impossible à parser et fait
+ * lever resvg. Les libellés viennent de l'interface de configuration (`displayLabel` est un champ
+ * texte libre) et de NinjaTrader — jamais d'une source sûre. Un trader nommant une touche « S&P »
+ * suffisait à faire échouer le rendu, et `DeckDevice.paint` interprétait cet échec comme une perte
+ * du boîtier : le deck tombait en boucle de reconnexion.
+ */
+const esc = (value: string): string =>
+  value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /**
  * Generate a full SVG with background, text, and overlays for setImage().
@@ -57,17 +69,28 @@ export interface ButtonVisual {
  * Returns a data URI suitable for setImage().
  */
 export function renderButtonSvg(visual: ButtonVisual): string {
-  const bg = visual.bgColor;
-  const tc = visual.textColor || '#FFFFFF';
-  const sub = visual.subtitle || '';
-  const sc = visual.subtitleColor || tc;
+  const bg = esc(visual.bgColor);
+  const tc = esc(visual.textColor || '#FFFFFF');
+  const sub = esc(visual.subtitle || '');
+  const sc = esc(visual.subtitleColor || visual.textColor || '#FFFFFF');
+  // `t` sert aussi aux comparaisons de disposition ci-dessous : il est échappé au moment de
+  // l'interpolation, pas ici, pour ne pas fausser les `startsWith`.
   const t = visual.title;
 
-  // Badge overlay (optional small dot top-right)
+  // Badge en haut à droite. Un libellé de plusieurs caractères est rendu dans une pastille
+  // lisible : un simple point coloré ne dit pas ce qu'il signale, ce qui est inutile pour
+  // marquer un mode qui lève une protection.
   let badgeSvg = '';
   if (visual.badge) {
-    const bc = visual.badgeColor || Colors.connected;
-    badgeSvg = `<circle cx="124" cy="20" r="8" fill="${bc}"/>`;
+    const bc = esc(visual.badgeColor || Colors.connected);
+    if (visual.badge.length <= 1) {
+      badgeSvg = `<circle cx="124" cy="20" r="8" fill="${bc}"/>`;
+    } else {
+      const w = 16 + visual.badge.length * 11;
+      badgeSvg = `
+        <rect x="${138 - w}" y="6" width="${w}" height="26" rx="8" fill="${bc}"/>
+        <text x="${138 - w / 2}" y="19" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="16" font-weight="bold" fill="#000000">${esc(visual.badge)}</text>`;
+    }
   }
 
   let contentSvg = '';
@@ -112,11 +135,11 @@ export function renderButtonSvg(visual: ButtonVisual): string {
 
   } else if (t.startsWith('SAFETY')) {
     // Safety macro — status word ("SAFETY:<word>"), lock countdown, then trades / session P&L
-    const word = t.split(':')[1] || 'GUARD';
+    const word = esc(t.split(':')[1] || 'GUARD');
     contentSvg = `
       <text x="72" y="42" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="bold" fill="${tc}">${word}</text>
       <text x="72" y="86" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${sub}</text>
-      <text x="72" y="122" text-anchor="middle" font-family="sans-serif" font-size="18" fill="${sc}">${visual.detail || ''}</text>`;
+      <text x="72" y="122" text-anchor="middle" font-family="sans-serif" font-size="18" fill="${sc}">${esc(visual.detail || '')}</text>`;
 
   } else if (t === 'COUNTDOWN') {
     // Cooldown countdown. Sous Elgato ce SVG restait vide : le gros chiffre venait de setTitle,
@@ -139,18 +162,30 @@ export function renderButtonSvg(visual: ButtonVisual): string {
     // Standard layout: title centered, subtitle below
     if (sub) {
       contentSvg = `
-        <text x="72" y="62" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${t}</text>
+        <text x="72" y="62" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${esc(t)}</text>
         <text x="72" y="100" text-anchor="middle" font-family="sans-serif" font-size="20" fill="${sc}">${sub}</text>`;
     } else {
       contentSvg = `
-        <text x="72" y="84" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${t}</text>`;
+        <text x="72" y="84" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${esc(t)}</text>`;
     }
+  }
+
+  // Jauge de maintien : dessinée par-dessus la disposition, quelle qu'elle soit. C'est le seul
+  // retour dont dispose le trader pour savoir que l'appui est pris en compte et combien il reste
+  // à tenir — sans elle, une touche à confirmation paraît simplement ne pas répondre.
+  let progressSvg = '';
+  if (typeof visual.progress === 'number' && visual.progress > 0) {
+    const p = Math.max(0, Math.min(1, visual.progress));
+    progressSvg = `
+      <rect x="10" y="126" width="124" height="8" rx="4" fill="#000000" opacity="0.45"/>
+      <rect x="10" y="126" width="${(124 * p).toFixed(1)}" height="8" rx="4" fill="#FFFFFF"/>`;
   }
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">
   <rect width="144" height="144" rx="12" fill="${bg}"/>
   ${contentSvg}
   ${badgeSvg}
+  ${progressSvg}
 </svg>`;
 
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;

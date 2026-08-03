@@ -235,6 +235,30 @@
   .insp-title .ico svg { width:16px; height:16px; }
   .insp-title .sub { font-size:11px; color:var(--faint); font-weight:500; margin-top:1px; }
 
+  /* Sépare les réglages propres à l'action de ceux communs à toutes les touches. */
+  .sect { margin:24px 0 -4px; padding-top:16px; border-top:1px solid var(--edge); }
+  .locked {
+    display:flex; gap:9px; margin-top:14px; padding:11px 12px; border-radius:var(--r-sm);
+    background:var(--accent-soft); color:var(--dim); font-size:11.5px; line-height:1.5;
+  }
+  .locked svg { width:14px; height:14px; flex:none; margin-top:1px; color:var(--accent); }
+  .locked b { color:var(--accent); font-weight:600; }
+
+  /* Interrupteur : l'état doit se lire sans avoir à interpréter une valeur. */
+  .sw { display:flex; align-items:center; gap:11px; margin-top:14px; cursor:pointer; user-select:none; }
+  .sw input { display:none; }
+  .sw .track {
+    width:38px; height:22px; border-radius:99px; background:var(--card-3); flex:none;
+    position:relative; transition:background .18s var(--ease);
+  }
+  .sw .track::after {
+    content:""; position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%;
+    background:var(--dim); transition:transform .18s var(--ease), background .18s var(--ease);
+  }
+  .sw input:checked + .track { background:var(--accent); }
+  .sw input:checked + .track::after { transform:translateX(16px); background:#fff; }
+  .sw .txt { font-size:12.5px; color:var(--dim); }
+  .sw input:checked ~ .txt { color:var(--txt); font-weight:500; }
   .field { margin-top:16px; }
   label { display:block; font-size:11.5px; color:var(--dim); margin-bottom:6px; font-weight:500; }
   input[type=text], input[type=number], select, textarea {
@@ -343,6 +367,9 @@ const P = {
   layers:'<path d="M12 2l9 5-9 5-9-5 9-5z"/><path d="M3 12l9 5 9-5M3 17l9 5 9-5"/>',
   cursor:'<path d="M5 3l14 8-6 1.5L10 19z"/>',
   grip:'<circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/>',
+  bolt:'<path d="M13 2L4.5 13H11l-1 9 8.5-11H12l1-9z"/>',
+  // Auto BE : un bouclier avec l'éclair de l'automatisme.
+  autoShield:'<path d="M12 22s7-3.5 7-9V5l-7-3-7 3v8c0 5.5 7 9 7 9z"/><path d="M12.5 7l-3 4.5h2.5l-.5 3.5 3-4.5h-2.5l.5-3.5z"/>',
 };
 const N = 'com.trader.ninjatrader.';
 const ICONS = {
@@ -355,12 +382,12 @@ const ICONS = {
   [N+'qtyplus']:P.plus, [N+'qtyminus']:P.minus, [N+'qtyreset']:P.reset,
   [N+'instrument']:P.tag, [N+'account']:P.user,
   [N+'status']:P.pulse, [N+'cooldown']:P.clock, [N+'safety']:P.shield,
-  'host.navigate':P.layers,
+  'host.navigate':P.layers, 'host.autobe':P.autoShield,
 };
 const iconOf = (id) => svg(ICONS[id] ?? P.square);
 $('close').innerHTML = svg(P.cross);
 
-let catalog = [], byId = new Map(), layout = null, snap = null, sel = null, filter = '';
+let catalog = [], byId = new Map(), universal = [], layout = null, snap = null, sel = null, filter = '';
 let ws = null, saveTimer = null, hintTimer = null;
 
 /* ---------------- Connexion ---------------- */
@@ -372,6 +399,7 @@ function connect() {
     const m = JSON.parse(e.data);
     if (m.type === 'hello') {
       catalog = m.catalog; byId = new Map(catalog.map(a => [a.id, a]));
+      universal = m.universal ?? [];
       layout = m.layout; snap = m.snapshot;
       $('bright').value = layout.brightness ?? 80;
       paintBright();
@@ -411,17 +439,19 @@ function flash(msg) {
   hintTimer = setTimeout(() => { $('hint').innerHTML = HINT; $('hint').classList.remove('warn'); }, 2600);
 }
 
-/* Le tiroir ne s'ouvre que s'il a quelque chose à montrer : une action sans réglage
-   n'a aucune raison d'occuper l'écran. */
-const hasSettings = (id) => (byId.get(id)?.settings?.length ?? 0) > 0;
+/* Toute touche possède au moins le réglage d'appui long, donc le tiroir a toujours quelque
+   chose à montrer. Mais il ne s'ouvre de lui-même que si l'action a ses PROPRES réglages :
+   sinon il surgirait à chaque ajout, ce qui n'apporte rien. Un clic sur la touche l'ouvre
+   explicitement. */
+const hasOwnSettings = (id) => (byId.get(id)?.settings?.length ?? 0) > 0;
 const openDrawer = () => $('drawer').classList.add('open');
 const closeDrawer = () => $('drawer').classList.remove('open');
 $('close').onclick = closeDrawer;
 
-function select(i) {
+function select(i, explicite = false) {
   sel = i;
   const a = page().slots[String(i)];
-  a && hasSettings(a.actionId) ? openDrawer() : closeDrawer();
+  a && (explicite || hasOwnSettings(a.actionId)) ? openDrawer() : closeDrawer();
   renderDeck(); renderInsp();
 }
 
@@ -553,7 +583,7 @@ function renderDeck() {
 
   for (const el of deck.querySelectorAll('.key')) {
     const s = +el.dataset.s;
-    el.onclick = () => select(s);
+    el.onclick = () => select(s, true);   // clic explicite : on ouvre le tiroir
     el.addEventListener('dragstart', e => {
       e.dataTransfer.setData('text/plain', 'move:' + s);
       e.dataTransfer.effectAllowed = 'move';
@@ -602,8 +632,12 @@ function removeSlot(i) {
 
 function defaults(id) {
   const d = {};
+  // Seuls les réglages propres à l'action sont initialisés : les réglages universels restent
+  // absents, ce qui vaut « désactivé » — aucune touche ne naît avec une confirmation.
   for (const f of (byId.get(id)?.settings ?? []))
-    d[f.key] = f.type === 'number' ? (f.min ?? 0) : (f.type === 'select' ? (f.options?.[0]?.value ?? '') : '');
+    d[f.key] = f.type === 'toggle' ? false
+      : f.type === 'number' ? (f.min ?? 0)
+      : f.type === 'select' ? (f.options?.[0]?.value ?? '') : '';
   return d;
 }
 
@@ -613,7 +647,9 @@ function renderInsp() {
   const a = sel === null ? null : page().slots[String(sel)];
   if (!a) { box.innerHTML = `<div class="empty">Sélectionnez une touche réglable.</div>`; return; }
 
-  const def = byId.get(a.actionId), fields = def?.settings ?? [];
+  const def = byId.get(a.actionId), propres = def?.settings ?? [];
+  // Les réglages universels s'ajoutent à ceux de l'action, dans une section à part.
+  const fields = [...propres, ...universal];
   a.settings ||= {};
 
   // En-tête minimal : de quelle touche il s'agit, rien de plus. La description est déjà
@@ -623,8 +659,13 @@ function renderInsp() {
       <span class="ico">${iconOf(a.actionId)}</span>
       <span>${esc(def?.name ?? a.actionId)}<div class="sub">Touche ${sel + 1}</div></span>
     </div>
-    ${fields.map(f => field(f, a.settings[f.key])).join('')
-      || '<div class="empty">Aucun réglage pour cette action.</div>'}`;
+    ${propres.map(f => field(f, a.settings[f.key])).join('')}
+    ${universal.length ? `<div class="sect lbl">Sécurité</div>${def?.instant
+      // Proposer un champ que l'hôte ignore serait pire que de ne rien proposer.
+      ? `<div class="locked">${svg(P.bolt)}<span><b>Déclenchement immédiat.</b> Cette action entre
+           ou sort d'une position : aucune confirmation n'est possible, un retard y coûterait
+           plus cher qu'il ne protège.</span></div>`
+      : universal.map(f => field(f, a.settings[f.key])).join('')}` : ''}`;
 
   for (const el of box.querySelectorAll('[data-f]')) {
     const f = fields.find(x => x.key === el.dataset.f);
@@ -636,13 +677,22 @@ function renderInsp() {
       // chiffres.
       const cur = sel === null ? null : page().slots[String(sel)];
       if (!cur || cur.actionId !== a.actionId) return;
-      (cur.settings ||= {})[f.key] = f.type === 'number' ? clamp(Number(el.value), f) : el.value;
+      (cur.settings ||= {})[f.key] = f.type === 'toggle' ? el.checked
+        : f.type === 'number' ? clamp(Number(el.value), f) : el.value;
       save();
     });
   }
 }
 
-const clamp = (v, f) => Number.isFinite(v) ? Math.min(f.max ?? Infinity, Math.max(f.min ?? -Infinity, v)) : (f.min ?? 0);
+// L'arrondi sur step:1 n'est pas cosmétique : le bridge relit ces champs en entier, et une
+// décimale y déclenchait une exception qui coupait la session au lieu d'être refusée.
+// `step` sur l'input marque la validité, il n'empêche pas de taper « 2,5 » — seul cet arrondi
+// garantit ce qui est réellement enregistré.
+const clamp = (v, f) => {
+  if (!Number.isFinite(v)) return f.min ?? 0;
+  const bounded = Math.min(f.max ?? Infinity, Math.max(f.min ?? -Infinity, v));
+  return f.step === 1 ? Math.round(bounded) : bounded;
+};
 
 /** Les destinations dépendent des pages réelles : le catalogue ne peut pas les connaître. */
 function optionsFor(f) {
@@ -651,6 +701,12 @@ function optionsFor(f) {
 }
 
 function field(f, v) {
+  if (f.type === 'toggle') {
+    return `<div class="field"><label class="sw">
+      <input type="checkbox" data-f="${esc(f.key)}"${v === true ? ' checked' : ''}>
+      <span class="track"></span><span class="txt">${esc(f.label)}</span>
+    </label>${f.help ? `<div class="help">${esc(f.help)}</div>` : ''}</div>`;
+  }
   const val = v ?? '';
   let ctl;
   if (f.type === 'select') {
@@ -659,7 +715,9 @@ function field(f, v) {
   } else if (f.type === 'textarea') {
     ctl = `<textarea data-f="${esc(f.key)}" placeholder="${esc(f.placeholder)}">${esc(val)}</textarea>`;
   } else {
-    const lim = f.type === 'number' ? `min="${f.min ?? ''}" max="${f.max ?? ''}"` : '';
+    const lim = f.type === 'number'
+      ? `min="${f.min ?? ''}" max="${f.max ?? ''}"${f.step ? ` step="${f.step}"` : ''}`
+      : '';
     ctl = `<input type="${f.type}" data-f="${esc(f.key)}" value="${esc(val)}" placeholder="${esc(f.placeholder)}" ${lim}>`;
   }
   return `<div class="field"><label>${esc(f.label)}</label>${ctl}${f.help ? `<div class="help">${esc(f.help)}</div>` : ''}</div>`;

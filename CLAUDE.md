@@ -11,19 +11,29 @@ Surface de contrôle trading pour NinjaTrader 8 via Elgato Stream Deck. **Trois 
 séparés**, reliés par WebSocket JSON en localhost uniquement :
 
 ```
-Plugin Stream Deck  ──ws://127.0.0.1:8218──►  Bridge  ──ws://127.0.0.1:8219──►  Add-On NT8
+Hôte TradeDeck      ──ws://127.0.0.1:8218──►  Bridge  ──ws://127.0.0.1:8219──►  Add-On NT8
  Node.js + TS                                 C# .NET 8                         C# .NET 4.8
- src/streamdeck-ninjatrader/                  src/StreamDeckBridge/             src/NinjaTrader.AddOn.StreamDeck/
+ src/deck-host/                               src/StreamDeckBridge/             src/NinjaTrader.AddOn.StreamDeck/
+   │
+   └──► http://127.0.0.1:8220 : interface de configuration (HTTP + WebSocket)
 ```
 
-Le bridge est le **seul serveur** : le plugin et l'add-on sont tous deux des clients qui s'y
-connectent et se reconnectent seuls. Il n'accepte qu'un plugin et un add-on à la fois.
+Le bridge est le **seul serveur du chemin de trading** : l'hôte et l'add-on sont tous deux des
+clients qui s'y connectent et se reconnectent seuls. Il n'accepte qu'un client plugin et un
+add-on à la fois.
+
+**`src/deck-host/` (TradeDeck) remplace l'application Stream Deck d'Elgato ET le plugin.** Il
+pilote le boîtier en USB directement, rend les touches lui-même (SVG → resvg → RGBA), sert sa
+propre interface de configuration, et **lance le bridge** (`BridgeSupervisor`) — rôle que tenait
+`plugin.ts`. `src/streamdeck-ninjatrader/` est l'ancien plugin Elgato, conservé pour référence :
+**c'est `deck-host` qui fait foi**, ne pas modifier les deux en parallèle.
 
 **Qui décide quoi** — c'est la clé pour savoir où corriger un bug :
 
 | Décision | Composant | Fichier |
 |----------|-----------|---------|
-| Rendu des touches, appuis, réglages | Plugin | `src/plugin.ts` (tout y est, voir plus bas) |
+| Rendu des touches, appuis, layout, Auto BE | Hôte | `src/deck-host/src/host.ts`, `visual-engine.ts` |
+| Rendu des touches, appuis, réglages (ancien plugin) | Plugin | `src/plugin.ts` (tout y est, voir plus bas) |
 | Validation, doublons, quantité, instrument/compte sélectionnés | Bridge | `MessageValidator`, `DuplicateGuard`, `StateManager` |
 | Macro de sécurité, cooldown — **refus avant tout envoi d'ordre** | Bridge | `SafetyMacro`, `StateManager.IsOrderBlocked` |
 | Résolution compte/instrument/position, envoi réel des ordres | Add-On | `ContextResolver`, `TradingEngine` |
@@ -33,8 +43,10 @@ valide → anti-doublon → vérifie NT8 connecté → actions locales (`LocalAc
 NT8) → macro de sécurité → cooldown → enrichit et transmet à l'add-on.
 
 **Flux d'état** (sens inverse) : l'add-on publie son état toutes les 500 ms → le bridge le fusionne
-avec ce qu'il possède (quantité, instrument, sécurité) → il diffuse au plugin toutes les 2 s.
-Ces deux boucles tournent en permanence : **ne jamais y ajouter de log en `INFO`** (voir Logs).
+avec ce qu'il possède (quantité, instrument, sécurité) → il diffuse au client **toutes les 200 ms**
+(`BridgeConfig.StateUpdateIntervalMs`, abaissé de 2 s pour que l'affichage suive un fill).
+Ces deux boucles tournent en permanence : **ne jamais y ajouter de log en `INFO`** (voir Logs) —
+à cette cadence, un `INFO` produit des centaines de milliers de lignes par jour.
 
 ## Commandes
 
@@ -46,10 +58,15 @@ dotnet publish "src/StreamDeckBridge/StreamDeckBridge.csproj" -c Release -o src/
 # Add-On NT8 (compile uniquement pour vérifier — voir « Déploiement »)
 dotnet build "src/NinjaTrader.AddOn.StreamDeck/NinjaTrader.AddOn.StreamDeck.csproj" -c Release
 
-# Plugin Stream Deck
+# Hôte TradeDeck — c'est celui-ci qu'il faut construire
+cd src/deck-host && npm run build       # tsc → dist/
+cd src/deck-host && npx tsc --noEmit    # vérification de types seule
+cd src/deck-host && npm run build:all   # bridge (publish → bridge/) puis hôte
+cd src/deck-host && npm start           # node dist/host.js
+
+# Ancien plugin Elgato — conservé pour référence, ne fait plus foi
 cd src/streamdeck-ninjatrader && npm run build     # tsc → dist/
 cd src/streamdeck-ninjatrader && npx tsc --noEmit   # vérification de types seule
-cd src/streamdeck-ninjatrader && npm run watch      # tsc --watch
 ```
 
 **Il n'existe aucun test automatisé.** `docs/test-plan.md` est un plan de test **manuel**. Pour
@@ -79,8 +96,14 @@ L'installation active **ne correspond pas** aux instructions du README :
 - l'add-on NT8 est déployé **en sources `.cs` à plat** dans
   `Documents\NinjaTrader 8\bin\Custom\AddOns\StreamDeck\` — NinjaScript les compile au démarrage
   de NinjaTrader. Le DLL construit localement ne sert qu'à vérifier la compilation ;
-- le bridge vit **dans le dossier du plugin**, en `…\com.trader.ninjatrader.sdPlugin\bridge\` ;
-  `plugin.ts` le lance automatiquement depuis là.
+- **l'hôte TradeDeck** s'installe dans `%LOCALAPPDATA%\TradeDeck` via
+  `src/deck-host/packaging/install.ps1` : il y copie `dist/`, `ui/`, `node_modules/`, `bridge/`
+  et un `node.exe`, enregistre une tâche planifiée (démarrage à l'ouverture de session, relance
+  sur sortie non nulle) et désactive le démarrage automatique de Stream Deck, qui se disputerait
+  le boîtier. Réversible par `uninstall.ps1` ;
+- le bridge est livré **dans le dossier de l'hôte** (`…\TradeDeck\bridge\`), lancé par
+  `BridgeSupervisor`. L'ancien emplacement `…\com.trader.ninjatrader.sdPlugin\bridge\` reste
+  reconnu en repli.
 
 Procédure complète et vérifiée : `.claude/skills/deploy/SKILL.md` (ou `/deploy`).
 
@@ -105,9 +128,22 @@ Règles en ajoutant un log :
 
 ## Pièges à connaître
 
-- **`plugin.ts` contient toute la logique du plugin** (actions, visuels, état, sécurité). Les
-  fichiers `src/actions/*.ts` sauf `status-action.ts`, ainsi que `services/display-adapter.ts`,
-  ne sont **importés nulle part** : les modifier n'a aucun effet.
+- **Tout texte affiché sur une touche part dans un SVG : il DOIT être échappé.** `renderButtonSvg`
+  (`deck-host/src/visuals.ts`) applique `esc()` sur chaque interpolation de texte. Un `&` ou un
+  `<` non échappé rend le SVG impossible à parser, resvg lève, et la touche ne s'affiche plus —
+  un libellé « S&P » suffisait. Toute nouvelle interpolation doit passer par `esc()`.
+- **Ne jamais lire un entier JSON avec `GetInt32()` côté bridge — utiliser `TryGetInt32`.**
+  `GetInt32()` **lève** sur `2.5`, mais aussi sur `2.0` et sur tout dépassement d'`int`. Une
+  exception dans le chemin de validation coûtait la session plugin entière, que l'hôte
+  reconnectait aussitôt pour la refaire tomber : boucle permanente. Une valeur malformée doit se
+  lire comme absente, jamais comme une exception.
+- **Une erreur de rendu n'est pas une perte de boîtier.** Dans `DeckDevice.paint`, le rastérisage
+  est isolé de l'écriture USB : seule cette dernière déclenche `#handleLoss()`. Les confondre
+  transformait une touche mal libellée en boucle de déconnexion/reconnexion.
+- **`plugin.ts` contient toute la logique de l'ANCIEN plugin** (actions, visuels, état, sécurité).
+  Les fichiers `src/actions/*.ts` sauf `status-action.ts`, ainsi que `services/display-adapter.ts`,
+  ne sont **importés nulle part** : les modifier n'a aucun effet. Ce dossier ne fait plus foi —
+  voir `src/deck-host/`.
 - **`ClientWebSocket` (.NET 4.8) n'accepte qu'un seul `SendAsync` à la fois.** Un envoi concurrent
   abort la socket et fait perdre des confirmations d'ordre. D'où `_sendLock` dans le `BridgeClient`
   de l'add-on — tout nouvel envoi doit passer par `SendAsync`.
@@ -117,12 +153,20 @@ Règles en ajoutant un log :
   accepté. Les rejets arrivent plus tard via `OrderMonitor` → événement `orderUpdate`.
 - **La macro de sécurité ne peut pas être désarmée avant l'expiration du verrou**, par conception.
   Un refus `configureSafety`/`toggleSafety` pendant un verrou est le comportement attendu.
-- **`docs/architecture.md` a dérivé** sur plusieurs points (Safe Mode par défaut, absence de
-  persistance de l'état). En cas de contradiction, le code et `docs/protocol.md` font foi.
-- **Il n'y a pas de `.gitignore`** et les artefacts de build (`bin/`, `obj/`, `dist/`) sont
-  versionnés : une modification de source fait apparaître des dizaines de fichiers binaires dans
-  `git status`, et tout dossier de sortie créé (`publish/`…) y apparaît aussi. C'est attendu ;
-  ne pas « nettoyer » ces fichiers sans demander.
+- **`allowLiveAccounts` vaut `true` par défaut** : les comptes réels sont autorisés sans réglage.
+  C'est le seul filtre entre Sim et réel — le vérifier avant tout test qui envoie des ordres.
+- **`docs/architecture.md` a dérivé** sur plusieurs points (absence de persistance de l'état).
+  En cas de contradiction, le code et `docs/protocol.md` font foi.
+- **L'interface de configuration (8220) pilote l'envoi d'ordres indirectement** : elle écrit le
+  layout et pousse les limites de sécurité au bridge. Sa WebSocket contrôle l'en-tête `Origin`
+  — une page web quelconque pouvait sinon réécrire le layout et désactiver la macro de sécurité.
+  Ne pas retirer ce contrôle.
+- **Les artefacts de build sont versionnés** (`bin/`, `obj/`, et `dist/` de l'ancien plugin) : une
+  modification de source fait apparaître des dizaines de fichiers binaires dans `git status`.
+  C'est attendu ; ne pas « nettoyer » ces fichiers sans demander. Le `.gitignore` ne couvre que ce
+  qui est régénérable et volumineux — `src/deck-host/node_modules/`, `dist/` et `bridge/` de
+  l'hôte, et les dossiers `publish/`. Il ne s'applique pas aux fichiers déjà suivis, d'où la note
+  explicite dans le fichier.
 
 ## Conventions
 

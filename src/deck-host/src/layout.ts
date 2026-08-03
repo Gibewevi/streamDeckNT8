@@ -70,6 +70,51 @@ export function seedLayout(columns = 5, rows = 3): Layout {
   };
 }
 
+/**
+ * Valide un layout venant d'une source non sûre, et rend une copie normalisée.
+ *
+ * Appliquée AUX DEUX chemins d'entrée — fichier et WebSocket de l'interface. Seul le fichier
+ * était contrôlé auparavant, alors que le réseau est la source la moins fiable des deux : un
+ * `saveLayout` avec `pages: []` passait, et `host.navigate` calculait alors `(0 + 1) % 0`, soit
+ * `NaN`, ce qui figeait le deck.
+ */
+export function validateLayout(value: unknown): Layout {
+  const l = value as Partial<Layout> | null;
+  if (!l || typeof l !== 'object') throw new Error('layout absent ou non-objet');
+  if (!Array.isArray(l.pages) || l.pages.length === 0) throw new Error('layout sans page');
+
+  const int = (v: unknown, fallback: number, min: number, max: number): number => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+  };
+
+  const pages: Page[] = l.pages.map((p, i) => {
+    const slots: Record<string, SlotAssignment> = {};
+    for (const [key, raw] of Object.entries(p?.slots ?? {})) {
+      // Un emplacement sans identifiant d'action n'est pas affichable : on l'ignore plutôt que de
+      // laisser `computeVisual` recevoir `undefined` à chaque rendu.
+      const a = raw as Partial<SlotAssignment> | null;
+      if (!a || typeof a.actionId !== 'string' || !a.actionId) continue;
+      if (!/^\d+$/.test(key)) continue;
+      slots[key] = {
+        actionId: a.actionId,
+        settings: a.settings && typeof a.settings === 'object' ? a.settings : {},
+      };
+    }
+    return { name: typeof p?.name === 'string' ? p.name : `Page ${i + 1}`, slots };
+  });
+
+  return {
+    version: 1,
+    device: {
+      columns: int(l.device?.columns, 5, 1, 32),
+      rows: int(l.device?.rows, 3, 1, 32),
+    },
+    brightness: int(l.brightness, 80, 0, 100),
+    pages,
+  };
+}
+
 export class LayoutStore {
   #layout: Layout;
   #path: string;
@@ -96,8 +141,7 @@ export class LayoutStore {
       return seeded;
     }
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, 'utf8')) as Layout;
-      if (!parsed.pages?.length) throw new Error('layout sans page');
+      const parsed = validateLayout(JSON.parse(readFileSync(this.#path, 'utf8')));
       log.event('Layout', 'Layout chargé', { path: this.#path, pages: parsed.pages.length });
       return parsed;
     } catch (err) {
@@ -121,12 +165,19 @@ export class LayoutStore {
     writeFileSync(this.#path, JSON.stringify(layout, null, 2), 'utf8');
   }
 
-  /** Remplace le layout, l'écrit sur disque et notifie l'hôte pour un redessin immédiat. */
+  /**
+   * Remplace le layout, l'écrit sur disque et notifie l'hôte pour un redessin immédiat.
+   *
+   * Lève sur un layout invalide, sans rien écrire ni notifier : l'appelant (la WebSocket de
+   * l'interface) journalise le refus. Mieux vaut conserver le layout en service qu'en persister
+   * un qui laisserait le deck inutilisable.
+   */
   update(layout: Layout): void {
-    this.#layout = layout;
-    this.#persist(layout);
-    log.event('Layout', 'Layout mis à jour', { pages: layout.pages.length });
-    for (const fn of this.#listeners) fn(layout);
+    const clean = validateLayout(layout);
+    this.#layout = clean;
+    this.#persist(clean);
+    log.event('Layout', 'Layout mis à jour', { pages: clean.pages.length });
+    for (const fn of this.#listeners) fn(clean);
   }
 
   onChange(fn: (l: Layout) => void): void {

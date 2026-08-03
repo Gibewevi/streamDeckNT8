@@ -14,11 +14,12 @@ import {
 } from './messages.js';
 import { DeckDevice } from './device.js';
 import { LayoutStore, SlotAssignment } from './layout.js';
-import { computeVisual, VisualContext } from './visual-engine.js';
+import { computeVisual, gainEnTicks, VisualContext } from './visual-engine.js';
 import { renderButtonSvg } from './visuals.js';
 import { ConfigServer, UiSnapshot } from './server.js';
 import { BridgeSupervisor } from './supervisor.js';
-import { actionName } from './catalog.js';
+import { empreinteDe, journaliserTransitions, journaliserConfiguration, Empreinte } from './transitions.js';
+import { actionName, CATALOG_BY_ID, HOLD_CONFIRM_MS } from './catalog.js';
 import * as log from './logger.js';
 
 const VERSION = '0.1.0';
@@ -51,6 +52,7 @@ function ctx(): VisualContext {
     bridgeConnected: bridge.isConnected,
     lastRejectionAt,
     defaultQuantity: DEFAULT_GLOBAL_SETTINGS.defaultQuantity,
+    autoBe: { actif: autoBe.actif, pose: autoBe.pose !== null },
   };
 }
 
@@ -68,7 +70,12 @@ function slotAt(index: number): SlotAssignment | null {
 function visualFor(index: number) {
   const assignment = slotAt(index);
   if (!assignment) return null;
-  return computeVisual(assignment.actionId, assignment.settings ?? {}, lastState ?? DISCONNECTED_STATE, ctx());
+  const visual = computeVisual(assignment.actionId, assignment.settings ?? {}, lastState ?? DISCONNECTED_STATE, ctx());
+  if (!visual) return null;
+  // La jauge de maintien se superpose au visuel calculé, sans le remplacer : le trader doit
+  // continuer à lire ce que fait la touche pendant qu'il la tient.
+  const p = progressionDe(index);
+  return p === undefined ? visual : { ...visual, progress: p };
 }
 
 // `paintAll` est déclenché depuis six endroits (état du bridge, connexion, édition du layout,
@@ -260,6 +267,21 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
   const qty = lastState?.quantity ?? DEFAULT_GLOBAL_SETTINGS.defaultQuantity;
   const id = assignment.actionId;
 
+  // Auto BE : bascule un automatisme local, aucun ordre envoyé à l'appui lui-même.
+  if (id === 'host.autobe') {
+    autoBe.actif = !autoBe.actif;
+    // Réarmer à l'activation : un break-even posé lors d'une session précédente ne doit pas
+    // empêcher la pose sur la position en cours.
+    autoBe.pose = null;
+    autoBe.echecs = 0;
+    log.event('AutoBE', autoBe.actif ? 'Automatisme ARMÉ' : 'Automatisme DÉSARMÉ', {
+      seuilTicks: Number(s.triggerTicks) || 0, offsetTicks: Number(s.offsetTicks) || 0,
+    });
+    persisterArmementAutoBe();
+    if (autoBe.actif && lastState) evaluerAutoBe(lastState);
+    return;
+  }
+
   // Navigation : action propre à l'hôte, aucun aller-retour vers le bridge.
   if (id === 'host.navigate') {
     const total = store.layout.pages.length;
@@ -351,7 +373,10 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
     // Arme la macro, ou tente de la désarmer une fois le verrou expiré. Un refus pendant le
     // verrou est le comportement attendu, par conception.
     case 'com.trader.ninjatrader.safety': {
-      const resp = await bridge.sendCommand(createCommand('toggleSafety', {}));
+      // `force` n'est transmis que si le mode développement est activé sur cette touche. Le
+      // bridge reste seul juge : il journalise tout contournement en avertissement.
+      const force = s.devMode === true;
+      const resp = await bridge.sendCommand(createCommand('toggleSafety', force ? { force: true } : {}));
       applySafetyResponse(resp);
       if (resp.error) {
         log.eventWarn('Safety', 'toggleSafety refusé (verrou toujours actif)', { code: resp.error.code, reason: resp.error.message });
@@ -360,6 +385,7 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
       log.event('Safety', 'Macro de sécurité basculée', {
         armed: lastState?.safety?.armed ?? false,
         lockSecondsRemaining: lastState?.safety?.lockSecondsRemaining ?? 0,
+        modeDeveloppement: force || undefined,
       });
       return;
     }
@@ -369,11 +395,169 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
   }
 }
 
+// --- Auto BE : pose le break-even dès que le gain atteint le seuil ---
+//
+// Seul automatisme du système à émettre un ordre sans appui de touche. Trois précautions en
+// découlent : il ne part qu'une fois par prix moyen, il abandonne après quelques échecs plutôt
+// que de marteler, et son armement est visible en permanence sur la touche.
+//
+// L'armement SURVIT au redémarrage (persisté dans le layout, voir `actif` ci-dessous) : une
+// protection que le trader croit armée doit l'être encore après un plantage de l'hôte. En
+// revanche la mémoire de la pose en cours, elle, ne survit pas — elle est propre à une position
+// et n'aurait aucun sens au redémarrage.
+const autoBe = {
+  /**
+   * Armement. Persisté dans le layout : la macro doit rester active tant qu'elle est armée,
+   * y compris après un redémarrage de l'hôte. Seul l'armement survit — la mémoire de la pose
+   * en cours est propre à la position et n'aurait aucun sens au redémarrage.
+   */
+  actif: false,
+  /** Prix moyen pour lequel le break-even a déjà été posé. */
+  pose: null as number | null,
+  envoiEnCours: false,
+  echecs: 0,
+  dernierEssai: 0,
+  dernierAvert: 0,
+  dernierAvertStop: 0,
+};
+
+const AUTOBE_MAX_ECHECS = 5;
+const AUTOBE_DELAI_RETENTE_MS = 2000;
+
+/** L'automatisme tourne quelle que soit la page affichée : on cherche la touche partout. */
+function trouverAutoBe(): SlotAssignment | null {
+  for (const p of store.layout.pages) {
+    for (const a of Object.values(p.slots)) {
+      if (a.actionId === 'host.autobe') return a;
+    }
+  }
+  return null;
+}
+
+/** Écrit l'armement dans le layout pour qu'il survive à un redémarrage. */
+function persisterArmementAutoBe(): void {
+  const cfg = trouverAutoBe();
+  if (!cfg) return;
+  (cfg.settings ||= {}).armed = autoBe.actif;
+  store.update(store.layout);
+}
+
+/** Reprend l'armement enregistré au démarrage. */
+function restaurerArmementAutoBe(): void {
+  const cfg = trouverAutoBe();
+  if (cfg?.settings?.armed === true) {
+    autoBe.actif = true;
+    log.event('AutoBE', 'Automatisme repris ARMÉ au démarrage', {
+      seuilTicks: Number(cfg.settings.triggerTicks) || 0,
+      offsetTicks: Number(cfg.settings.offsetTicks) || 0,
+    });
+  }
+}
+
+function evaluerAutoBe(state: TradingState): void {
+  if (!autoBe.actif || autoBe.envoiEnCours) return;
+
+  const cfg = trouverAutoBe();
+  if (!cfg) return;
+
+  const pos = state.position;
+  if (!pos?.exists) {
+    // Position fermée : on réarme pour la suivante.
+    if (autoBe.pose !== null || autoBe.echecs) {
+      log.event('AutoBE', 'Position fermée — automatisme réarmé');
+      autoBe.pose = null;
+      autoBe.echecs = 0;
+    }
+    return;
+  }
+
+  const info = state.instrumentInfo;
+  if (!info || info.tickSize <= 0 || info.lastPrice <= 0) {
+    // Sans taille de tick ni prix, le seuil est incalculable. Averti au plus une fois par minute :
+    // l'évaluation tourne cinq fois par seconde.
+    if (Date.now() - autoBe.dernierAvert > 60_000) {
+      autoBe.dernierAvert = Date.now();
+      log.eventWarn('AutoBE', 'Prix ou taille de tick indisponibles — seuil non évaluable', {
+        tickSize: info?.tickSize ?? 0, lastPrice: info?.lastPrice ?? 0,
+      });
+    }
+    return;
+  }
+
+  // Aucune condition sur l'existence d'un stop : l'add-on en CRÉE un s'il n'y en a pas.
+  // Une stratégie ATM n'est donc plus nécessaire pour être protégé.
+  const declenchement = Number(cfg.settings?.triggerTicks) || 0;
+  if (declenchement <= 0) return;
+
+  // Un renfort déplace le prix moyen : la comparaison se fait à un demi-tick près, car ce sont
+  // des flottants et l'égalité stricte finirait par reposer un break-even déjà posé.
+  const dejaPose = autoBe.pose !== null && Math.abs(autoBe.pose - pos.averagePrice) < info.tickSize / 2;
+  if (dejaPose) return;
+
+  // Le prix moyen a bougé alors qu'un break-even était déjà posé : c'est un renfort. Le tracer
+  // ici rend le réarmement lisible dans le journal, entre la modification de position et la
+  // nouvelle pose.
+  if (autoBe.pose !== null) {
+    log.event('AutoBE', 'Prix moyen modifié — automatisme réarmé pour le nouveau seuil', {
+      ancienPrixMoyen: autoBe.pose, nouveauPrixMoyen: pos.averagePrice, quantite: pos.quantity,
+    });
+    autoBe.pose = null;
+    autoBe.echecs = 0;
+  }
+
+  const gain = gainEnTicks(state);
+  if (gain === null || gain < declenchement) return;
+
+  if (autoBe.echecs >= AUTOBE_MAX_ECHECS) return;
+  if (Date.now() - autoBe.dernierEssai < AUTOBE_DELAI_RETENTE_MS) return;
+
+  const offset = Number(cfg.settings?.offsetTicks) || 0;
+  const prixMoyen = pos.averagePrice;
+  autoBe.envoiEnCours = true;
+  autoBe.dernierEssai = Date.now();
+
+  log.event('AutoBE', 'Seuil atteint — pose du break-even', {
+    gainTicks: gain.toFixed(1), seuil: declenchement, offsetTicks: offset,
+    prixMoyen, direction: pos.direction, quantite: pos.quantity,
+  });
+
+  // L'add-on recalcule lui-même le prix depuis le prix moyen courant : sur un renfort, il suffit
+  // de renvoyer la commande pour que le break-even suive.
+  void sendCmd('breakeven', { offsetTicks: offset }, cfg.settings ?? {})
+    .then(() => {
+      autoBe.pose = prixMoyen;
+      autoBe.echecs = 0;
+      log.event('AutoBE', 'Break-even posé', { prixMoyen, offsetTicks: offset });
+    })
+    .catch((err) => {
+      autoBe.echecs++;
+      log.fail('AutoBE', err, 'Pose du break-even refusée', {
+        essai: autoBe.echecs, sur: AUTOBE_MAX_ECHECS, prixMoyen,
+      });
+      if (autoBe.echecs >= AUTOBE_MAX_ECHECS) {
+        log.eventWarn('AutoBE', 'Abandon après échecs répétés — reprendre la main manuellement', { prixMoyen });
+      }
+    })
+    .finally(() => {
+      autoBe.envoiEnCours = false;
+      void paintAll();
+      server.broadcastSnapshot();
+    });
+}
+
 /** Rejoue la configuration de sécurité présente dans le layout — à la connexion et après édition. */
 async function syncSafetyConfig(): Promise<void> {
   for (const p of store.layout.pages) {
     for (const a of Object.values(p.slots)) {
       if (a.actionId === 'com.trader.ninjatrader.safety') {
+        // Le mode développement rend la macro contournable d'un appui. Le signaler à chaque
+        // démarrage et à chaque édition évite qu'il reste actif sans qu'on s'en souvienne, une
+        // fois la macro éprouvée. Le badge DEV sur la touche joue le même rôle en séance.
+        if (a.settings?.devMode === true) {
+          log.eventWarn('Safety', 'MODE DÉVELOPPEMENT ACTIF — la macro peut être désarmée sans attendre le verrou', {
+            rappel: 'à désactiver une fois la macro éprouvée',
+          });
+        }
         await pushSafetyConfig(a.settings ?? {});
         return;
       }
@@ -381,19 +565,14 @@ async function syncSafetyConfig(): Promise<void> {
   }
 }
 
-device.onPress(async (ev) => {
-  const assignment = slotAt(ev.index);
-  if (!assignment) {
-    log.traceEvent('KeyDown', 'Appui sur un emplacement vide', { slot: ev.index });
-    return;
-  }
-
+/** Déclenche réellement l'action d'un emplacement, et journalise l'issue. */
+async function declencher(slot: number, assignment: SlotAssignment, maintenuMs = 0): Promise<void> {
   // Chaque appui est journalisé avant toute tentative : une touche qui n'a produit aucun ordre
   // et une touche dont l'ordre a été refusé se ressemblent sur le deck, et seule cette ligne
   // permet de les distinguer après coup.
   const startedAt = Date.now();
   log.event('KeyDown', `${actionName(assignment.actionId)} pressée`, {
-    slot: ev.index, actionId: assignment.actionId,
+    slot, actionId: assignment.actionId, maintenuMs: maintenuMs || undefined,
     qty: lastState?.quantity ?? '', instrument: lastState?.instrument ?? '',
     account: lastState?.account ?? '', settings: assignment.settings,
   });
@@ -406,6 +585,83 @@ device.onPress(async (ev) => {
   }
   await paintAll();
   server.broadcastSnapshot();
+}
+
+// --- Confirmation par appui long ---
+
+/** Maintien en cours. `null` la plupart du temps : une seule touche à la fois. */
+let maintien: { slot: number; assignment: SlotAssignment; debut: number; duree: number; timer: ReturnType<typeof setInterval> } | null = null;
+
+/** Progression 0..1 de la touche en cours de maintien, lue par `visualFor`. */
+function progressionDe(slot: number): number | undefined {
+  if (!maintien || maintien.slot !== slot) return undefined;
+  return Math.min(1, (Date.now() - maintien.debut) / maintien.duree);
+}
+
+function annulerMaintien(raison: string): void {
+  if (!maintien) return;
+  clearInterval(maintien.timer);
+  const { slot, assignment, debut, duree } = maintien;
+  maintien = null;
+  log.event('KeyDown', `${actionName(assignment.actionId)} annulée — maintien trop court`, {
+    slot, tenuMs: Date.now() - debut, requisMs: duree, raison,
+  });
+  void paintAll();
+}
+
+device.onPress(async (ev) => {
+  const assignment = slotAt(ev.index);
+  if (!assignment) {
+    log.traceEvent('KeyDown', 'Appui sur un emplacement vide', { slot: ev.index });
+    return;
+  }
+
+  // Une action qui entre ou sort d'une position part toujours immédiatement, quel que soit le
+  // réglage enregistré. La règle est appliquée ici et non seulement masquée dans l'interface :
+  // un layout écrit avant cette règle, ou édité à la main, ne doit pas pouvoir retarder une
+  // sortie de position.
+  const def = CATALOG_BY_ID.get(assignment.actionId);
+  const demandee = assignment.settings?.holdConfirm === true;
+  if (def?.instant && demandee) {
+    log.eventWarn('KeyDown', 'Confirmation ignorée : cette action doit être instantanée', {
+      slot: ev.index, actionId: assignment.actionId,
+    });
+  }
+  const duree = def?.instant || !demandee ? 0 : HOLD_CONFIRM_MS;
+
+  if (duree <= 0) {
+    await declencher(ev.index, assignment);
+    return;
+  }
+
+  // Un second appui pendant un maintien abandonne le premier : sans cela, deux touches à
+  // confirmation pressées coup sur coup laisseraient un minuteur orphelin qui finirait par
+  // envoyer un ordre que le trader croyait abandonné.
+  if (maintien) annulerMaintien('autre touche pressée');
+
+  const debut = Date.now();
+  // 12 Hz : assez fluide pour que la jauge paraisse continue, assez espacé pour ne réécrire
+  // qu'une touche à chaque tic grâce au rendu différentiel.
+  const timer = setInterval(() => {
+    if (!maintien) return;
+    if (Date.now() - maintien.debut >= maintien.duree) {
+      const { slot, assignment: a, debut: d } = maintien;
+      clearInterval(maintien.timer);
+      maintien = null;
+      void declencher(slot, a, Date.now() - d);
+      return;
+    }
+    void paintAll();
+  }, 80);
+
+  maintien = { slot: ev.index, assignment, debut, duree, timer };
+  log.debugEvent('KeyDown', `${actionName(assignment.actionId)} — maintien demandé`, { slot: ev.index, requisMs: duree });
+  await paintAll();
+});
+
+device.onRelease((ev) => {
+  // Relâchement avant l'échéance : l'action est abandonnée. C'est tout l'intérêt du geste.
+  if (maintien && maintien.slot === ev.index) annulerMaintien('relâchée');
 });
 
 device.onConnectionChange((connected) => {
@@ -419,9 +675,20 @@ device.onConnectionChange((connected) => {
 
 // --- État venant du bridge ---
 
+/** Dernière empreinte connue, pour ne journaliser que les changements. */
+let empreinte: Empreinte | null = null;
+
 bridge.onStateUpdate((state) => {
   lastState = state;
+  // Avant tout traitement : c'est ce qui donne le contexte de tout ce qui suit dans le journal.
+  const nouvelle = empreinteDe(state);
+  journaliserTransitions(empreinte, nouvelle);
+  empreinte = nouvelle;
+
   if (state.cooldownActive) startCooldownTimer();
+  // Évalué à chaque état, soit cinq fois par seconde : c'est ce qui permet à l'automatisme de
+  // suivre le prix et de réagir à un renfort de position sans attendre.
+  evaluerAutoBe(state);
   void paintAll();
   server.broadcastSnapshot();
 });
@@ -468,6 +735,10 @@ function startCooldownTimer(): void {
 // --- Démarrage ---
 
 async function main(): Promise<void> {
+  // Écrite avant tout le reste : le fichier du jour devient autonome, on sait quelles macros
+  // étaient posées sans avoir à retrouver le layout de l'époque.
+  journaliserConfiguration(store.layout);
+  restaurerArmementAutoBe();
   let url: string;
   try {
     url = await server.listen(UI_PORT);
@@ -497,6 +768,9 @@ async function main(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   log.event('Session', 'Arrêt demandé', { signal });
   supervisor.stop();
+  // Le bridge n'est volontairement pas tué (il porte le verrou de sécurité), mais notre client
+  // doit cesser de se reconnecter, sinon le minuteur maintient le processus en vie.
+  bridge.stop();
   server.close();
   await device.close();
   process.exit(0);

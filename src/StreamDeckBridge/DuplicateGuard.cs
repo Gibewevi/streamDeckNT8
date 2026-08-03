@@ -34,13 +34,12 @@ public sealed class DuplicateGuard
                 _recentRequests.TryRemove(key, out _);
         }
 
-        if (_recentRequests.TryGetValue(requestId, out _))
-        {
-            _logger.LogWarning("Duplicate requestId detected: {RequestId}", requestId);
-            return true;
-        }
+        // Single atomic operation: a TryGetValue followed by a TryAdd leaves a window in which
+        // two identical requestIds both read "absent" and both get through. TryAdd returning
+        // false IS the duplicate signal.
+        if (_recentRequests.TryAdd(requestId, now)) return false;
 
-        _recentRequests.TryAdd(requestId, now);
-        return false;
+        _logger.LogWarning("Duplicate requestId detected: {RequestId}", requestId);
+        return true;
     }
 }

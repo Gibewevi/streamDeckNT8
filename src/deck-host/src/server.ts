@@ -8,9 +8,9 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync, existsSync } from 'fs';
-import { join, extname, dirname, normalize } from 'path';
+import { join, extname, dirname, normalize, sep } from 'path';
 import { fileURLToPath } from 'url';
-import { CATALOG } from './catalog.js';
+import { CATALOG, UNIVERSAL_SETTINGS } from './catalog.js';
 import { Layout, LayoutStore } from './layout.js';
 import * as log from './logger.js';
 
@@ -45,6 +45,7 @@ export class ConfigServer {
   #store: LayoutStore;
   #snapshot: () => UiSnapshot;
   #onPageChange: (page: number) => void;
+  #port = 0;
 
   constructor(store: LayoutStore, snapshot: () => UiSnapshot, onPageChange: (page: number) => void) {
     this.#store = store;
@@ -52,14 +53,34 @@ export class ConfigServer {
     this.#onPageChange = onPageChange;
 
     this.#http.on('upgrade', (req, socket, head) => {
+      // Écouter sur 127.0.0.1 ne suffit pas : la politique d'origine ne s'applique PAS aux
+      // WebSockets. Sans ce contrôle, n'importe quelle page web ouverte dans le navigateur du
+      // trader peut se connecter ici et émettre `saveLayout` — donc remapper les touches, activer
+      // le mode développement de la macro, et pousser dailyLossLimit=0 au bridge, ce qui désactive
+      // la règle. Une origine absente = client non-navigateur (l'interface elle-même, un outil).
+      const origin = req.headers.origin;
+      if (origin !== undefined && !this.#isLocalOrigin(origin)) {
+        log.eventWarn('Server', 'Upgrade WebSocket refusé — origine inattendue', { origin });
+        socket.destroy();
+        return;
+      }
       this.#wss.handleUpgrade(req, socket as any, head, (ws) => this.#attach(ws));
     });
   }
 
+  #isLocalOrigin(origin: string): boolean {
+    return origin === `http://127.0.0.1:${this.#port}` || origin === `http://localhost:${this.#port}`;
+  }
+
   listen(port: number): Promise<string> {
+    this.#port = port;
     return new Promise((resolve, reject) => {
       this.#http.once('error', reject);
       this.#http.listen(port, '127.0.0.1', () => {
+        this.#http.removeListener('error', reject);
+        // Sans ce relais, une erreur du serveur APRÈS un démarrage réussi n'a plus de gestionnaire
+        // et devient une exception non interceptée qui tue l'hôte.
+        this.#http.on('error', (err) => log.fail('Server', err, 'Erreur du serveur HTTP'));
         const url = `http://127.0.0.1:${port}`;
         log.event('Server', 'Interface de configuration disponible', { url });
         resolve(url);
@@ -88,6 +109,7 @@ export class ConfigServer {
     ws.send(JSON.stringify({
       type: 'hello',
       catalog: CATALOG,
+      universal: UNIVERSAL_SETTINGS,
       layout: this.#store.layout,
       layoutPath: this.#store.path,
       snapshot: this.#snapshot(),
@@ -129,8 +151,10 @@ export class ConfigServer {
     const rel = (req.url || '/').split('?')[0];
     const name = rel === '/' ? 'index.html' : rel.replace(/^\//, '');
     // Empêche de sortir du dossier ui/ via des ../ dans l'URL.
+    // Le séparateur final est indispensable : sans lui, « ../ui-secret/x » passait la garde,
+    // le préfixe « …/ui » étant satisfait par tout dossier FRÈRE dont le nom commence par « ui ».
     const file = normalize(join(UI_DIR, name));
-    if (!file.startsWith(normalize(UI_DIR)) || !existsSync(file)) {
+    if (!file.startsWith(normalize(UI_DIR) + sep) || !existsSync(file)) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Introuvable');
       return;

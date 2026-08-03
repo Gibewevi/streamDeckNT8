@@ -157,7 +157,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 }
 
                 var msg = BridgeMessage.CreateEvent("orderUpdate", payload);
-                _bridgeClient.SendAsync(msg).ConfigureAwait(false);
+                // Fire-and-forget délibéré : ce handler tourne dans le pipeline d'événements de
+                // NinjaTrader et ne peut pas attendre. SendAsync intercepte ses propres erreurs,
+                // aucune tâche fautive ne reste donc non observée.
+                _ = _bridgeClient.SendAsync(msg);
 
                 // A rejected order leaves the working-orders list: refresh the deck rather than
                 // leaving it showing a protection that no longer exists.

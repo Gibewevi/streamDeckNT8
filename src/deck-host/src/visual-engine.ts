@@ -15,6 +15,19 @@ export interface VisualContext {
   /** Dernier rejet remonté par NinjaTrader, affiché brièvement sur les touches d'entrée. */
   lastRejectionAt: number | null;
   defaultQuantity: number;
+  /** État de l'automatisme Auto BE — vit dans l'hôte, pas dans l'état publié par le bridge. */
+  autoBe: { actif: boolean; pose: boolean };
+}
+
+/** Gain en ticks au-delà du prix moyen, dans le sens de la position. */
+export function gainEnTicks(state: TradingState): number | null {
+  const pos = state.position;
+  const info = state.instrumentInfo;
+  if (!pos?.exists || !info || info.tickSize <= 0 || info.lastPrice <= 0) return null;
+  const ecart = pos.direction === 'Long'
+    ? info.lastPrice - pos.averagePrice
+    : pos.averagePrice - info.lastPrice;
+  return ecart / info.tickSize;
 }
 
 const REJECTION_BANNER_MS = 5000;
@@ -54,7 +67,7 @@ function formatSafetyDetail(safety: SafetyStatus): string {
     ? `${safety.tradeCount}/${safety.maxTradesWhenLosing}`
     : `${safety.tradeCount}T`;
 
-  // Éviter '&' — cette chaîne est injectée telle quelle dans le texte SVG.
+  // `renderButtonSvg` échappe désormais le XML lui-même : plus besoin d'éviter '&' ici.
   if (!safety.pnlAvailable) return `${trades} PNL?`;
 
   const pnl = Math.round(safety.sessionPnl);
@@ -263,9 +276,14 @@ export function computeVisual(
     }
     case 'com.trader.ninjatrader.safety': {
       const safety = state.safety ?? DEFAULT_SAFETY_STATUS;
+      // Le mode développement lève la seule garantie de cette macro : il doit se voir sur la
+      // touche elle-même, pas uniquement dans un formulaire de réglages qu'on n'ouvre jamais.
+      const dev = settings.devMode === true;
+      const marque = dev ? { badge: 'DEV', badgeColor: Colors.cancelYellow } : {};
 
       if (!safety.armed) {
         return {
+          ...marque,
           title: 'SAFETY:GUARD', subtitle: 'OFF',
           detail: `${safety.maxTradesWhenLosing || '--'} / ${safety.dailyLossLimit || '--'}`,
           bgColor: Colors.disabled, textColor: Colors.textDim,
@@ -275,6 +293,7 @@ export function computeVisual(
       // Armée et une limite atteinte — les entrées sont refusées jusqu'à la fin du verrou.
       if (safety.entriesBlocked) {
         return {
+          ...marque,
           title: safety.blockReason === 'dailyLoss' ? 'SAFETY:LOSS' : 'SAFETY:MAX',
           subtitle: formatLockRemaining(safety.lockSecondsRemaining),
           detail: formatSafetyDetail(safety),
@@ -283,11 +302,34 @@ export function computeVisual(
       }
 
       return {
+        ...marque,
         title: 'SAFETY:LOCK',
-        subtitle: formatLockRemaining(safety.lockSecondsRemaining),
+        // Le verrou restant n'a plus la même signification en mode développement : il peut être
+        // levé d'un appui. On le dit plutôt que d'afficher une durée qui n'engage plus à rien.
+        subtitle: dev ? 'DEV' : formatLockRemaining(safety.lockSecondsRemaining),
         detail: formatSafetyDetail(safety),
         bgColor: Colors.buyGreen, textColor: Colors.textWhite,
       };
+    }
+
+    // Automatisme propre à l'hôte : il n'existe pas de commande « auto BE » côté bridge, c'est
+    // l'hôte qui surveille le gain et déclenche un `breakeven` ordinaire.
+    case 'host.autobe': {
+      const declenchement = Number(settings.triggerTicks) || 0;
+      if (!ctx.autoBe.actif) {
+        return {
+          title: 'AUTOBE', subtitle: 'OFF',
+          bgColor: Colors.disabled, textColor: Colors.textDim,
+        };
+      }
+      if (ctx.autoBe.pose) {
+        return { title: 'AUTOBE', subtitle: 'POSE', bgColor: Colors.buyGreen, textColor: Colors.textWhite };
+      }
+      // Armé et en attente : afficher la progression vers le seuil est ce qui permet de savoir
+      // que l'automatisme suit réellement la position.
+      const gain = gainEnTicks(state);
+      const attente = gain === null ? 'ARME' : `${Math.floor(gain)}/${declenchement}`;
+      return { title: 'AUTOBE', subtitle: attente, bgColor: Colors.beBlue, textColor: Colors.textWhite };
     }
 
     // Action propre à l'hôte : la navigation entre pages était assurée par les touches

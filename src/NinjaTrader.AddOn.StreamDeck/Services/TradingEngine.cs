@@ -320,10 +320,6 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             if (position == null)
                 return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_POSITION", "No open position for break-even.");
 
-            var stopOrders = _resolver.FindStopOrders(ctx.Account, ctx.Instrument);
-            if (stopOrders.Count == 0)
-                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_STOP_ORDER", "No active stop order to move to break-even.");
-
             var offsetTicks = cmd.GetPayloadInt("offsetTicks") ?? 0;
             double tickSize = ctx.Instrument.MasterInstrument.TickSize;
             if (tickSize <= 0)
@@ -358,8 +354,57 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 }
             }
 
+            var stopOrders = _resolver.FindStopOrders(ctx.Account, ctx.Instrument);
+
             try
             {
+                // Aucun stop attaché : on le CRÉE plutôt que de refuser. Exiger une stratégie ATM
+                // pour poser un break-even priverait de protection toute entrée passée depuis le
+                // deck, alors que l'add-on a tout ce qu'il faut pour soumettre l'ordre lui-même.
+                if (stopOrders.Count == 0)
+                {
+                    var protectQty = (int)Math.Abs(position.Quantity);
+                    if (protectQty < 1)
+                        return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_POSITION",
+                            "Position quantity is zero — nothing to protect.");
+
+                    // Le stop sort de la position : il va donc dans le sens inverse de celle-ci.
+                    var protectAction = position.MarketPosition == MarketPosition.Long
+                        ? OrderAction.Sell
+                        : OrderAction.Buy;
+
+                    var stopOrder = ctx.Account.CreateOrder(
+                        ctx.Instrument,
+                        protectAction,
+                        OrderType.StopMarket,
+                        TimeInForce.Day,
+                        protectQty,
+                        0,          // limitPrice
+                        bePrice,    // stopPrice
+                        string.Empty,
+                        "StreamDeck_BE",
+                        null);
+
+                    ctx.Account.Submit(new[] { stopOrder });
+
+                    SdLogger.Info("[REQ:{0}] BE{1}: CREATED protective {2} stop x{3} at {4} (avg entry: {5}, OrderId: {6})",
+                        cmd.RequestId,
+                        offsetTicks != 0 ? $"+{offsetTicks}" : "",
+                        protectAction, protectQty, bePrice, avgPrice, stopOrder.OrderId);
+
+                    // Submit est asynchrone : un refus (marge, marché fermé) arrivera plus tard
+                    // via OrderMonitor. Ce retour signale l'envoi, pas l'acceptation.
+                    return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
+                    {
+                        bePrice,
+                        avgPrice,
+                        offsetTicks,
+                        stopsCreated = 1,
+                        stopsModified = 0,
+                        message = $"Break-even: protective stop created at {bePrice}"
+                    });
+                }
+
                 int moved = 0;
                 foreach (var stop in stopOrders)
                 {
@@ -384,6 +429,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                     bePrice,
                     avgPrice,
                     offsetTicks,
+                    stopsCreated = 0,
                     stopsModified = moved,
                     message = $"Break-even: {moved} stop(s) moved to {bePrice}"
                 });

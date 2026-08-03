@@ -42,6 +42,7 @@ if (Test-Path $backup) {
 
 Step "4/5  Raccourci"
 Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\TradeDeck.lnk" -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\Desktop\TradeDeck.lnk" -ErrorAction SilentlyContinue
 Info "Supprimé"
 
 Step "5/5  Fichiers"

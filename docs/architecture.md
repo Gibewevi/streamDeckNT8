@@ -106,12 +106,22 @@ Refus avec erreur CONTEXT_MISSING
 | **Bridge** | Schema JSON complet, version supportée, requestId présent, account/instrument non vides, quantité > 0 |
 | **Add-On** | Compte existe, instrument existe, connexion NT8 active, position existe (pour actions dépendantes), pas de double exécution (requestId idempotent sur 60s) |
 
-### Safe Mode V1
+### Safe Mode
 
-- **Par défaut, seul le compte `Sim101` est autorisé.**
-- Un flag `allowLiveAccounts` dans la config du bridge (défaut: `false`) doit être mis à `true` explicitement pour autoriser les comptes réels.
-- Le bridge affiche un warning au démarrage si `allowLiveAccounts` est `true`.
-- Chaque action sur un compte réel est loggée avec le niveau `WARNING`.
+> Cette section décrivait l'intention d'origine, pas le code. Corrigée pour refléter
+> `BridgeConfig.AllowLiveAccounts`, qui fait foi.
+
+- `allowLiveAccounts` vaut **`true` par défaut** (`Models/BridgeConfig.cs`) : les comptes réels
+  sont autorisés sans réglage particulier. C'est un choix délibéré — le cockpit sert à trader en
+  réel — mais c'est **le réglage aux conséquences les plus lourdes du système**, et il est le
+  seul à séparer les comptes Sim des comptes réels.
+- Mis à `false`, le bridge n'accepte plus que les comptes dont le nom commence par `Sim`
+  (`MessageValidator.ValidateTradingAction`), et refuse les autres avec `LIVE_ACCOUNT_BLOCKED`.
+- Le bridge journalise son mode au démarrage : `⚠️ LIVE ACCOUNTS ENABLED — Safe mode is OFF`,
+  ou `Safe mode ON — Only Sim accounts allowed`.
+- Seuls les **refus** sont journalisés en `WARNING`. Les actions autorisées sur compte réel ne
+  produisent pas d'avertissement dédié : elles apparaissent dans le journal des commandes comme
+  les autres, avec leur `requestId`.
 
 ### Garde-fous spécifiques
 

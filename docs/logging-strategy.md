@@ -63,7 +63,10 @@ le flux WebSocket complet, mais il représente des dizaines de milliers de ligne
 
 | Catégorie | Ce qu'on y trouve |
 |-----------|-------------------|
-| `Session` | Démarrage/arrêt d'un composant, version, configuration, chemin du fichier de log |
+| `Session` | Démarrage/arrêt d'un composant, version, **configuration complète du deck** (une ligne par touche, avec ses réglages), chemin du fichier de log |
+| `AutoBE` | Automatisme de break-even : armement, seuil atteint, pose, réarmement au renfort, abandon |
+| `Navigation` | Changement de page, déclenché depuis le boîtier ou depuis l'interface |
+| `Supervisor` | Surveillance du bridge : injoignable, relancé |
 | `KeyDown` | Chaque appui sur une touche, avec quantité, instrument, compte et réglages au moment de l'appui |
 | `Command` | Commande envoyée, acceptée, refusée (avec le code d'erreur) ou terminée, avec sa durée |
 | `Order` | Cycle de vie des ordres côté NinjaTrader : soumis, accepté, exécuté, annulé, **rejeté** |
@@ -75,6 +78,35 @@ le flux WebSocket complet, mais il représente des dizaines de milliers de ligne
 | `Visual` | Ce que chaque touche affiche, journalisé **au changement** uniquement |
 | `State` | Transitions d'état : compte, instrument, quantité, NinjaTrader connecté ou non |
 | `StatePublish` | Santé de la publication d'état côté NT8 (ticks sautés = deck figé sur des données périmées) |
+
+## Transitions d'état côté hôte
+
+`src/deck-host/src/transitions.ts` compare l'état reçu du bridge au précédent et n'écrit
+**qu'aux changements réels**. L'état arrive cinq fois par seconde : le journaliser tel quel
+remplirait le fichier, ne rien journaliser rendait le comportement des macros indéchiffrable —
+on lisait « break-even posé » sans jamais voir la position qui l'avait déclenché.
+
+| Transition | Catégorie | Niveau |
+|---|---|---|
+| NinjaTrader connecté / perdu | `State` | INFO / WARN |
+| Compte changé — **signalé en WARN si non simulé** | `State` | INFO / WARN |
+| Instrument, quantité de travail | `State` | INFO |
+| Position ouverte / fermée | `Position` | INFO |
+| **Renfort ou réduction** : quantité et prix moyen, avant → après | `Position` | INFO |
+| Sens de position inversé | `Position` | INFO |
+| Stop posé, déplacé, ou **disparu alors que la position est ouverte** | `Protection` | INFO / WARN |
+| Target posé, déplacé, retiré | `Protection` | INFO |
+| Macro de sécurité armée / désarmée | `Safety` | INFO |
+| **Entrées bloquées** par la macro, avec son motif | `Safety` | WARN |
+| Temporisation activée, déclenchée, terminée | `Cooldown` | INFO / WARN |
+
+Le stop qui disparaît **avec** la position est en `DEBUG`, pas en `WARN` : c'est le déroulement
+normal d'une sortie, et avertir à chaque fois apprendrait à ignorer l'avertissement le jour où il
+compte vraiment.
+
+La configuration du deck est écrite au démarrage, une ligne par touche avec ses réglages. Le
+fichier du jour est donc autonome : on sait quelles macros étaient posées sans avoir à retrouver
+le `layout.json` de l'époque.
 
 ## Ce qui est journalisé automatiquement
 

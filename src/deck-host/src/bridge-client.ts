@@ -197,6 +197,9 @@ export class BridgeClient {
       // même requestId : le résultat local du bridge, puis la confirmation de NinjaTrader. On
       // note l'identifiant pour ne pas signaler la seconde comme une anomalie.
       this.answered.set(msg.requestId, Date.now());
+      // Purge ici aussi : la seule autre purge est dans la branche des réponses tardives, qui
+      // peut ne jamais s'exécuter — la table grossissait alors pour toute la séance.
+      this.pruneAnswered();
       pending.resolve(msg);
       return;
     }

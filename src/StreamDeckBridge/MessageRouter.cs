@@ -306,11 +306,16 @@ public sealed class MessageRouter
     /// </summary>
     private BridgeMessage HandleSafetyAction(BridgeMessage message)
     {
+        // `force` n'est envoyé que si le mode développement est activé sur la touche Sécurité.
+        // Absent ou mal formé, il vaut false : un contournement ne doit jamais être accordé
+        // par accident.
+        var force = GetPayloadBool(message, "force");
+
         var outcome = message.Action switch
         {
             "armSafety" => _safety.Arm(),
-            "disarmSafety" => _safety.Disarm(),
-            "toggleSafety" => _safety.Toggle(),
+            "disarmSafety" => _safety.Disarm(force),
+            "toggleSafety" => _safety.Toggle(force),
             _ => _safety.Configure(
                 GetPayloadInt(message, "maxTradesWhenLosing"),
                 GetPayloadDouble(message, "dailyLossLimit"),
@@ -360,11 +365,17 @@ public sealed class MessageRouter
         return null;
     }
 
+    /// <summary>
+    /// TryGetInt32 and not GetInt32: the latter throws on any JSON number that is not an exact
+    /// Int32 (2.5, but also 2.0). See the same guard in MessageValidator — an exception here
+    /// used to tear down the plugin session instead of refusing the command.
+    /// </summary>
     private static int? GetPayloadInt(BridgeMessage msg, string key)
     {
         if (msg.Payload is not JsonElement el) return null;
-        if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number)
-            return prop.GetInt32();
+        if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number
+            && prop.TryGetInt32(out var value))
+            return value;
         return null;
     }
 
@@ -374,5 +385,12 @@ public sealed class MessageRouter
         if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number)
             return prop.GetDouble();
         return null;
+    }
+
+    /// <summary>Absent or malformed reads as false: a bypass must never be granted by accident.</summary>
+    private static bool GetPayloadBool(BridgeMessage msg, string key)
+    {
+        if (msg.Payload is not JsonElement el) return false;
+        return el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.True;
     }
 }

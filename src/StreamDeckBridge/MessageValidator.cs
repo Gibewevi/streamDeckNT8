@@ -84,7 +84,7 @@ public sealed class MessageValidator
         {
             var qty = GetPayloadInt(message, "quantity");
             if (qty == null || qty < _config.MinQuantity || qty > _config.MaxQuantity)
-                return (false, "INVALID_QUANTITY", $"Quantity must be between {_config.MinQuantity} and {_config.MaxQuantity}.");
+                return (false, "INVALID_QUANTITY", $"Quantity must be a whole number between {_config.MinQuantity} and {_config.MaxQuantity}.");
         }
         else if (message.Action == "qtyAdjust")
         {
@@ -130,6 +130,15 @@ public sealed class MessageValidator
         var maxTrades = GetPayloadInt(message, "maxTradesWhenLosing");
         var dailyLoss = GetPayloadDouble(message, "dailyLossLimit");
         var lockHours = GetPayloadDouble(message, "lockDurationHours");
+
+        // Distinguish "not supplied" from "supplied but not a whole number". Both read as null
+        // after the TryGetInt32 guard, and reporting a decimal as a missing field sent the trader
+        // looking for the wrong problem.
+        if (maxTrades == null && HasNumericProperty(message, "maxTradesWhenLosing"))
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"maxTradesWhenLosing must be a whole number between 0 and {SafetyMacro.MaxTradeLimit} (0 disables the rule).");
+        }
 
         if (maxTrades == null && dailyLoss == null && lockHours == null)
         {
@@ -177,11 +186,19 @@ public sealed class MessageValidator
         return null;
     }
 
+    /// <summary>
+    /// TryGetInt32 and not GetInt32: the latter THROWS on any JSON number that is not an exact
+    /// Int32 — 2.5, but also 2.0 or 2147483648. That exception escaped Validate, unwound past
+    /// ProcessPluginCommand and tore down the whole plugin session, which the host then
+    /// reconnected and re-triggered. A decimal typed in the config UI bricked the deck in a
+    /// permanent reconnect loop. A malformed value must read as absent, never as an exception.
+    /// </summary>
     private static int? GetPayloadInt(BridgeMessage msg, string key)
     {
         if (msg.Payload is not JsonElement el) return null;
-        if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number)
-            return prop.GetInt32();
+        if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number
+            && prop.TryGetInt32(out var value))
+            return value;
         return null;
     }
 
@@ -191,5 +208,12 @@ public sealed class MessageValidator
         if (el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number)
             return prop.GetDouble();
         return null;
+    }
+
+    /// <summary>True when the key is present as a JSON number, whatever its precision or range.</summary>
+    private static bool HasNumericProperty(BridgeMessage msg, string key)
+    {
+        if (msg.Payload is not JsonElement el) return false;
+        return el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number;
     }
 }

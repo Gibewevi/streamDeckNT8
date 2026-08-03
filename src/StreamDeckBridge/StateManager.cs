@@ -25,6 +25,13 @@ public sealed class StateManager
     private double _previousUnrealizedPnl;
     private string _previousPositionInstrument = string.Empty;
 
+    // False while NT8 could not resolve the account/instrument, which is NOT the same as "flat".
+    // Conflating the two fabricated trades: a single tick with an unresolved context cleared the
+    // position, and the next tick then read a flat→open transition on a position that had never
+    // moved — inflating the count that gates SAFETY_TRADE_LIMIT_REACHED. Starts false so an
+    // already-open position at startup is never counted as a new trade.
+    private bool _previousPositionKnown;
+
     public StateManager(BridgeConfig config, SafetyMacro safety, ILogger<StateManager> logger)
     {
         _config = config;
@@ -217,6 +224,7 @@ public sealed class StateManager
             // Save previous position state before updating
             _previousPositionExists = _state.Position?.Exists ?? false;
             _previousUnrealizedPnl = _state.Position?.UnrealizedPnl ?? 0;
+            var previousKnown = _previousPositionKnown;
 
             // Account-wide P&L feeds the safety macro's loss rules
             UpdateSafetyPnl(statePayload);
@@ -231,6 +239,7 @@ public sealed class StateManager
 
                 _state.Position = null;
                 _previousPositionInstrument = ReadInstrumentName(statePayload);
+                _previousPositionKnown = false;
             }
             else
             {
@@ -238,23 +247,32 @@ public sealed class StateManager
                 _previousPositionInstrument = ReadInstrumentName(statePayload);
 
                 _state.Position = JsonSerializer.Deserialize<PositionState>(pos.GetRawText(), CamelCase);
-
-                // Detect position closed with a loss → trigger cooldown
                 var currentExists = _state.Position?.Exists ?? false;
-                if (_cooldownEnabled && _previousPositionExists && !currentExists && _previousUnrealizedPnl < 0)
+
+                // Transitions are only meaningful when the PREVIOUS tick actually knew the
+                // position. After a tick with an unresolved context we know nothing about what
+                // happened in between, so we resynchronise silently rather than invent an
+                // open or a close that never occurred.
+                if (previousKnown)
                 {
-                    _cooldownUntil = DateTime.UtcNow.AddSeconds(60);
-                    _logger.LogWarning("Cooldown activated for 60s after losing trade (PnL: {Pnl})", _previousUnrealizedPnl);
+                    // Detect position closed with a loss → trigger cooldown
+                    if (_cooldownEnabled && _previousPositionExists && !currentExists && _previousUnrealizedPnl < 0)
+                    {
+                        _cooldownUntil = DateTime.UtcNow.AddSeconds(60);
+                        _logger.LogWarning("Cooldown activated for 60s after losing trade (PnL: {Pnl})", _previousUnrealizedPnl);
+                    }
+
+                    // Flat → open on the same instrument counts as one trade for the safety macro.
+                    // Requiring the same instrument avoids counting a phantom trade when the
+                    // tracked instrument switches to one that already has an open position.
+                    if (!_previousPositionExists && currentExists &&
+                        string.Equals(previousInstrument, _previousPositionInstrument, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _safety.RecordTradeOpened();
+                    }
                 }
 
-                // Flat → open on the same instrument counts as one trade for the safety macro.
-                // Requiring the same instrument avoids counting a phantom trade when the
-                // tracked instrument switches to one that already has an open position.
-                if (!_previousPositionExists && currentExists &&
-                    string.Equals(previousInstrument, _previousPositionInstrument, StringComparison.OrdinalIgnoreCase))
-                {
-                    _safety.RecordTradeOpened();
-                }
+                _previousPositionKnown = true;
             }
             if (statePayload.TryGetProperty("instrument", out var inst))
             {

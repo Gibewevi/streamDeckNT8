@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NinjaTrader.AddOn.StreamDeck")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+43b8c5a02f56ce8953ff69ec05487cf51f1ca8e7")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+d0ee583a5928955d1ca7065f7cfd24c7de5976c1")]
 [assembly: System.Reflection.AssemblyProductAttribute("NinjaTrader.AddOn.StreamDeck")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NinjaTrader.AddOn.StreamDeck")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

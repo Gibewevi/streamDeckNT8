@@ -110,10 +110,19 @@ public sealed class SafetyMacro
     }
 
     /// <summary>
-    /// Disarms the macro. Refused while the lock is still running — this is the whole point
-    /// of the feature, so there is deliberately no override parameter.
+    /// Disarms the macro. Refused while the lock is still running — that refusal is the whole
+    /// point of the feature.
     /// </summary>
-    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Disarm()
+    /// <param name="force">
+    /// Development escape hatch, opt-in per key in the host ("mode développement" on the Safety
+    /// key). It exists only because the macro is untestable otherwise: every trial locks the
+    /// trader out for the whole lock duration, six hours by default.
+    ///
+    /// It does NOT weaken the macro while armed — entries stay blocked exactly as before. It
+    /// only lifts the refusal to disarm, and the trader still has to press the key deliberately.
+    /// Every use is logged at warning level so a forced unlock is always visible afterwards.
+    /// </param>
+    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Disarm(bool force = false)
     {
         lock (_lock)
         {
@@ -125,27 +134,34 @@ public sealed class SafetyMacro
             var remaining = RemainingLock();
             if (remaining > TimeSpan.Zero)
             {
-                _logger.LogWarning("Safety macro disarm REFUSED — locked for another {Remaining}", FormatDuration(remaining));
-                return (false, "SAFETY_MACRO_LOCKED",
-                    $"Safety macro is locked for another {FormatDuration(remaining)}. It cannot be disabled before the lock expires.",
-                    BuildStatus());
+                if (!force)
+                {
+                    _logger.LogWarning("Safety macro disarm REFUSED — locked for another {Remaining}", FormatDuration(remaining));
+                    return (false, "SAFETY_MACRO_LOCKED",
+                        $"Safety macro is locked for another {FormatDuration(remaining)}. It cannot be disabled before the lock expires.",
+                        BuildStatus());
+                }
+
+                _logger.LogWarning(
+                    "Safety macro FORCE-DISARMED with {Remaining} of lock left — development mode is enabled on the Safety key",
+                    FormatDuration(remaining));
             }
 
-            DisarmInternal("manual");
+            DisarmInternal(force && remaining > TimeSpan.Zero ? "forced (dev mode)" : "manual");
             Persist();
             return (true, null, null, BuildStatus());
         }
     }
 
     /// <summary>Arms when disarmed, attempts to disarm when armed. Backs the single Stream Deck key.</summary>
-    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Toggle()
+    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Toggle(bool force = false)
     {
         // Monitor is reentrant, so delegating under the same lock is safe and keeps
         // the arm/disarm decision atomic with respect to the lock deadline.
         lock (_lock)
         {
             Refresh();
-            return _state.Armed ? Disarm() : Arm();
+            return _state.Armed ? Disarm(force) : Arm();
         }
     }
 

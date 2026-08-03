@@ -208,31 +208,48 @@ public sealed class BridgeServer : BackgroundService
 
                 if (msg == null) continue;
 
-                var (localResponse, shouldForward, enrichedMessage) = _router.ProcessPluginCommand(msg);
-
-                if (localResponse != null)
+                // Scoped to ONE command on purpose. This catch used to sit outside the receive
+                // loop: any unexpected exception while handling a single command tore down the
+                // whole session, the host reconnected, replayed the same command and tore it down
+                // again — a permanent reconnect loop from one malformed field. A bad command must
+                // cost that command, not the connection.
+                try
                 {
-                    await SendToPlugin(localResponse, ct);
+                    var (localResponse, shouldForward, enrichedMessage) = _router.ProcessPluginCommand(msg);
 
-                    // For qty/instrument changes, also broadcast updated state
-                    if (msg.Action is "qtySet" or "qtyAdjust" or "qtyReset" or "setInstrument" or "setAccount"
-                        or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety" or "configureSafety")
+                    if (localResponse != null)
                     {
-                        await BroadcastState(ct);
+                        await SendToPlugin(localResponse, ct);
+
+                        // For qty/instrument changes, also broadcast updated state
+                        if (msg.Action is "qtySet" or "qtyAdjust" or "qtyReset" or "setInstrument" or "setAccount"
+                            or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety" or "configureSafety")
+                        {
+                            await BroadcastState(ct);
+                        }
+                    }
+
+                    if (shouldForward && enrichedMessage != null)
+                    {
+                        if (_addonSocket?.State == WebSocketState.Open)
+                        {
+                            await SendToAddon(enrichedMessage, ct);
+                        }
+                        else
+                        {
+                            var err = BridgeMessage.CreateError(msg.RequestId, msg.Action, "NT_DISCONNECTED", "NinjaTrader is not connected.");
+                            await SendToPlugin(err, ct);
+                        }
                     }
                 }
-
-                if (shouldForward && enrichedMessage != null)
+                catch (OperationCanceledException) { throw; }
+                catch (WebSocketException) { throw; }
+                catch (Exception ex)
                 {
-                    if (_addonSocket?.State == WebSocketState.Open)
-                    {
-                        await SendToAddon(enrichedMessage, ct);
-                    }
-                    else
-                    {
-                        var err = BridgeMessage.CreateError(msg.RequestId, msg.Action, "NT_DISCONNECTED", "NinjaTrader is not connected.");
-                        await SendToPlugin(err, ct);
-                    }
+                    _logger.LogError(ex, "[REQ:{RequestId}] Unhandled error processing {Action} — session kept alive",
+                        msg.RequestId, msg.Action);
+                    await SendToPlugin(
+                        BridgeMessage.CreateError(msg.RequestId, msg.Action, "INTERNAL_ERROR", ex.Message), ct);
                 }
             }
         }
