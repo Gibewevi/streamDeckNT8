@@ -282,10 +282,11 @@ export function computeVisual(
       const marque = dev ? { badge: 'DEV', badgeColor: Colors.cancelYellow } : {};
 
       if (!safety.armed) {
+        // Pas de rappel des limites configurées ici : la touche sert à savoir si la protection
+        // est active, pas à relire des réglages qu'on consulte dans l'interface.
         return {
           ...marque,
           title: 'SAFETY:GUARD', subtitle: 'OFF',
-          detail: `${safety.maxTradesWhenLosing || '--'} / ${safety.dailyLossLimit || '--'}`,
           bgColor: Colors.disabled, textColor: Colors.textDim,
         };
       }
@@ -301,13 +302,20 @@ export function computeVisual(
         };
       }
 
+      // Armée et rien à signaler. La touche bascule GUARD OFF → GUARD ON : un même mot dans les
+      // deux états, pour que l'œil lise l'état et non un vocabulaire qui change. « LOCK » disait
+      // la même chose mais obligeait à réfléchir.
+      //
+      // Compteur de trades et P&L de séance sont volontairement absents : tant que rien n'est
+      // atteint, ils encombrent sans rien apprendre. Ils réapparaissent dans la branche blocage
+      // ci-dessus, au moment précis où ils expliquent un refus.
       return {
         ...marque,
-        title: 'SAFETY:LOCK',
+        title: 'SAFETY:GUARD',
+        subtitle: 'ON',
         // Le verrou restant n'a plus la même signification en mode développement : il peut être
         // levé d'un appui. On le dit plutôt que d'afficher une durée qui n'engage plus à rien.
-        subtitle: dev ? 'DEV' : formatLockRemaining(safety.lockSecondsRemaining),
-        detail: formatSafetyDetail(safety),
+        detail: dev ? 'DEV' : formatLockRemaining(safety.lockSecondsRemaining),
         bgColor: Colors.buyGreen, textColor: Colors.textWhite,
       };
     }
