@@ -313,9 +313,11 @@ export function computeVisual(
         ...marque,
         title: 'SAFETY:GUARD',
         subtitle: 'ON',
-        // Le verrou restant n'a plus la même signification en mode développement : il peut être
-        // levé d'un appui. On le dit plutôt que d'afficher une durée qui n'engage plus à rien.
-        detail: dev ? 'DEV' : formatLockRemaining(safety.lockSecondsRemaining),
+        // Le compte à rebours s'affiche aussi en mode développement. Il y a bien une nuance — le
+        // verrou peut alors être levé d'un appui, la durée n'engage donc à rien — mais c'est le
+        // badge DEV qui porte cet avertissement. L'écrire une seconde fois ici coûtait la seule
+        // information de la ligne sans rien ajouter à celle du badge.
+        detail: formatLockRemaining(safety.lockSecondsRemaining),
         bgColor: Colors.buyGreen, textColor: Colors.textWhite,
       };
     }
