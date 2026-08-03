@@ -184,16 +184,22 @@ export const CATALOG: ActionDef[] = [
   {
     id: 'host.autobe', name: 'Auto BE', group: 'Position',
     description: 'Place le break-even automatiquement dès que le gain atteint un seuil. Crée le '
-               + 'stop s\'il n\'existe pas. Se réarme à chaque renfort de position.',
+               + 'stop s\'il n\'existe pas. Se réarme à chaque renfort de position. '
+               + 'Les deux réglages valent pour une position longue comme pour une position '
+               + 'courte : ils se comptent dans le sens de la position, jamais en absolu.',
     settings: [
       {
         key: 'triggerTicks', label: 'Déclenchement (ticks de gain)', type: 'number', min: 1, max: 500, step: 1,
-        help: 'Nombre de ticks de gain au-delà du prix moyen avant de poser le break-even.',
+        help: 'Ticks de GAIN au-delà du prix moyen avant de poser le break-even. Compté dans le '
+            + 'sens de la position : 60 se déclenche 60 ticks au-dessus de votre entrée en long, '
+            + '60 ticks en dessous en short.',
       },
       {
         key: 'offsetTicks', label: 'Décalage du BE (ticks)', type: 'number', min: -100, max: 100, step: 1,
-        help: 'Ajouté au prix moyen pour placer le stop. 0 = au point mort exact, positif = '
-            + 'sécurise un gain, négatif = laisse respirer.',
+        help: 'Où placer le stop par rapport au prix moyen, compté dans le sens de la position. '
+            + 'Positif = sécurise un gain, dans les deux sens : 4 place le stop 4 ticks AU-DESSUS '
+            + 'de l\'entrée en long, et 4 ticks EN DESSOUS en short. 0 = point mort exact. '
+            + 'ATTENTION, négatif place le stop EN PERTE — ce n\'est plus un break-even.',
       },
     ],
   },
