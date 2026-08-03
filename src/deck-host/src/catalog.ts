@@ -148,7 +148,18 @@ export const CATALOG: ActionDef[] = [
       },
     ],
   },
-  { id: 'com.trader.ninjatrader.cooldown', name: 'Temporisation', group: 'Affichage', description: 'Active la temporisation entre deux ordres.' },
+  {
+    id: 'com.trader.ninjatrader.cooldown', name: 'Temporisation', group: 'Affichage',
+    description: 'Bloque les entrées pendant un temps réglable après un trade perdant.',
+    settings: [
+      {
+        key: 'cooldownSeconds', label: 'Durée (secondes)', type: 'number',
+        min: 1, max: 3600, step: 1,
+        help: 'Temps pendant lequel les entrées sont refusées après une perte. Les sorties '
+            + 'restent toujours possibles. Bornes alignées sur le bridge : 1 s à 3600 s.',
+      },
+    ],
+  },
   {
     id: 'com.trader.ninjatrader.safety', name: 'Macro de sécurité', group: 'Affichage',
     description: 'Arme la macro de sécurité et affiche son état.',

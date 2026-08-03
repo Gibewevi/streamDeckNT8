@@ -298,6 +298,42 @@ requis, les champs absents sont laissés inchangés.
 | `dailyLossLimit` | 0–1 000 000 | Perte de session max (nombre positif). `0` = règle désactivée |
 | `lockDurationHours` | 0.05–24 | Durée du verrou après armement. Défaut `6` |
 
+### Temporisation
+
+#### `toggleCooldown`
+Active ou désactive la temporisation. Désactiver annule une temporisation en cours.
+```json
+{
+  "type": "command",
+  "action": "toggleCooldown",
+  "payload": {}
+}
+```
+
+#### `configureCooldown`
+Fixe la durée appliquée après un trade perdant. Le champ est **obligatoire** et doit être un
+entier ; une décimale est refusée avec `INVALID_PAYLOAD`.
+
+Une temporisation **déjà en cours conserve son échéance** : la raccourcir en séance donnerait
+un moyen de lever la pause qu'on venait de demander, en modifiant un réglage.
+
+Le bridge ne persiste pas cette valeur — l'hôte la repousse à chaque reconnexion, comme les
+limites de sécurité. Sans envoi, le bridge applique `DefaultCooldownSeconds` (60 s).
+```json
+{
+  "type": "command",
+  "action": "configureCooldown",
+  "payload": { "cooldownSeconds": 300 }
+}
+```
+
+| Champ | Plage | Description |
+|-------|-------|-------------|
+| `cooldownSeconds` | 1–3600 | Durée de blocage des entrées après une perte. Défaut `60` |
+
+L'état publié distingue les deux notions : `cooldownSeconds` est la durée **configurée**,
+`cooldownSecondsRemaining` le **décompte** de la temporisation en cours.
+
 ### État
 
 #### `getState`

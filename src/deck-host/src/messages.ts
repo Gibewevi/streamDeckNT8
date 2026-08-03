@@ -27,6 +27,8 @@ export interface TradingState {
   cooldownEnabled: boolean;
   cooldownActive: boolean;
   cooldownSecondsRemaining: number;
+  /** Durée configurée, appliquée au prochain trade perdant — à ne pas confondre avec le décompte. */
+  cooldownSeconds: number;
   safety: SafetyStatus;
 }
 

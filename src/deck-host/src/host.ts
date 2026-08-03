@@ -34,7 +34,7 @@ const DISCONNECTED_STATE: TradingState = {
   account: '', instrument: '', quantity: 1, defaultQuantity: 1,
   ntConnected: false, pluginConnected: false, position: null, instrumentInfo: null,
   availableAccounts: [], cooldownEnabled: false, cooldownActive: false,
-  cooldownSecondsRemaining: 0, safety: { ...DEFAULT_SAFETY_STATUS },
+  cooldownSecondsRemaining: 0, cooldownSeconds: 60, safety: { ...DEFAULT_SAFETY_STATUS },
 };
 
 const bridge = new BridgeClient(BRIDGE_URL);
@@ -140,9 +140,9 @@ store.onChange(() => {
   device.setBrightness(store.layout.brightness);
   void paintAll();
   server.broadcastSnapshot();
-  // Les limites de sécurité vivent dans le bridge, pas dans le layout : il faut les lui repousser
-  // à chaque édition, sinon l'interface afficherait des valeurs que le bridge ignore.
-  void syncSafetyConfig();
+  // Limites de sécurité et durée de temporisation vivent dans le bridge, pas dans le layout : il
+  // faut les lui repousser à chaque édition, sinon l'interface afficherait des valeurs qu'il ignore.
+  void syncConfig();
 });
 
 // --- Appuis ---
@@ -424,14 +424,24 @@ const autoBe = {
 const AUTOBE_MAX_ECHECS = 5;
 const AUTOBE_DELAI_RETENTE_MS = 2000;
 
-/** L'automatisme tourne quelle que soit la page affichée : on cherche la touche partout. */
-function trouverAutoBe(): SlotAssignment | null {
+/**
+ * Première touche portant cette action, quelle que soit la page.
+ *
+ * Les réglages qui appartiennent au bridge (temporisation, limites de sécurité) et les
+ * automatismes vivent indépendamment de la page affichée : les chercher partout évite qu'un
+ * réglage cesse de s'appliquer parce que sa touche est sur une autre page.
+ */
+function trouverTouche(actionId: string): SlotAssignment | null {
   for (const p of store.layout.pages) {
     for (const a of Object.values(p.slots)) {
-      if (a.actionId === 'host.autobe') return a;
+      if (a.actionId === actionId) return a;
     }
   }
   return null;
+}
+
+function trouverAutoBe(): SlotAssignment | null {
+  return trouverTouche('host.autobe');
 }
 
 /** Écrit l'armement dans le layout pour qu'il survive à un redémarrage. */
@@ -543,6 +553,35 @@ function evaluerAutoBe(state: TradingState): void {
       void paintAll();
       server.broadcastSnapshot();
     });
+}
+
+/**
+ * Pousse la durée de temporisation vers le bridge, qui la possède et l'applique.
+ *
+ * Rejouée à chaque connexion pour la même raison que les limites de sécurité : le bridge repart
+ * sur sa valeur par défaut, et une durée réglée par le trader ne doit pas redevenir 60 s au
+ * premier redémarrage.
+ */
+async function pushCooldownConfig(): Promise<void> {
+  const cfg = trouverTouche('com.trader.ninjatrader.cooldown');
+  const valeur = cfg?.settings?.cooldownSeconds;
+  if (typeof valeur !== 'number' || !Number.isFinite(valeur) || !bridge.isConnected) return;
+
+  const cooldownSeconds = Math.round(valeur);
+  const resp = await bridge.sendCommand(createCommand('configureCooldown', { cooldownSeconds }));
+  if (resp.error) {
+    log.eventWarn('Cooldown', 'configureCooldown refusé par le bridge', {
+      code: resp.error.code, reason: resp.error.message, requested: cooldownSeconds,
+    });
+  } else {
+    log.event('Cooldown', 'Durée de temporisation poussée vers le bridge', { cooldownSeconds });
+  }
+}
+
+/** Rejoue vers le bridge tous les réglages qu'il possède mais que le layout décrit. */
+async function syncConfig(): Promise<void> {
+  await syncSafetyConfig();
+  await pushCooldownConfig();
 }
 
 /** Rejoue la configuration de sécurité présente dans le layout — à la connexion et après édition. */
@@ -696,8 +735,8 @@ bridge.onStateUpdate((state) => {
 bridge.onConnectionChange((connected) => {
   log.event('Connection', connected ? 'Bridge connecté' : 'Bridge déconnecté', { url: BRIDGE_URL });
   if (!connected) lastState = null;
-  // Le bridge redémarre sans mémoire de nos limites : les repousser à chaque reconnexion.
-  if (connected) void syncSafetyConfig();
+  // Le bridge redémarre sans mémoire de nos réglages : les repousser à chaque reconnexion.
+  if (connected) void syncConfig();
   void paintAll();
   server.broadcastSnapshot();
 });

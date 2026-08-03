@@ -19,8 +19,14 @@ public sealed class StateManager
     private DateTime _instrumentSetAt = DateTime.MinValue;
     private static readonly TimeSpan OverrideGuard = TimeSpan.FromSeconds(5);
 
+    /// <summary>Bounds for the configurable cooldown. Below a second it is not a pause; above an
+    /// hour the trader would be better served by disarming the deck than by waiting.</summary>
+    public const int MinCooldownSeconds = 1;
+    public const int MaxCooldownSeconds = 3600;
+
     private bool _cooldownEnabled;
     private DateTime? _cooldownUntil;
+    private int _cooldownSeconds;
     private bool _previousPositionExists;
     private double _previousUnrealizedPnl;
     private string _previousPositionInstrument = string.Empty;
@@ -45,6 +51,7 @@ public sealed class StateManager
             DefaultQuantity = config.DefaultQuantity
         };
 
+        _cooldownSeconds = Math.Clamp(config.DefaultCooldownSeconds, MinCooldownSeconds, MaxCooldownSeconds);
         _sessionPath = ResolveSessionPath(config);
 
         var savedInstrument = LoadSavedInstrument();
@@ -126,6 +133,7 @@ public sealed class StateManager
                 CooldownEnabled = _cooldownEnabled,
                 CooldownActive = cooldownActive,
                 CooldownSecondsRemaining = cooldownRemaining,
+                CooldownSeconds = _cooldownSeconds,
                 Safety = _safety.GetStatus()
             };
         }
@@ -258,8 +266,9 @@ public sealed class StateManager
                     // Detect position closed with a loss → trigger cooldown
                     if (_cooldownEnabled && _previousPositionExists && !currentExists && _previousUnrealizedPnl < 0)
                     {
-                        _cooldownUntil = DateTime.UtcNow.AddSeconds(60);
-                        _logger.LogWarning("Cooldown activated for 60s after losing trade (PnL: {Pnl})", _previousUnrealizedPnl);
+                        _cooldownUntil = DateTime.UtcNow.AddSeconds(_cooldownSeconds);
+                        _logger.LogWarning("Cooldown activated for {Secs}s after losing trade (PnL: {Pnl})",
+                            _cooldownSeconds, _previousUnrealizedPnl);
                     }
 
                     // Flat → open on the same instrument counts as one trade for the safety macro.
@@ -357,6 +366,21 @@ public sealed class StateManager
             }
             _logger.LogInformation("Cooldown {State}", _cooldownEnabled ? "ENABLED" : "DISABLED");
             return _cooldownEnabled;
+        }
+    }
+
+    /// <summary>
+    /// Sets the cooldown duration applied after the NEXT losing trade. A cooldown already running
+    /// keeps its original deadline: shortening it mid-run would hand the trader a way to lift the
+    /// pause he had just asked for, by editing a setting.
+    /// </summary>
+    public int SetCooldownSeconds(int seconds)
+    {
+        lock (_lock)
+        {
+            _cooldownSeconds = Math.Clamp(seconds, MinCooldownSeconds, MaxCooldownSeconds);
+            _logger.LogInformation("Cooldown duration set to {Secs}s", _cooldownSeconds);
+            return _cooldownSeconds;
         }
     }
 

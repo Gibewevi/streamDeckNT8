@@ -18,6 +18,12 @@ public sealed class BridgeConfig
     public int StateUpdateIntervalMs { get; set; } = 200;
     public int DuplicateRequestWindowSeconds { get; set; } = 60;
 
+    /// <summary>
+    /// Cooldown duration applied after a losing trade, in seconds. Starting value only: the host
+    /// pushes the trader's setting with configureCooldown on every reconnection.
+    /// </summary>
+    public int DefaultCooldownSeconds { get; set; } = 60;
+
     // --- Safety macro (first-run defaults only; afterwards the persisted file wins) ---
     public int DefaultMaxTradesWhenLosing { get; set; } = 15;
     public double DefaultDailyLossLimit { get; set; } = 300;

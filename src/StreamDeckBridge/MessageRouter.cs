@@ -19,7 +19,8 @@ public sealed class MessageRouter
 
     private static readonly HashSet<string> LocalActions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState", "toggleCooldown",
+        "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState",
+        "toggleCooldown", "configureCooldown",
         "armSafety", "disarmSafety", "toggleSafety", "configureSafety"
     };
 
@@ -273,6 +274,21 @@ public sealed class MessageRouter
                         Action = message.Action,
                         Timestamp = DateTimeOffset.UtcNow.ToString("o"),
                         Result = JsonSerializer.SerializeToElement(new { success = true, cooldownEnabled = enabled })
+                    };
+                }
+            case "configureCooldown":
+                {
+                    // La validation a déjà borné la valeur ; le `?? 0` n'est qu'un garde-fou de
+                    // compilation, StateManager reborne de toute façon.
+                    var secs = _stateManager.SetCooldownSeconds(GetPayloadInt(message, "cooldownSeconds") ?? 0);
+                    return new BridgeMessage
+                    {
+                        Type = "response",
+                        RequestId = message.RequestId,
+                        Source = "bridge",
+                        Action = message.Action,
+                        Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                        Result = JsonSerializer.SerializeToElement(new { success = true, cooldownSeconds = secs })
                     };
                 }
             case "armSafety":

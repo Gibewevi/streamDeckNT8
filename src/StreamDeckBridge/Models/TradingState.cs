@@ -17,6 +17,9 @@ public sealed class TradingState
     public bool CooldownEnabled { get; set; }
     public bool CooldownActive { get; set; }
     public int CooldownSecondsRemaining { get; set; }
+
+    /// <summary>Configured duration applied on the next losing trade — not the countdown.</summary>
+    public int CooldownSeconds { get; set; }
     public SafetyStatus Safety { get; set; } = new();
 }
 

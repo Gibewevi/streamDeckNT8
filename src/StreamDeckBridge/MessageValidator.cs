@@ -18,7 +18,7 @@ public sealed class MessageValidator
         "flatten", "cancelOrders", "cancelWorkingOrders", "reverse",
         "breakeven", "moveStop", "moveTarget",
         "qtySet", "qtyAdjust", "qtyReset",
-        "setInstrument", "setAccount", "getState", "toggleCooldown",
+        "setInstrument", "setAccount", "getState", "toggleCooldown", "configureCooldown",
         "armSafety", "disarmSafety", "toggleSafety", "configureSafety"
     };
 
@@ -73,6 +73,9 @@ public sealed class MessageValidator
 
         if (message.Action == "configureSafety")
             return ValidateSafetyConfig(message);
+
+        if (message.Action == "configureCooldown")
+            return ValidateCooldownConfig(message);
 
         // All trading actions need instrument context at minimum
         return ValidateTradingAction(message);
@@ -162,6 +165,30 @@ public sealed class MessageValidator
         {
             return (false, "INVALID_PAYLOAD",
                 $"lockDurationHours must be between {SafetyMacro.MinLockHours} and {SafetyMacro.MaxLockHours}.");
+        }
+
+        return (true, null, null);
+    }
+
+    private static (bool, string?, string?) ValidateCooldownConfig(BridgeMessage message)
+    {
+        var seconds = GetPayloadInt(message, "cooldownSeconds");
+
+        // Same distinction as configureSafety: a decimal reads as null after the TryGetInt32
+        // guard, and reporting it as missing would send the trader looking for the wrong problem.
+        if (seconds == null && HasNumericProperty(message, "cooldownSeconds"))
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"cooldownSeconds must be a whole number between {StateManager.MinCooldownSeconds} and {StateManager.MaxCooldownSeconds}.");
+        }
+
+        if (seconds == null)
+            return (false, "INVALID_PAYLOAD", "cooldownSeconds is required for configureCooldown.");
+
+        if (seconds < StateManager.MinCooldownSeconds || seconds > StateManager.MaxCooldownSeconds)
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"cooldownSeconds must be between {StateManager.MinCooldownSeconds} and {StateManager.MaxCooldownSeconds}.");
         }
 
         return (true, null, null);

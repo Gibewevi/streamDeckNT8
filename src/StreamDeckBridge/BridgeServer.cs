@@ -223,7 +223,8 @@ public sealed class BridgeServer : BackgroundService
 
                         // For qty/instrument changes, also broadcast updated state
                         if (msg.Action is "qtySet" or "qtyAdjust" or "qtyReset" or "setInstrument" or "setAccount"
-                            or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety" or "configureSafety")
+                            or "toggleCooldown" or "configureCooldown"
+                            or "armSafety" or "disarmSafety" or "toggleSafety" or "configureSafety")
                         {
                             await BroadcastState(ct);
                         }

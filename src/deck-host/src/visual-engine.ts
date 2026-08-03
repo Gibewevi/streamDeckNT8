@@ -61,6 +61,19 @@ function formatLockRemaining(seconds: number): string {
   return `${seconds}s`;
 }
 
+/** Durée courte et lisible sur une touche : `45s`, `2m`, `1m30`, `1h`. */
+function formatDuree(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds >= 3600) {
+    const h = Math.floor(seconds / 3600);
+    const reste = Math.floor((seconds % 3600) / 60);
+    return reste === 0 ? `${h}h` : `${h}h${String(reste).padStart(2, '0')}`;
+  }
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s === 0 ? `${m}m` : `${m}m${String(s).padStart(2, '0')}`;
+}
+
 /**
  * Bas de la touche Sécurité quand la macro est armée et que rien n'est encore atteint :
  * ce qu'il RESTE, sous la forme `trades-montant`, décomptant vers `0-0`.
@@ -300,8 +313,12 @@ export function computeVisual(
       if (active) {
         return { title: 'COUNTDOWN', subtitle: `${secs}`, bgColor: Colors.sellRed, textColor: '#FFFFFF' };
       }
+      // Active, la touche affiche la durée réglée plutôt qu'un « ON » que le fond vert dit déjà.
+      // C'est la seule façon de vérifier d'un coup d'œil, avant la séance, combien de temps la
+      // temporisation bloquera réellement — la valeur vient du bridge, qui l'applique, et non du
+      // réglage local, qui pourrait ne pas lui avoir été transmis.
       return {
-        title: 'SEC', subtitle: enabled ? 'ON' : 'OFF',
+        title: 'SEC', subtitle: enabled ? formatDuree(state.cooldownSeconds ?? 60) : 'OFF',
         bgColor: enabled ? Colors.buyGreen : Colors.disabled,
         textColor: enabled ? '#FFFFFF' : Colors.textDim,
       };
