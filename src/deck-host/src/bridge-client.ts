@@ -44,6 +44,9 @@ export class BridgeClient {
 
   private _lastState: TradingState | null = null;
 
+  /** Horodatage d'ouverture, pour distinguer une coupure immédiate d'une déconnexion normale. */
+  private openedAt: number | null = null;
+
   get isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
   }
@@ -153,6 +156,7 @@ export class BridgeClient {
       this.ws = new WebSocket(this.url);
 
       this.ws.on('open', () => {
+        this.openedAt = Date.now();
         log.event('Connection', 'WebSocket open to bridge', { url: this.url });
         this.notifyConnection(true);
       });
@@ -168,10 +172,26 @@ export class BridgeClient {
       });
 
       this.ws.on('close', (code: number, reason: Buffer) => {
-        log.eventWarn('Connection', 'WebSocket closed by the bridge', {
-          code,
-          reason: reason?.toString() || '(none)',
-        });
+        const tenueMs = this.openedAt ? Date.now() - this.openedAt : -1;
+        this.openedAt = null;
+
+        // Le bridge n'accepte QU'UN client plugin. Quand un autre l'occupe — typiquement
+        // l'ancien plugin Elgato relancé par Windows — la connexion est acceptée puis coupée
+        // aussitôt. Sans ce diagnostic on ne lit qu'un ECONNRESET, et l'interface affiche
+        // « hors ligne » sans jamais dire pourquoi.
+        if (tenueMs >= 0 && tenueMs < 3000) {
+          log.eventWarn('Connection', 'Connexion coupée aussitôt ouverte — un AUTRE client occupe le bridge', {
+            tenueMs,
+            cause: "l'application Stream Deck d'Elgato est-elle relancée ?",
+            remede: 'la fermer : le bridge ne réserve sa place plugin qu\'à un seul client',
+          });
+        } else {
+          log.eventWarn('Connection', 'WebSocket closed by the bridge', {
+            code,
+            reason: reason?.toString() || '(none)',
+            tenueMs: tenueMs >= 0 ? tenueMs : undefined,
+          });
+        }
         this.notifyConnection(false);
         this.scheduleReconnect();
       });

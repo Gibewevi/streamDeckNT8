@@ -11,12 +11,48 @@
  *  - on surveille : si la connexion ne revient pas, on retente un lancement. Sans cela, un
  *    bridge mort laisserait le deck inerte sans que rien ne le signale.
  */
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import { existsSync } from 'fs';
 import { createConnection } from 'net';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import * as log from './logger.js';
+
+/**
+ * Ferme l'application Stream Deck d'Elgato si elle tourne.
+ *
+ * Elle et TradeDeck ne peuvent pas coexister : elles se disputent le boîtier USB, et surtout
+ * son plugin occupe l'UNIQUE place plugin du bridge, ce qui laisse TradeDeck « hors ligne »
+ * sans explication.
+ *
+ * Désactiver son démarrage automatique ne suffit pas : Windows 11 relance à l'ouverture de
+ * session les applications qui tournaient à l'extinction (« Redémarrer automatiquement les
+ * applications »), ce qui la ramenait à chaque redémarrage. On la ferme donc à chaque démarrage
+ * de l'hôte, avant de connecter le bridge.
+ *
+ * `DECKHOST_KeepElgato=1` désactive ce comportement — utile pour une mise à jour de firmware,
+ * que seule l'application Elgato sait faire.
+ */
+export function neutraliserElgato(): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.env.DECKHOST_KeepElgato === '1') {
+      log.event('Supervisor', 'Application Elgato laissée en place (DECKHOST_KeepElgato=1)');
+      resolve();
+      return;
+    }
+
+    // /T ferme aussi les processus enfants : plugins node, QtWebEngine, crashpad.
+    execFile('taskkill', ['/IM', 'StreamDeck.exe', '/F', '/T'], (err) => {
+      // taskkill sort en erreur quand le processus n'existe pas : c'est le cas normal.
+      // Sa sortie n'est pas reprise ici : elle est écrite dans la page de codes OEM et
+      // arriverait illisible dans le fichier, qui est en UTF-8.
+      if (err) log.debugEvent('Supervisor', 'Application Elgato absente — rien à fermer');
+      else log.eventWarn('Supervisor', 'Application Elgato fermée : elle occupait la place plugin du bridge');
+      // Laisse le temps au bridge de constater la déconnexion et de libérer la place.
+      setTimeout(resolve, 1200);
+    });
+  });
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 

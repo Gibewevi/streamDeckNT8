@@ -10,6 +10,11 @@ Const URL = "http://127.0.0.1:8220"
 
 Set sh = CreateObject("WScript.Shell")
 
+' L'application Elgato et TradeDeck ne peuvent pas coexister : son plugin occupe l'unique place
+' plugin du bridge. L'hôte la ferme aussi à son démarrage, mais le lanceur sert justement quand
+' l'hôte tourne déjà — il faut donc la fermer ici également.
+sh.Run "taskkill /IM StreamDeck.exe /F /T", 0, True
+
 ' Démarre la tâche si l'hôte ne répond pas. Une tâche déjà en cours ignore la demande,
 ' et l'hôte refuse de son côté une seconde instance : rien ne peut être lancé en double.
 If Not HoteRepond() Then
