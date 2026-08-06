@@ -25,6 +25,21 @@ export interface SettingField {
   step?: number;
   options?: { value: string; label: string }[];
   help?: string;
+  /**
+   * Valeur posée à la création de la touche, et affichée tant que le champ n'a pas été touché.
+   * Sans elle, un champ numérique naît à `min`, ce qui vaut souvent « règle désactivée » — un
+   * défaut muet que personne ne remarque.
+   */
+  default?: number | string | boolean;
+  /**
+   * N'affiche ce champ que si un autre réglage vaut la valeur indiquée.
+   *
+   * Sert à ne pas montrer un réglage qui ne s'applique pas dans le contexte courant : un champ
+   * visible mais sans effet est plus trompeur qu'un champ absent. L'hôte doit neutraliser en
+   * conséquence le réglage masqué — masquer sans neutraliser laisserait une règle active et
+   * invisible, ce qui est le pire des deux mondes.
+   */
+  showIf?: { key: string; equals: boolean | string | number };
 }
 
 export interface ActionDef {
@@ -34,7 +49,10 @@ export interface ActionDef {
   name: string;
   /** Regroupement dans la palette. */
   group: 'Ordres' | 'Position' | 'Quantité' | 'Stop / Target' | 'Sélection' | 'Affichage' | 'Navigation';
-  /** Une ligne d'explication, affichée sous le libellé. */
+  /**
+   * Explication courte : infobulle dans la palette, et rappel en tête du tiroir de réglages.
+   * Trois lignes au maximum à la largeur du tiroir — le détail va dans le `help` des champs.
+   */
   description: string;
   /** Réglages proposés quand la touche est sélectionnée. */
   settings?: SettingField[];
@@ -165,17 +183,58 @@ export const CATALOG: ActionDef[] = [
     description: 'Arme la macro de sécurité et affiche son état.',
     settings: [
       { key: 'maxTradesWhenLosing', label: 'Trades max en perte', type: 'number', min: 0, max: 100, step: 1, help: '0 = pas de limite sur le nombre de trades.' },
+      // Règle Guard et non Anti-Tilt : c'est une limite de risque objective, donc elle REFUSE
+      // l'ordre au lieu de le ralentir. Seuls les ordres qui augmentent la position sont refusés —
+      // ne jamais enfermer le trader dans une position trop grosse.
+      {
+        key: 'maxContracts', label: 'Contrats maximum', type: 'number', min: 0, max: 1000, step: 1,
+        help: 'Refuse les entrées qui porteraient la position au-delà. Réduire reste toujours possible. 0 = pas de limite.',
+      },
       { key: 'dailyLossLimit', label: 'Perte journalière max', type: 'number', min: 0, help: 'En devise du compte. 0 = pas de limite.' },
       // min aligné sur SafetyMacro.MinLockHours : en dessous, le bridge refuse avec un
       // INVALID_PAYLOAD que rien n'expliquait à l'écran.
       { key: 'lockDurationHours', label: 'Durée du verrou (heures)', type: 'number', min: 0.05, max: 24, help: 'Le verrou ne peut pas être levé avant son expiration.' },
+      // --- Anti-Tilt ---
+      // Trois réglages, pas onze. Les seuils (escalade de taille, restitution de gain, série de
+      // pertes, durée d'épisode, durée de maintien) sont dérivés par le bridge des deux limites
+      // ci-dessus et des règles usuelles de gestion du risque. Demander à quelqu'un de calibrer
+      // lui-même la protection contre ses propres impulsions revient à la lui faire desserrer au
+      // moment où il en a le plus besoin — et un formulaire trop long finit simplement ignoré.
+      {
+        key: 'antiTiltEnabled', label: 'Anti-Tilt', type: 'toggle',
+        help: 'Exige un appui long de 20 s sur les entrées après une escalade de taille, une '
+            + 'restitution de gain ou une série de pertes. Désactivé, les déclenchements sont journalisés.',
+      },
+      {
+        key: 'tiltAveragingAllowed', label: 'Moyennage autorisé', type: 'toggle', default: true,
+        help: 'Désactivé, renforcer une position perdante met les entrées sous appui long jusqu\'à sa clôture.',
+      },
+      // --- Réglages avancés ---
+      // En dernier et repliés : ce sont deux durées de confort, pas des règles. Les seuils qui
+      // décident vraiment (escalade de taille, restitution de gain, série de pertes) restent hors
+      // de portée même ici — les rendre modifiables reviendrait à laisser desserrer la protection
+      // au moment précis où elle sert.
+      {
+        key: 'tiltAdvanced', label: 'Réglages avancés', type: 'toggle',
+        help: 'Ajuster les durées de l\'Anti-Tilt. Désactivé, elles reviennent à 20 s et 15 min.',
+      },
+      {
+        key: 'tiltHoldSeconds', label: 'Durée de l\'appui long (s)', type: 'number', min: 15, max: 30, step: 1,
+        default: 20, showIf: { key: 'tiltAdvanced', equals: true },
+        help: 'Maintien exigé sur une entrée ralentie. Relâcher avant la fin annule.',
+      },
+      {
+        key: 'tiltEpisodeMinutes', label: 'Durée de l\'épisode (min)', type: 'number', min: 1, max: 60, step: 1,
+        default: 15, showIf: { key: 'tiltAdvanced', equals: true },
+        help: 'Temps pendant lequel les entrées restent ralenties après un déclenchement.',
+      },
       {
         key: 'devMode',
         label: 'Mode développement',
         type: 'toggle',
-        help: 'Permet de désarmer la macro en appuyant dessus, sans attendre la fin du verrou. '
-            + 'Existe pour pouvoir la mettre au point — sinon chaque essai verrouille pour la durée '
-            + 'complète. La touche affiche DEV tant que ce mode est actif. À laisser désactivé en séance.',
+        showIf: { key: 'tiltAdvanced', equals: true },
+        help: 'Désarme la macro sans attendre la fin du verrou, pour la mettre au point. '
+            + 'La touche affiche DEV. À laisser désactivé en séance.',
       },
     ],
   },
@@ -183,10 +242,10 @@ export const CATALOG: ActionDef[] = [
   // --- Automatisme ---
   {
     id: 'host.autobe', name: 'Auto BE', group: 'Position',
+    // Tenue courte : elle sert de rappel en tête du tiroir de réglages, où trois lignes sont un
+    // maximum. Le sens de comptage vaut pour les deux champs et est redit dans chaque `help`.
     description: 'Place le break-even automatiquement dès que le gain atteint un seuil. Crée le '
-               + 'stop s\'il n\'existe pas. Se réarme à chaque renfort de position. '
-               + 'Les deux réglages valent pour une position longue comme pour une position '
-               + 'courte : ils se comptent dans le sens de la position, jamais en absolu.',
+               + 'stop s\'il n\'existe pas, et se réarme à chaque renfort de position.',
     settings: [
       {
         key: 'triggerTicks', label: 'Déclenchement (ticks de gain)', type: 'number', min: 1, max: 500, step: 1,

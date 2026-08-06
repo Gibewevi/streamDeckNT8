@@ -46,6 +46,11 @@ export interface SafetyStatus {
   maxTradesWhenLosing: number;
   /** Max session loss, positive number. 0 = rule off. */
   dailyLossLimit: number;
+  /** Contracts the account may hold. 0 = rule off. */
+  maxContracts: number;
+  /** Position already at the cap: anything that grows it is refused. Not an incident — only the
+   *  keys that would add to the position react to it, the Safety key stays as it was. */
+  atContractCap: boolean;
   tradeCount: number;
   sessionPnl: number;
   /** False when NinjaTrader does not expose account P&L — the loss rules are then inert. */
@@ -54,6 +59,29 @@ export interface SafetyStatus {
   entriesBlocked: boolean;
   blockReason: '' | 'dailyLoss' | 'tradeLimit';
   tradingDay: string;
+
+  // --- Anti-tilt ---
+  //
+  // Never blocks anything. The bridge detects, the host adds friction — a long deliberate press on
+  // entry keys. Nothing here can lock the deck: `lockSecondsRemaining` above is Guard's business
+  // and an anti-tilt episode never touches it.
+
+  /** Whether the anti-tilt rules are allowed to add friction at all. */
+  tiltEnabled: boolean;
+  /** True when entry keys must be held before they fire. */
+  tiltActive: boolean;
+  /** Seconds left on the episode. 0 for the contextual conditions, which end with the situation. */
+  tiltSecondsRemaining: number;
+  tiltReason: '' | 'sizeEscalation' | 'giveBack' | 'consecutiveLosses' | 'averaging';
+  /**
+   * 'all' — an episode: it describes the trader, so every entry is slowed down.
+   * 'increaseOnly' — a contextual condition: it describes the position, so only orders that would
+   * make it BIGGER are slowed. Slowing down an order that reduces an oversized position would be
+   * exactly backwards.
+   */
+  tiltScope: '' | 'all' | 'increaseOnly';
+  /** How long an entry key must be held while the friction applies. */
+  tiltHoldSeconds: number;
 }
 
 export const DEFAULT_SAFETY_STATUS: SafetyStatus = {
@@ -63,12 +91,20 @@ export const DEFAULT_SAFETY_STATUS: SafetyStatus = {
   lockDurationHours: 6,
   maxTradesWhenLosing: 15,
   dailyLossLimit: 300,
+  maxContracts: 0,
+  atContractCap: false,
   tradeCount: 0,
   sessionPnl: 0,
   pnlAvailable: false,
   entriesBlocked: false,
   blockReason: '',
   tradingDay: '',
+  tiltEnabled: false,
+  tiltActive: false,
+  tiltSecondsRemaining: 0,
+  tiltReason: '',
+  tiltScope: '',
+  tiltHoldSeconds: 20,
 };
 
 export interface PositionState {
@@ -87,6 +123,26 @@ export interface PositionState {
   targetPrice: number;
   targetOrderCount: number;
   activeOrderCount: number;
+}
+
+/**
+ * Payload of the `guardViolation` event: an order placed straight into NinjaTrader — SuperDOM,
+ * Chart Trader, DOM — while the safety macro was refusing entries. The add-on saw it because it
+ * runs inside the platform, and cancelled it before it could work.
+ *
+ * `cancelled: false` is the case worth reading: the order was seen but survived, almost always a
+ * market order that filled before the platform reported it.
+ */
+export interface GuardViolation {
+  violation: string;
+  cancelled: boolean;
+  orderId: string;
+  orderAction: string;
+  orderType: string;
+  quantity: number;
+  name: string;
+  instrument: string;
+  error?: string;
 }
 
 /** Payload of the `orderUpdate` event the add-on emits when NinjaTrader refuses an order. */

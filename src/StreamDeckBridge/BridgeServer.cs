@@ -25,6 +25,9 @@ public sealed class BridgeServer : BackgroundService
     private readonly SemaphoreSlim _pluginSendLock = new(1, 1);
     private readonly SemaphoreSlim _addonSendLock = new(1, 1);
 
+    /// <summary>Last guard policy sent to the add-on, so the 5 Hz loop only speaks on a change.</summary>
+    private string _lastGuardPolicy = string.Empty;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -161,6 +164,9 @@ public sealed class BridgeServer : BackgroundService
                 _logger.LogInformation("NinjaTrader Add-On connected");
 
                 await PushSelectedInstrument(ct);
+                // Forced: a reconnecting add-on knows nothing, and until it is told it would let
+                // through exactly the orders the macro is refusing on the deck.
+                await PushGuardPolicy(ct, force: true);
                 await HandleAddonSession(_addonSocket, ct);
             }
             catch (OperationCanceledException) { break; }
@@ -374,12 +380,56 @@ public sealed class BridgeServer : BackgroundService
 
     private async Task BroadcastState(CancellationToken ct)
     {
+        // Kept ahead of the plugin check: the add-on must learn about a new refusal even when no
+        // deck is connected, or closing the deck would be a way to switch enforcement off.
+        await PushGuardPolicy(ct);
+
         var socket = _pluginSocket;
         if (socket?.State != WebSocketState.Open) return;
 
         var state = _stateManager.GetSnapshot();
         var evt = BridgeMessage.CreateEvent("stateUpdate", state);
         await SendToPlugin(evt, ct);
+    }
+
+    /// <summary>
+    /// Tells the add-on what the safety macro is currently refusing, so it can apply the same rules
+    /// to orders typed straight into NinjaTrader — which never cross this bridge.
+    ///
+    /// Called from the broadcast loop but only ever sends on a real change: at five times a second
+    /// an unconditional push would drown the add-on and its log alike.
+    /// </summary>
+    private async Task PushGuardPolicy(CancellationToken ct, bool force = false)
+    {
+        var safety = _stateManager.GetSnapshot().Safety;
+        var blocked = safety.EntriesBlocked;
+        var reason = safety.BlockReason ?? string.Empty;
+        var maxContracts = safety.MaxContracts;
+
+        var signature = $"{blocked}|{reason}|{maxContracts}";
+        if (!force && signature == _lastGuardPolicy) return;
+        _lastGuardPolicy = signature;
+
+        var msg = new BridgeMessage
+        {
+            Type = "command",
+            Version = "1.0",
+            RequestId = Guid.NewGuid().ToString(),
+            Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+            Source = "bridge",
+            Action = "setGuardPolicy",
+            Payload = JsonSerializer.SerializeToElement(new
+            {
+                blocked,
+                reason,
+                maxContracts
+            })
+        };
+
+        _logger.LogWarning("Guard policy → NT8: blocked={Blocked} reason={Reason} maxContracts={Max}",
+            blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts);
+
+        await SendToAddon(msg, ct);
     }
 
     private async Task SendToPlugin(BridgeMessage msg, CancellationToken ct)

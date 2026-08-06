@@ -35,6 +35,8 @@ export interface Empreinte {
   blockReason: string;
   cooldownEnabled: boolean;
   cooldownActive: boolean;
+  tiltActive: boolean;
+  tiltReason: string;
 }
 
 export function empreinteDe(s: TradingState): Empreinte {
@@ -59,6 +61,8 @@ export function empreinteDe(s: TradingState): Empreinte {
     blockReason: s.safety?.blockReason ?? '',
     cooldownEnabled: s.cooldownEnabled === true,
     cooldownActive: s.cooldownActive === true,
+    tiltActive: s.safety?.tiltActive === true,
+    tiltReason: s.safety?.tiltReason ?? '',
   };
 }
 
@@ -162,6 +166,17 @@ export function journaliserTransitions(avant: Empreinte | null, apres: Empreinte
     apres.entriesBlocked
       ? log.eventWarn('Safety', 'ENTRÉES BLOQUÉES par la macro de sécurité', { motif: apres.blockReason })
       : log.event('Safety', 'Entrées de nouveau autorisées', { motifPrecedent: avant.blockReason });
+  }
+
+  // --- Anti-Tilt ---
+  // Une entrée sous friction reste possible : le message dit « ralenties » et non « bloquées »,
+  // parce que confondre les deux dans le journal rendrait un incident illisible après coup.
+  if (avant.tiltActive !== apres.tiltActive) {
+    apres.tiltActive
+      ? log.eventWarn('Safety', 'ANTI-TILT déclenché — entrées sous appui long', { motif: apres.tiltReason })
+      : log.event('Safety', 'Anti-Tilt terminé — entrées instantanées à nouveau', { motifPrecedent: avant.tiltReason });
+  } else if (apres.tiltActive && avant.tiltReason !== apres.tiltReason) {
+    log.eventWarn('Safety', 'Anti-Tilt : motif changé', { de: avant.tiltReason, vers: apres.tiltReason });
   }
 
   // --- Temporisation ---

@@ -164,6 +164,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Models
         {
             return SimpleJson.GetDouble(Payload, key);
         }
+
+        public bool GetPayloadBool(string key)
+        {
+            return SimpleJson.GetBool(Payload, key);
+        }
     }
 
     public class MessageError

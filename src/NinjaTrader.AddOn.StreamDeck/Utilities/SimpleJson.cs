@@ -432,6 +432,23 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
             return null;
         }
 
+        /// <summary>
+        /// Absent, null or malformed reads as false. Deliberate: this backs the guard policy, and
+        /// a payload that could not be understood must never be taken for permission to trade.
+        /// </summary>
+        public static bool GetBool(Dictionary<string, object> dict, string key)
+        {
+            if (dict == null) return false;
+            object val;
+            if (!dict.TryGetValue(key, out val) || val == null) return false;
+            if (val is bool) return (bool)val;
+
+            var text = val as string;
+            if (text != null) return string.Equals(text, "true", StringComparison.OrdinalIgnoreCase);
+
+            return false;
+        }
+
         #endregion
     }
 }

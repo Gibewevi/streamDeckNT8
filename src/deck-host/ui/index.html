@@ -234,6 +234,9 @@
   .insp-title .ico { width:30px; height:30px; border-radius:8px; flex:none; display:flex; align-items:center; justify-content:center; background:var(--accent-soft); color:var(--accent); }
   .insp-title .ico svg { width:16px; height:16px; }
   .insp-title .sub { font-size:11px; color:var(--faint); font-weight:500; margin-top:1px; }
+  /* Rappel de ce que fait l'action, en retrait : c'est une note de contexte, pas un titre.
+     Elle doit se lire d'un coup d'œil sans concurrencer les réglages qui la suivent. */
+  .insp-desc { margin-top:10px; font-size:11.5px; line-height:1.5; color:var(--faint); }
 
   /* Sépare les réglages propres à l'action de ceux communs à toutes les touches. */
   .sect { margin:24px 0 -4px; padding-top:16px; border-top:1px solid var(--edge); }
@@ -635,11 +638,19 @@ function defaults(id) {
   // Seuls les réglages propres à l'action sont initialisés : les réglages universels restent
   // absents, ce qui vaut « désactivé » — aucune touche ne naît avec une confirmation.
   for (const f of (byId.get(id)?.settings ?? []))
-    d[f.key] = f.type === 'toggle' ? false
+    d[f.key] = f.default !== undefined ? f.default
+      : f.type === 'toggle' ? false
       : f.type === 'number' ? (f.min ?? 0)
       : f.type === 'select' ? (f.options?.[0]?.value ?? '') : '';
   return d;
 }
+
+/**
+ * Un champ masqué par `showIf` ne doit pas être rendu. Le réglage n'est pas effacé pour autant :
+ * réafficher la section doit retrouver ce qui y avait été saisi, et c'est l'hôte qui neutralise
+ * ce qui est masqué au moment de pousser la configuration.
+ */
+const visible = (f, settings) => !f.showIf || settings[f.showIf.key] === f.showIf.equals;
 
 /* ---------------- Réglages ---------------- */
 function renderInsp() {
@@ -647,18 +658,22 @@ function renderInsp() {
   const a = sel === null ? null : page().slots[String(sel)];
   if (!a) { box.innerHTML = `<div class="empty">Sélectionnez une touche réglable.</div>`; return; }
 
-  const def = byId.get(a.actionId), propres = def?.settings ?? [];
+  const def = byId.get(a.actionId), tous = def?.settings ?? [];
+  a.settings ||= {};
+  const propres = tous.filter(f => visible(f, a.settings));
   // Les réglages universels s'ajoutent à ceux de l'action, dans une section à part.
   const fields = [...propres, ...universal];
-  a.settings ||= {};
 
-  // En-tête minimal : de quelle touche il s'agit, rien de plus. La description est déjà
-  // dans l'infobulle de la palette et n'apporte rien une fois la touche posée.
+  // En-tête : de quelle touche il s'agit, suivi de la description du catalogue. L'infobulle de
+  // la palette disparaît dès que la touche est posée — sans ce rappel, on règle des champs sans
+  // avoir sous les yeux ce que l'action déclenche réellement. Volontairement bref : le détail
+  // appartient aux `help` de chaque champ.
   box.innerHTML = `
     <div class="insp-title">
       <span class="ico">${iconOf(a.actionId)}</span>
       <span>${esc(def?.name ?? a.actionId)}<div class="sub">Touche ${sel + 1}</div></span>
     </div>
+    ${def?.description ? `<div class="insp-desc">${esc(def.description)}</div>` : ''}
     ${propres.map(f => field(f, a.settings[f.key])).join('')}
     ${universal.length ? `<div class="sect lbl">Sécurité</div>${def?.instant
       // Proposer un champ que l'hôte ignore serait pire que de ne rien proposer.
@@ -680,6 +695,10 @@ function renderInsp() {
       (cur.settings ||= {})[f.key] = f.type === 'toggle' ? el.checked
         : f.type === 'number' ? clamp(Number(el.value), f) : el.value;
       save();
+      // Un champ dont d'autres dépendent fait réapparaître ou disparaître une partie du tiroir.
+      // Limité aux seules dépendances : redessiner à chaque frappe ferait perdre le focus d'un
+      // champ texte au premier caractère.
+      if (tous.some(x => x.showIf?.key === f.key)) renderInsp();
     });
   }
 }
@@ -702,12 +721,15 @@ function optionsFor(f) {
 
 function field(f, v) {
   if (f.type === 'toggle') {
+    // Une bascule jamais touchée suit son défaut de catalogue : sans cela « Moyennage autorisé »
+    // naîtrait décoché alors que le bridge part, lui, sur permissif — deux vérités contradictoires.
+    const on = v === undefined ? f.default === true : v === true;
     return `<div class="field"><label class="sw">
-      <input type="checkbox" data-f="${esc(f.key)}"${v === true ? ' checked' : ''}>
+      <input type="checkbox" data-f="${esc(f.key)}"${on ? ' checked' : ''}>
       <span class="track"></span><span class="txt">${esc(f.label)}</span>
     </label>${f.help ? `<div class="help">${esc(f.help)}</div>` : ''}</div>`;
   }
-  const val = v ?? '';
+  const val = v ?? f.default ?? '';
   let ctl;
   if (f.type === 'select') {
     ctl = `<select data-f="${esc(f.key)}">${optionsFor(f).map(o =>

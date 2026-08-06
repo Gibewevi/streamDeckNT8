@@ -287,7 +287,10 @@ requis, les champs absents sont laissés inchangés.
   "payload": {
     "maxTradesWhenLosing": 15,
     "dailyLossLimit": 300,
-    "lockDurationHours": 6
+    "lockDurationHours": 6,
+    "antiTiltEnabled": false,
+    "tiltAveragingAllowed": true,
+    "tiltMaxContracts": 0
   }
 }
 ```
@@ -295,8 +298,41 @@ requis, les champs absents sont laissés inchangés.
 | Champ | Plage | Description |
 |-------|-------|-------------|
 | `maxTradesWhenLosing` | 0–999 | Trades max une fois le PnL de session négatif. `0` = règle désactivée |
+| `maxContracts` | 0–1000 | Contrats que le compte peut détenir. Une entrée qui porterait la position au-delà est **refusée** (`SAFETY_MAX_CONTRACTS`). `0` = règle désactivée, et c'est le défaut |
 | `dailyLossLimit` | 0–1 000 000 | Perte de session max (nombre positif). `0` = règle désactivée |
 | `lockDurationHours` | 0.05–24 | Durée du verrou après armement. Défaut `6` |
+| `antiTiltEnabled` | booléen | Autorise la friction Anti-Tilt. Défaut `false` |
+| `tiltAveragingAllowed` | booléen | `false` met sous friction tout renfort d'une position perdante. Défaut `true` |
+| `tiltAdvanced` | booléen | Active les deux durées ci-dessous. À `false`, elles sont ignorées et les valeurs par défaut s'appliquent — sans effacer ce qui avait été saisi |
+| `tiltHoldSeconds` | 15–30 | Maintien exigé sur une entrée ralentie. Défaut `20`. Ignoré si `tiltAdvanced` est `false` |
+| `tiltEpisodeMinutes` | 1–60 | Durée d'un épisode. Défaut `15`. Ignoré si `tiltAdvanced` est `false` |
+
+**L'Anti-Tilt ne refuse jamais un ordre et ne touche jamais au verrou.** Il signale seulement que
+les entrées doivent être maintenues ; c'est l'hôte qui applique cette friction. Un épisode ne peut
+donc pas verrouiller le deck — c'est la propriété qui le distingue des limites ci-dessus.
+
+#### Seuils Anti-Tilt dérivés — non configurables
+
+Les autres seuils ne sont **pas** exposés : une protection contre ses propres impulsions que l'on
+calibre soi-même se fait desserrer au moment précis où elle sert. Ils viennent des conventions
+usuelles de gestion du risque, et les deux qui ont besoin d'une échelle sont dérivés des limites
+que le trader règle déjà — ce qui les adapte à un compte de 25 k comme à un compte bien plus gros.
+
+| Seuil | Valeur | Fondement |
+|-------|--------|-----------|
+| Escalade de taille | **+50 %** après un trade perdant | Principe anti-martingale : ne jamais augmenter la taille pour récupérer une perte. C'est le réflexe décrit par le *break-even effect* (Thaler & Johnson, 1990) |
+| Restitution de gain | **50 % de `dailyLossLimit`** | Les règles de *give-back* sont courantes chez les sociétés de prop trading. Exprimée en fraction de la perte déjà acceptée, elle s'échelonne avec le compte. `0` si `dailyLossLimit` vaut 0 : sans échelle, la règle reste inerte |
+| Pertes consécutives | **`maxTradesWhenLosing / 3`**, minimum 3 (défaut 5 si le budget est désactivé) | La règle de bureau classique est « stop après 3 » ; à une cadence de scalping elle se déclenche sur la variance ordinaire, d'où l'indexation sur le budget de trades |
+| Durée d'épisode | **15 min** | Temporisation assez longue pour casser la boucle, assez courte pour ne jamais condamner une séance — c'est ce qui la distingue du verrou de Guard. *Ajustable via `tiltAdvanced`* |
+| Durée de maintien | **20 s** | Fixée par le cahier des charges du trader : 15 à 30 s, « pas moins ». *Ajustable via `tiltAdvanced`* |
+
+Seules les deux **durées** sont ouvertes aux réglages avancés : ce sont des questions de confort.
+Les trois **seuils** qui décident réellement d'un déclenchement (escalade, restitution, série de
+pertes) restent inaccessibles, y compris en avancé — les rendre modifiables reviendrait à laisser
+desserrer la protection au moment précis où elle sert.
+
+Les valeurs effectivement retenues sont journalisées à chaque `configureSafety`, sous
+`— derived: escalation=…, giveBack=…, lossStreak=…` : c'est le seul endroit où les relire.
 
 ### Temporisation
 
@@ -446,7 +482,13 @@ macro de sécurité :
     "pnlAvailable": true,
     "entriesBlocked": false,
     "blockReason": "",
-    "tradingDay": "2026-07-29"
+    "tradingDay": "2026-07-29",
+    "tiltEnabled": true,
+    "tiltActive": true,
+    "tiltSecondsRemaining": 742,
+    "tiltReason": "giveBack",
+    "tiltScope": "all",
+    "tiltHoldSeconds": 20
   }
 }
 ```
@@ -460,7 +502,58 @@ macro de sécurité :
 | `sessionPnl` | PnL depuis le PnL de début de journée (réalisé + latent) |
 | `pnlAvailable` | `false` si NT8 n'expose pas le PnL du compte — les règles PnL sont alors inertes |
 | `entriesBlocked` | Les ouvertures de position sont actuellement refusées |
-| `blockReason` | `""`, `"dailyLoss"` ou `"tradeLimit"` |
+| `blockReason` | `""`, `"dailyLoss"`, `"tradeLimit"` ou `"maxContracts"` |
+| `maxContracts` | Plafond de contrats en vigueur. `0` = règle désactivée |
+| `tiltEnabled` | La friction Anti-Tilt est autorisée |
+| `tiltActive` | Les entrées doivent être maintenues avant de partir. **Jamais un refus** |
+| `tiltSecondsRemaining` | Secondes restantes sur l'épisode. `0` pour les conditions contextuelles, qui n'ont pas de minuteur |
+| `tiltReason` | `""`, `"sizeEscalation"`, `"giveBack"`, `"consecutiveLosses"`, `"averaging"` ou `"maxContracts"` |
+| `tiltScope` | `"all"` (épisode : toutes les entrées) ou `"increaseOnly"` (condition contextuelle : seulement les ordres qui augmentent l'exposition) |
+| `tiltHoldSeconds` | Durée de maintien exigée |
+
+`tiltReason` reste renseigné même quand `tiltActive` vaut `false` : la détection tourne en
+permanence, y compris macro désarmée ou Anti-Tilt éteint, ce qui fait du mode désactivé un mode
+d'observation — le journal dit ce que les règles auraient fait.
+
+### `setGuardPolicy` — bridge → add-on
+
+Le bridge publie ce que la macro refuse actuellement, afin que l'add-on applique les mêmes règles
+aux ordres qui **ne traversent jamais le bridge** : SuperDOM, Chart Trader, DOM.
+
+```json
+{ "type": "command", "action": "setGuardPolicy",
+  "payload": { "blocked": true, "reason": "dailyLoss", "maxContracts": 3 } }
+```
+
+Envoyé à la connexion de l'add-on (forcé) puis **uniquement au changement** — la boucle de
+diffusion tourne à 5 Hz, un envoi inconditionnel noierait l'add-on et son journal.
+
+### `guardViolation` — add-on → bridge → hôte
+
+Émis quand un ordre passé directement dans NinjaTrader est refusé par l'add-on pendant un blocage.
+
+```json
+{ "type": "event", "action": "guardViolation",
+  "payload": { "violation": "dailyLoss", "cancelled": true, "orderId": "…",
+               "orderAction": "Buy", "orderType": "Limit", "quantity": 2,
+               "name": "", "instrument": "MNQ 09-26" } }
+```
+
+| Champ | Description |
+|-------|-------------|
+| `violation` | `"dailyLoss"`, `"tradeLimit"`, `"maxContracts"` ou `"guardBlocked"` |
+| `cancelled` | `false` signale l'ordre **vu mais non annulé** — presque toujours un ordre au marché exécuté avant que la plateforme ne le remonte |
+| `name` | Nom de l'ordre. Les ordres du deck portent `"StreamDeck"` et ne sont jamais inspectés |
+
+**Ce que l'add-on n'annule jamais** : un ordre qui *réduit* l'exposition. Un stop manuel sur un long
+est un `Sell`, sur un short un `BuyToCover` — les deux passent intacts même quand toutes les entrées
+sont refusées. Enfermer le trader dans une position est le seul résultat que ces règles ne peuvent
+pas produire.
+
+**Limite assumée** : un ordre au marché sur un contrat liquide s'exécute souvent avant d'être
+signalé, et un ordre exécuté ne s'annule pas. Ce cas est détecté et remonté, pas empêché. Et rien
+n'atteint quelqu'un qui désactive l'add-on ou trade depuis la plateforme de son courtier : le but
+est de transformer une impulsion de deux clics en démontage délibéré de son propre garde-fou.
 
 ### `orderUpdate`
 Émis par l'add-on quand NinjaTrader **refuse** un ordre. `Account.Submit` est asynchrone :
@@ -530,6 +623,7 @@ Le plugin affiche `REJECTED` pendant 5 s sur les touches d'entrée et déclenche
 | `LIVE_ACCOUNT_BLOCKED` | Compte réel bloqué par safe mode |
 | `SAFETY_DAILY_LOSS_REACHED` | Perte journalière max atteinte — ouverture refusée par la macro |
 | `SAFETY_TRADE_LIMIT_REACHED` | Nombre max de trades en perte atteint — ouverture refusée par la macro |
+| `SAFETY_MAX_CONTRACTS` | L'ordre porterait la position au-delà du plafond de contrats. Seuls les ordres qui augmentent l'exposition sont refusés : réduire reste toujours possible. **Seule règle Guard qui s'applique même macro désarmée** — c'est une limite de risque permanente, pas une règle de séance |
 | `SAFETY_MACRO_LOCKED` | Désarmement / reconfiguration impossible avant la fin du verrou |
 | `COOLDOWN_ACTIVE` | Cooldown actif après un trade perdant |
 | `CONTEXT_MISSING` | Contexte insuffisant pour résoudre l'action |

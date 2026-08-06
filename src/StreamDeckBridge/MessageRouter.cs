@@ -110,7 +110,12 @@ public sealed class MessageRouter
 
         // Safety macro — hard block. Evaluated before anything leaves the bridge, so a
         // refused key press never turns into an order on the market.
-        var (safetyBlocked, safetyCode, safetyMessage) = _safety.Evaluate(message.Action);
+        //
+        // The quantity is resolved here rather than after EnrichPayload, which runs later: the
+        // contract cap has to judge the order that would actually be sent, and the host usually
+        // omits the quantity precisely because the bridge owns it.
+        var quantity = GetPayloadInt(message, "quantity") ?? _stateManager.GetSnapshot().Quantity;
+        var (safetyBlocked, safetyCode, safetyMessage) = _safety.Evaluate(message.Action, quantity);
         if (safetyBlocked)
         {
             _logger.LogWarning("[REQ:{RequestId}] SAFETY MACRO blocked {Action}: {Code} — {Msg}",
@@ -155,6 +160,16 @@ public sealed class MessageRouter
             // instead of raw NT8 payload which lacks quantity/defaultQuantity
             var snapshot = _stateManager.GetSnapshot();
             return BridgeMessage.CreateEvent("stateUpdate", snapshot);
+        }
+
+        // An order the trader placed straight into NinjaTrader, refused by the add-on. This is the
+        // one event that proves the bypass was attempted, so it is logged loudly here as well as
+        // in the add-on — the two files are read separately when something goes wrong.
+        if (message.Type == "event" && message.Action == "guardViolation")
+        {
+            _logger.LogWarning("GUARD VIOLATION reported by NT8: {Payload}",
+                message.Payload is JsonElement gv ? gv.GetRawText() : "(no payload)");
+            return message;
         }
 
         LogAddonOutcome(message);
@@ -332,10 +347,18 @@ public sealed class MessageRouter
             "armSafety" => _safety.Arm(),
             "disarmSafety" => _safety.Disarm(force),
             "toggleSafety" => _safety.Toggle(force),
-            _ => _safety.Configure(
-                GetPayloadInt(message, "maxTradesWhenLosing"),
-                GetPayloadDouble(message, "dailyLossLimit"),
-                GetPayloadDouble(message, "lockDurationHours"))
+            _ => _safety.Configure(new SafetyConfigUpdate
+            {
+                MaxTradesWhenLosing = GetPayloadInt(message, "maxTradesWhenLosing"),
+                DailyLossLimit = GetPayloadDouble(message, "dailyLossLimit"),
+                LockDurationHours = GetPayloadDouble(message, "lockDurationHours"),
+                AntiTiltEnabled = GetPayloadBoolOrNull(message, "antiTiltEnabled"),
+                MaxContracts = GetPayloadInt(message, "maxContracts"),
+                TiltAveragingAllowed = GetPayloadBoolOrNull(message, "tiltAveragingAllowed"),
+                TiltAdvanced = GetPayloadBoolOrNull(message, "tiltAdvanced"),
+                TiltHoldSeconds = GetPayloadInt(message, "tiltHoldSeconds"),
+                TiltEpisodeMinutes = GetPayloadDouble(message, "tiltEpisodeMinutes")
+            })
         };
 
         var status = JsonSerializer.SerializeToElement(outcome.Status, BridgeMessage.CamelCaseOpts);
@@ -408,5 +431,22 @@ public sealed class MessageRouter
     {
         if (msg.Payload is not JsonElement el) return false;
         return el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.True;
+    }
+
+    /// <summary>
+    /// Three-state read for settings: null means "not supplied, leave it alone", which a plain
+    /// bool cannot express. Only for configureSafety — a bypass flag must keep using the
+    /// two-state reader above.
+    /// </summary>
+    private static bool? GetPayloadBoolOrNull(BridgeMessage msg, string key)
+    {
+        if (msg.Payload is not JsonElement el) return null;
+        if (!el.TryGetProperty(key, out var prop)) return null;
+        return prop.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null
+        };
     }
 }

@@ -10,14 +10,14 @@
  */
 import { BridgeClient } from './bridge-client.js';
 import {
-  DEFAULT_GLOBAL_SETTINGS, DEFAULT_SAFETY_STATUS, TradingState, OrderUpdate, SafetyStatus, createCommand,
+  DEFAULT_GLOBAL_SETTINGS, DEFAULT_SAFETY_STATUS, TradingState, OrderUpdate, GuardViolation, SafetyStatus, createCommand,
 } from './messages.js';
 import { DeckDevice } from './device.js';
 import { LayoutStore, SlotAssignment } from './layout.js';
-import { computeVisual, gainEnTicks, VisualContext } from './visual-engine.js';
+import { computeVisual, gainEnTicks, tiltAppliesTo, VIOLATION_BANNER_MS, VisualContext } from './visual-engine.js';
 import { renderButtonSvg } from './visuals.js';
 import { ConfigServer, UiSnapshot } from './server.js';
-import { BridgeSupervisor } from './supervisor.js';
+import { BridgeSupervisor, neutraliserElgato } from './supervisor.js';
 import { empreinteDe, journaliserTransitions, journaliserConfiguration, Empreinte } from './transitions.js';
 import { actionName, CATALOG_BY_ID, HOLD_CONFIRM_MS } from './catalog.js';
 import * as log from './logger.js';
@@ -44,6 +44,8 @@ const supervisor = new BridgeSupervisor(BRIDGE_PORT);
 
 let lastState: TradingState | null = null;
 let lastRejectionAt: number | null = null;
+/** Dernier ordre manuel refusé par l'add-on pendant un blocage de la macro. */
+let lastViolationAt: number | null = null;
 let currentPage = 0;
 let cooldownTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -51,6 +53,7 @@ function ctx(): VisualContext {
   return {
     bridgeConnected: bridge.isConnected,
     lastRejectionAt,
+    lastViolationAt,
     defaultQuantity: DEFAULT_GLOBAL_SETTINGS.defaultQuantity,
     autoBe: { actif: autoBe.actif, pose: autoBe.pose !== null },
   };
@@ -75,7 +78,13 @@ function visualFor(index: number) {
   // La jauge de maintien se superpose au visuel calculé, sans le remplacer : le trader doit
   // continuer à lire ce que fait la touche pendant qu'il la tient.
   const p = progressionDe(index);
-  return p === undefined ? visual : { ...visual, progress: p };
+  if (p === undefined) return visual;
+
+  // Sur un maintien long — celui qu'impose l'Anti-Tilt — la jauge n'avance que de quelques pixels
+  // par seconde et paraît figée. Le décompte est ce qui dit au trader que son appui est bien pris,
+  // et combien de temps il lui reste à tenir.
+  const restant = restantDe(index);
+  return restant === undefined ? { ...visual, progress: p } : { ...visual, progress: p, subtitle: `${restant}s` };
 }
 
 // `paintAll` est déclenché depuis six endroits (état du bridge, connexion, édition du layout,
@@ -246,10 +255,31 @@ function getAccountCycleList(settings: Record<string, unknown>, state: TradingSt
  */
 async function pushSafetyConfig(settings: Record<string, unknown>): Promise<void> {
   const payload: Record<string, unknown> = {};
-  for (const key of ['maxTradesWhenLosing', 'dailyLossLimit', 'lockDurationHours']) {
+  const nombre = (key: string): number | null => {
     const value = settings[key];
-    if (typeof value === 'number' && Number.isFinite(value)) payload[key] = value;
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  };
+
+  for (const key of ['maxTradesWhenLosing', 'dailyLossLimit', 'maxContracts', 'lockDurationHours']) {
+    const value = nombre(key);
+    if (value !== null) payload[key] = value;
   }
+  // Les bascules ne sont transmises que si elles existent dans le layout : une absence doit laisser
+  // le défaut du bridge en place, et non être lue comme un « false » que personne n'a demandé.
+  for (const key of ['antiTiltEnabled', 'tiltAveragingAllowed', 'tiltAdvanced']) {
+    const value = settings[key];
+    if (typeof value === 'boolean') payload[key] = value;
+  }
+
+  // Les durées avancées : hors de la section, elles ne sont pas transmises et le bridge
+  // applique ses valeurs par défaut — sans rien effacer de ce qui avait été saisi.
+  if (settings.tiltAdvanced === true) {
+    for (const key of ['tiltHoldSeconds', 'tiltEpisodeMinutes']) {
+      const value = nombre(key);
+      if (value !== null) payload[key] = value;
+    }
+  }
+
   if (Object.keys(payload).length === 0 || !bridge.isConnected) return;
 
   const resp = await bridge.sendCommand(createCommand('configureSafety', payload));
@@ -628,6 +658,13 @@ async function declencher(slot: number, assignment: SlotAssignment, maintenuMs =
 
 // --- Confirmation par appui long ---
 
+/**
+ * Au-delà de cette durée, un maintien est traité comme « long » : décompte en secondes plutôt que
+ * jauge seule, et rafraîchissement ralenti. À 20 s, un tic de 80 ms ne fait progresser la jauge que
+ * de 0,4 % — 250 écritures USB pour une barre qui paraît immobile.
+ */
+const MAINTIEN_LONG_MS = 5000;
+
 /** Maintien en cours. `null` la plupart du temps : une seule touche à la fois. */
 let maintien: { slot: number; assignment: SlotAssignment; debut: number; duree: number; timer: ReturnType<typeof setInterval> } | null = null;
 
@@ -635,6 +672,25 @@ let maintien: { slot: number; assignment: SlotAssignment; debut: number; duree: 
 function progressionDe(slot: number): number | undefined {
   if (!maintien || maintien.slot !== slot) return undefined;
   return Math.min(1, (Date.now() - maintien.debut) / maintien.duree);
+}
+
+/** Secondes restantes d'un maintien long. `undefined` sur un maintien court, où la jauge suffit. */
+function restantDe(slot: number): number | undefined {
+  if (!maintien || maintien.slot !== slot || maintien.duree <= MAINTIEN_LONG_MS) return undefined;
+  return Math.max(0, Math.ceil((maintien.debut + maintien.duree - Date.now()) / 1000));
+}
+
+/**
+ * Durée de maintien imposée par l'Anti-Tilt, en millisecondes. 0 quand il ne s'applique pas.
+ *
+ * C'est la SEULE exception à la règle « une action instantanée ne se confirme jamais », et elle est
+ * volontairement étroite : uniquement des entrées, uniquement pendant que le bridge signale
+ * `tiltActive`, et jamais une sortie de position. `tiltAppliesTo` est partagé avec le rendu pour
+ * que la touche annonce exactement ce que l'appui fera.
+ */
+function frictionAntiTilt(actionId: string): number {
+  if (!lastState || !tiltAppliesTo(actionId, lastState)) return 0;
+  return Math.max(1, lastState.safety.tiltHoldSeconds) * 1000;
 }
 
 function annulerMaintien(raison: string): void {
@@ -666,7 +722,18 @@ device.onPress(async (ev) => {
       slot: ev.index, actionId: assignment.actionId,
     });
   }
-  const duree = def?.instant || !demandee ? 0 : HOLD_CONFIRM_MS;
+  const confirmation = def?.instant || !demandee ? 0 : HOLD_CONFIRM_MS;
+
+  // L'Anti-Tilt passe outre la règle « instantané » ci-dessus, et lui seul. La friction ne refuse
+  // rien : l'ordre part toujours, il faut seulement le vouloir pendant toute la durée du maintien.
+  const friction = frictionAntiTilt(assignment.actionId);
+  if (friction > 0) {
+    log.eventWarn('KeyDown', 'Anti-Tilt : appui long exigé sur cette entrée', {
+      slot: ev.index, actionId: assignment.actionId,
+      motif: lastState?.safety?.tiltReason, requisMs: friction,
+    });
+  }
+  const duree = Math.max(confirmation, friction);
 
   if (duree <= 0) {
     await declencher(ev.index, assignment);
@@ -680,7 +747,9 @@ device.onPress(async (ev) => {
 
   const debut = Date.now();
   // 12 Hz : assez fluide pour que la jauge paraisse continue, assez espacé pour ne réécrire
-  // qu'une touche à chaque tic grâce au rendu différentiel.
+  // qu'une touche à chaque tic grâce au rendu différentiel. Sur un maintien long, 4 Hz suffit —
+  // le décompte ne change qu'une fois par seconde, et cela divise par trois les écritures USB.
+  const periode = duree > MAINTIEN_LONG_MS ? 250 : 80;
   const timer = setInterval(() => {
     if (!maintien) return;
     if (Date.now() - maintien.debut >= maintien.duree) {
@@ -691,7 +760,7 @@ device.onPress(async (ev) => {
       return;
     }
     void paintAll();
-  }, 80);
+  }, periode);
 
   maintien = { slot: ev.index, assignment, debut, duree, timer };
   log.debugEvent('KeyDown', `${actionName(assignment.actionId)} — maintien demandé`, { slot: ev.index, requisMs: duree });
@@ -752,6 +821,22 @@ bridge.onMessage((msg) => {
       setTimeout(() => void paintAll(), 5200);
     }
   }
+
+  // Un ordre passé directement dans NinjaTrader pendant que la macro refuse les entrées.
+  // L'add-on l'a annulé ; le deck doit le dire, sans quoi le seul témoin serait un fichier de log
+  // que personne ne relit sur le moment.
+  if (msg.action === 'guardViolation' && msg.payload) {
+    const v = msg.payload as unknown as GuardViolation;
+    lastViolationAt = Date.now();
+    log.eventWarn('Guard', v.cancelled
+      ? 'Ordre manuel ANNULÉ — la macro refusait les entrées'
+      : 'Ordre manuel détecté mais NON annulé', {
+      motif: v.violation, action: v.orderAction, type: v.orderType,
+      quantite: v.quantity, instrument: v.instrument, erreur: v.error,
+    });
+    void paintAll();
+    setTimeout(() => void paintAll(), VIOLATION_BANNER_MS + 200);
+  }
 });
 
 /** Le compte à rebours s'égrène localement, pour un affichage fluide entre deux états du bridge. */
@@ -778,6 +863,12 @@ async function main(): Promise<void> {
   // étaient posées sans avoir à retrouver le layout de l'époque.
   journaliserConfiguration(store.layout);
   restaurerArmementAutoBe();
+
+  // Avant toute connexion : libérer le boîtier ET la place plugin du bridge. Windows relance
+  // l'application Elgato à l'ouverture de session même sans démarrage automatique, et son
+  // plugin prend la seule place disponible — TradeDeck restait alors « hors ligne ».
+  await neutraliserElgato();
+
   let url: string;
   try {
     url = await server.listen(UI_PORT);

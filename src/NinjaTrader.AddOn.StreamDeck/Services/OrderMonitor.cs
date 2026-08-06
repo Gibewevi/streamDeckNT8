@@ -15,6 +15,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
     public class OrderMonitor : IDisposable
     {
         private readonly BridgeClient _bridgeClient;
+        private readonly GuardEnforcer _enforcer;
         private readonly object _lock = new object();
         private Account _subscribed;
         private bool _disposed;
@@ -30,9 +31,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// </summary>
         public Action StateChanged { get; set; }
 
-        public OrderMonitor(BridgeClient bridgeClient)
+        public OrderMonitor(BridgeClient bridgeClient, GuardEnforcer enforcer)
         {
             _bridgeClient = bridgeClient;
+            _enforcer = enforcer;
         }
 
         /// <summary>
@@ -103,6 +105,18 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             try
             {
                 if (e == null) return;
+
+                // Enforcement first, and before any other consideration: this is the only moment
+                // an order placed outside the deck — SuperDOM, Chart Trader, DOM — can still be
+                // stopped. Every millisecond spent elsewhere is a millisecond it may fill in.
+                if (_enforcer != null && e.Order != null && _subscribed != null)
+                {
+                    if (_enforcer.Inspect(_subscribed, e.Order))
+                    {
+                        NotifyStateChanged();
+                        return;
+                    }
+                }
 
                 // Only outcomes the trader cannot see from the position alone
                 bool isRejection = e.OrderState == OrderState.Rejected || e.Error != ErrorCode.NoError;

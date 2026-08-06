@@ -14,6 +14,8 @@ export interface VisualContext {
   bridgeConnected: boolean;
   /** Dernier rejet remonté par NinjaTrader, affiché brièvement sur les touches d'entrée. */
   lastRejectionAt: number | null;
+  /** Dernier ordre manuel annulé par l'add-on pendant un blocage — affiché sur la touche Sécurité. */
+  lastViolationAt: number | null;
   defaultQuantity: number;
   /** État de l'automatisme Auto BE — vit dans l'hôte, pas dans l'état publié par le bridge. */
   autoBe: { actif: boolean; pose: boolean };
@@ -31,6 +33,13 @@ export function gainEnTicks(state: TradingState): number | null {
 }
 
 const REJECTION_BANNER_MS = 5000;
+
+/**
+ * Bien plus long que la bannière de rejet : un ordre manuel annulé pendant un blocage n'est pas un
+ * incident technique passager, c'est un contournement qui vient d'être arrêté. Il doit rester
+ * visible assez longtemps pour être vu, pas seulement enregistré dans un fichier.
+ */
+export const VIOLATION_BANNER_MS = 20000;
 
 function formatAccountLabel(account: string): string {
   const value = account.trim();
@@ -106,6 +115,20 @@ function formatSafetyRestant(safety: SafetyStatus): string {
   return `${trades}-${perte}`;
 }
 
+/**
+ * Motif de l'Anti-Tilt, en assez court pour la troisième ligne d'une touche de 144 pixels.
+ * Sans lui, le trader voit sa touche ralentie sans savoir laquelle de ses règles l'a décidé.
+ */
+function motifTilt(reason: SafetyStatus['tiltReason']): string {
+  switch (reason) {
+    case 'sizeEscalation': return 'SIZE UP';
+    case 'giveBack': return 'GIVEBACK';
+    case 'consecutiveLosses': return 'STREAK';
+    case 'averaging': return 'AVERAGE';
+    default: return '';
+  }
+}
+
 /** Bas de la touche Sécurité quand une limite est atteinte : trades consommés et P&L de session. */
 function formatSafetyDetail(safety: SafetyStatus): string {
   const trades = safety.maxTradesWhenLosing > 0
@@ -128,14 +151,71 @@ function formatSafetyDetail(safety: SafetyStatus): string {
  */
 type EntryStatus = { label: string; dimmed: boolean } | null;
 
-function entryStatus(state: TradingState, ctx: VisualContext): EntryStatus {
+/**
+ * Les cinq actions qui ouvrent ou retournent une position. Miroir exact de
+ * `SafetyMacro.EntryActions` côté bridge : ce que la macro de sécurité bloque, l'Anti-Tilt ralentit.
+ * Les sorties (`flatten`, `cancelOrders`) en sont volontairement absentes.
+ */
+export const ACTIONS_ENTREE = new Set([
+  'com.trader.ninjatrader.buymarket',
+  'com.trader.ninjatrader.sellmarket',
+  'com.trader.ninjatrader.buylimit',
+  'com.trader.ninjatrader.selllimit',
+  'com.trader.ninjatrader.reverse',
+]);
+
+/**
+ * L'Anti-Tilt ralentit-il cette touche en ce moment ?
+ *
+ * Exporté et utilisé aussi bien par le rendu que par le gestionnaire d'appui : une touche qui
+ * afficherait HOLD tout en partant au premier appui — ou l'inverse — serait pire que pas de
+ * friction du tout.
+ */
+export function tiltAppliesTo(actionId: string, state: TradingState): boolean {
+  const safety = state.safety;
+  if (!safety?.tiltActive || !ACTIONS_ENTREE.has(actionId)) return false;
+
+  // Le moyennage porte sur l'EXPOSITION : il ne ralentit que les ordres qui l'augmentent.
+  if (safety.tiltScope === 'increaseOnly') return augmenteExposition(actionId, state);
+
+  return true;
+}
+
+/**
+ * Cet ordre ferait-il GROSSIR la position ?
+ *
+ * Partagé par les deux règles qui ne visent que la croissance — le plafond de contrats, qui
+ * refuse, et le moyennage, qui ralentit. Aucune des deux ne doit jamais gêner l'ordre qui réduit :
+ * enfermer le trader dans une position trop grosse est le seul résultat qu'elles ne peuvent pas
+ * produire. `reverse` n'y échappe pas : retourner ne réduit rien, cela remet la même taille en face.
+ */
+function augmenteExposition(actionId: string, state: TradingState): boolean {
+  const direction = state.position?.exists ? state.position.direction : 'Flat';
+  if (direction === 'Long' && actionId.includes('sell')) return false;
+  if (direction === 'Short' && actionId.includes('buy')) return false;
+  return true;
+}
+
+function entryStatus(state: TradingState, ctx: VisualContext, actionId: string): EntryStatus {
   if (state.safety?.entriesBlocked) {
     return {
       label: state.safety.blockReason === 'dailyLoss' ? 'LOSS LIMIT' : 'MAX TRADES',
       dimmed: true,
     };
   }
+  // Plafond de contrats atteint. Seules les touches qui feraient GROSSIR la position sont grisées :
+  // griser celle qui permet d'en sortir laisserait croire qu'on est coincé dedans. La touche
+  // Sécurité, elle, ne bronche pas — être à sa taille normale n'est pas un incident.
+  if (state.safety?.atContractCap && augmenteExposition(actionId, state)) {
+    return { label: 'MAX QTY', dimmed: true };
+  }
   if (state.cooldownActive) return { label: 'BLOCKED', dimmed: true };
+  // Anti-Tilt : la touche fonctionne toujours, elle exige seulement d'être tenue. Jamais grisée
+  // donc — le gris est réservé à ce qui ne part pas — et affichée après les deux vrais blocages,
+  // qui priment parce qu'aucun maintien ne les lèvera.
+  if (tiltAppliesTo(actionId, state)) {
+    return { label: `HOLD ${state.safety.tiltHoldSeconds}s`, dimmed: false };
+  }
   // NinjaTrader a refusé le dernier ordre : on prévient, mais la touche reste utilisable.
   if (ctx.lastRejectionAt && Date.now() - ctx.lastRejectionAt < REJECTION_BANNER_MS) {
     return { label: 'REJECTED', dimmed: false };
@@ -157,7 +237,7 @@ export function computeVisual(
 
   switch (actionId) {
     case 'com.trader.ninjatrader.buymarket': {
-      const st = entryStatus(state, ctx);
+      const st = entryStatus(state, ctx, actionId);
       return {
         title: 'MKT', subtitle: st?.label ?? `Buy ×${qty}`,
         bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
@@ -165,7 +245,7 @@ export function computeVisual(
       };
     }
     case 'com.trader.ninjatrader.sellmarket': {
-      const st = entryStatus(state, ctx);
+      const st = entryStatus(state, ctx, actionId);
       return {
         title: 'MKT', subtitle: st?.label ?? `Sell ×${qty}`,
         bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
@@ -173,7 +253,7 @@ export function computeVisual(
       };
     }
     case 'com.trader.ninjatrader.buylimit': {
-      const st = entryStatus(state, ctx);
+      const st = entryStatus(state, ctx, actionId);
       return {
         title: 'LMT', subtitle: st?.label ?? `Buy ×${qty}`,
         bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
@@ -181,7 +261,7 @@ export function computeVisual(
       };
     }
     case 'com.trader.ninjatrader.selllimit': {
-      const st = entryStatus(state, ctx);
+      const st = entryStatus(state, ctx, actionId);
       return {
         title: 'LMT', subtitle: st?.label ?? `Sell ×${qty}`,
         bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
@@ -212,7 +292,7 @@ export function computeVisual(
     }
     case 'com.trader.ninjatrader.reverse': {
       // Inverser ouvre une position dans l'autre sens : la macro de sécurité s'applique aussi.
-      const st = entryStatus(state, ctx);
+      const st = entryStatus(state, ctx, actionId);
       return {
         title: 'Invert', subtitle: st?.label ?? `Qty ${pos?.quantity ?? 0}`,
         bgColor: st?.dimmed ? Colors.disabled : '#FFFFFF',
@@ -330,6 +410,17 @@ export function computeVisual(
       const dev = settings.devMode === true;
       const marque = dev ? { badge: 'DEV', badgeColor: Colors.cancelYellow } : {};
 
+      // Un ordre passé à la main dans NinjaTrader vient d'être annulé. Prime sur tout le reste :
+      // c'est la seule chose qui, à cet instant, mérite le regard du trader.
+      if (ctx.lastViolationAt && Date.now() - ctx.lastViolationAt < VIOLATION_BANNER_MS) {
+        return {
+          ...marque,
+          title: 'SAFETY:STOP', subtitle: 'MANUEL',
+          detail: 'ORDRE ANNULE',
+          bgColor: Colors.sellRed, textColor: Colors.textWhite,
+        };
+      }
+
       if (!safety.armed) {
         // Pas de rappel des limites configurées ici : la touche sert à savoir si la protection
         // est active, pas à relire des réglages qu'on consulte dans l'interface.
@@ -348,6 +439,21 @@ export function computeVisual(
           subtitle: formatLockRemaining(safety.lockSecondsRemaining),
           detail: formatSafetyDetail(safety),
           bgColor: Colors.sellRed, textColor: Colors.textWhite,
+        };
+      }
+
+      // Anti-Tilt en cours. Jaune et non rouge, délibérément : le rouge de la touche veut dire
+      // « refusé » partout ailleurs, et ici rien n'est refusé — les entrées partent encore, il faut
+      // seulement les tenir. Placé après le blocage réel, qui prime parce qu'aucun appui ne le lèvera.
+      if (safety.tiltActive) {
+        return {
+          ...marque,
+          title: 'SAFETY:TILT',
+          // Un épisode a un minuteur ; une condition contextuelle n'en a pas — elle dure autant que
+          // la position qui l'a produite. Afficher « 0s » laisserait croire qu'elle vient de finir.
+          subtitle: safety.tiltSecondsRemaining > 0 ? formatLockRemaining(safety.tiltSecondsRemaining) : 'HOLD',
+          detail: motifTilt(safety.tiltReason),
+          bgColor: Colors.cancelYellow, textColor: '#000000',
         };
       }
 

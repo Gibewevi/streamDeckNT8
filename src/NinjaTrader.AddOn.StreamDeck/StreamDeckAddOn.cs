@@ -23,6 +23,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private ContextResolver _resolver;
         private StatePublisher _statePublisher;
         private OrderMonitor _orderMonitor;
+        private GuardEnforcer _guardEnforcer;
         private AddOnConfig _config;
 
         protected override void OnStateChange()
@@ -64,7 +65,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 _bridgeClient.OnMessageReceived += OnBridgeMessage;
                 _bridgeClient.OnConnectionChanged += OnConnectionChanged;
 
-                _orderMonitor = new OrderMonitor(_bridgeClient);
+                // Closes the hole the bridge cannot reach: orders placed straight into NinjaTrader
+                // never cross it, so the safety macro has to be applied from inside the platform.
+                _guardEnforcer = new GuardEnforcer(_resolver, _bridgeClient);
+
+                _orderMonitor = new OrderMonitor(_bridgeClient, _guardEnforcer);
                 _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor);
 
                 // Fills and cancellations refresh the deck on the spot instead of waiting for the
@@ -119,7 +124,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             var startedAt = DateTime.UtcNow;
             BridgeMessage response;
 
-            if (message.Action == "setInstrument" || message.Action == "setAccount")
+            if (message.Action == "setGuardPolicy")
+                response = HandleGuardPolicy(message);
+            else if (message.Action == "setInstrument" || message.Action == "setAccount")
                 response = HandleTrackingCommand(message);
             else
                 response = _dispatcher.Dispatch(message);
@@ -162,6 +169,29 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             var firstAccount = _resolver.GetAccountNames().FirstOrDefault();
             return !string.IsNullOrWhiteSpace(firstAccount) ? firstAccount : string.Empty;
+        }
+
+        /// <summary>
+        /// Adopts the safety policy the bridge publishes. Handled here rather than in the
+        /// dispatcher because it sends no order and touches no position: it only tells the
+        /// enforcer what to refuse when an order arrives from outside the deck.
+        /// </summary>
+        private BridgeMessage HandleGuardPolicy(BridgeMessage message)
+        {
+            if (_guardEnforcer == null)
+                return BridgeMessage.CreateError(message.RequestId, message.Action, "CONTEXT_MISSING", "Guard enforcer is not initialized.");
+
+            var blocked = message.GetPayloadBool("blocked");
+            var reason = message.GetPayloadString("reason");
+            var maxContracts = (int)message.GetPayloadDouble("maxContracts");
+
+            _guardEnforcer.UpdatePolicy(blocked, reason, maxContracts);
+
+            return BridgeMessage.CreateResponse(message.RequestId, message.Action, true, new
+            {
+                blocked = blocked,
+                maxContracts = maxContracts
+            });
         }
 
         private BridgeMessage HandleTrackingCommand(BridgeMessage message)

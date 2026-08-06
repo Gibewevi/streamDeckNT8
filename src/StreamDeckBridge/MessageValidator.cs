@@ -143,10 +143,45 @@ public sealed class MessageValidator
                 $"maxTradesWhenLosing must be a whole number between 0 and {SafetyMacro.MaxTradeLimit} (0 disables the rule).");
         }
 
-        if (maxTrades == null && dailyLoss == null && lockHours == null)
+        // Same whole-number distinction as above. The rule THRESHOLDS are not settable at all —
+        // they are derived by SafetyMacro — so only the contract cap and the two advanced comfort
+        // durations are accepted here.
+        foreach (var key in new[] { "maxContracts", "tiltHoldSeconds" })
+        {
+            if (GetPayloadInt(message, key) == null && HasNumericProperty(message, key))
+                return (false, "INVALID_PAYLOAD", $"{key} must be a whole number.");
+        }
+
+        var maxContracts = GetPayloadInt(message, "maxContracts");
+        var tiltHold = GetPayloadInt(message, "tiltHoldSeconds");
+        var tiltEpisode = GetPayloadDouble(message, "tiltEpisodeMinutes");
+        var hasTiltToggle = HasProperty(message, "antiTiltEnabled")
+                         || HasProperty(message, "tiltAveragingAllowed")
+                         || HasProperty(message, "tiltAdvanced");
+
+        if (maxTrades == null && dailyLoss == null && lockHours == null && !hasTiltToggle &&
+            maxContracts == null && tiltHold == null && tiltEpisode == null)
         {
             return (false, "INVALID_PAYLOAD",
-                "configureSafety requires at least one of maxTradesWhenLosing, dailyLossLimit, lockDurationHours.");
+                "configureSafety requires at least one settings field.");
+        }
+
+        if (maxContracts is < 0 or > SafetyMacro.MaxContractLimit)
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"maxContracts must be between 0 and {SafetyMacro.MaxContractLimit} (0 disables the rule).");
+        }
+
+        if (tiltHold is < SafetyMacro.MinTiltHoldSeconds or > SafetyMacro.MaxTiltHoldSeconds)
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"tiltHoldSeconds must be between {SafetyMacro.MinTiltHoldSeconds} and {SafetyMacro.MaxTiltHoldSeconds}.");
+        }
+
+        if (tiltEpisode is < SafetyMacro.MinTiltEpisodeMinutes or > SafetyMacro.MaxTiltEpisodeMinutes)
+        {
+            return (false, "INVALID_PAYLOAD",
+                $"tiltEpisodeMinutes must be between {SafetyMacro.MinTiltEpisodeMinutes} and {SafetyMacro.MaxTiltEpisodeMinutes}.");
         }
 
         if (maxTrades is < 0 or > SafetyMacro.MaxTradeLimit)
@@ -242,5 +277,13 @@ public sealed class MessageValidator
     {
         if (msg.Payload is not JsonElement el) return false;
         return el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.Number;
+    }
+
+    /// <summary>True when the key is present at all. Used for the boolean settings, where the
+    /// value carries no "supplied or not" information of its own.</summary>
+    private static bool HasProperty(BridgeMessage msg, string key)
+    {
+        if (msg.Payload is not JsonElement el) return false;
+        return el.TryGetProperty(key, out _);
     }
 }

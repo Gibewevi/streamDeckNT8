@@ -12,14 +12,66 @@ public sealed class SafetyMacroSettings
     /// <summary>Max session loss in account currency, expressed as a positive number. 0 disables the rule.</summary>
     public double DailyLossLimit { get; set; } = 300;
 
+    /// <summary>
+    /// Maximum contracts the account may hold. An entry that would take the position past it is
+    /// REFUSED, like the two limits above — this is a risk limit, not a behavioural heuristic, so
+    /// it belongs with Guard's accounting rules and not with the anti-tilt friction.
+    /// 0 disables the rule, which is the default: nobody should start refusing orders after an
+    /// update they did not ask for.
+    /// </summary>
+    public int MaxContracts { get; set; }
+
     /// <summary>How long the macro stays locked (undisableable) once armed.</summary>
     public double LockDurationHours { get; set; } = 6;
+
+    // --- Anti-tilt ---
+    //
+    // These rules never refuse an order and never touch the lock deadline. They only tell the host
+    // to demand a long, deliberate press before an entry leaves. Detection runs at all times; only
+    // the friction is gated on Armed && AntiTiltEnabled, which makes the disabled state a free
+    // observation mode: the log says what would have happened before the rules get any authority.
+    //
+    // ONLY THREE SETTINGS LIVE HERE, on purpose. Everything else — how much of a size jump counts
+    // as escalation, how much given-back profit is too much, how many losses in a row, how long an
+    // episode lasts, how long the press must be held — is derived by SafetyMacro from established
+    // risk-management practice and from the two limits the trader already sets for Guard. A rule
+    // nobody fills in is a rule that actually protects; a form of eleven fields gets abandoned.
+
+    /// <summary>Master switch for the friction. Off by default, which still runs detection and
+    /// logging — that is the intended way to calibrate before handing the rules any authority.</summary>
+    public bool AntiTiltEnabled { get; set; }
+
+    /// <summary>
+    /// When false, adding to a losing position puts entries under friction until that position is
+    /// closed or back in profit. Permissive by default: averaging down runs out of control on a
+    /// small account, but it is a legitimate management choice on a larger one — so it is the
+    /// trader's call, never a rule imposed by the software.
+    /// </summary>
+    public bool TiltAveragingAllowed { get; set; } = true;
+
+    /// <summary>
+    /// Opt-in for the two comfort durations below. When false they are ignored and the built-in
+    /// values apply, so switching this off restores the defaults without losing what was typed.
+    /// </summary>
+    public bool TiltAdvanced { get; set; }
+
+    /// <summary>Hold required on a slowed entry. Only used when <see cref="TiltAdvanced"/>.</summary>
+    public int TiltHoldSeconds { get; set; } = 20;
+
+    /// <summary>Episode length. Only used when <see cref="TiltAdvanced"/>.</summary>
+    public double TiltEpisodeMinutes { get; set; } = 15;
 
     public SafetyMacroSettings Clone() => new()
     {
         MaxTradesWhenLosing = MaxTradesWhenLosing,
         DailyLossLimit = DailyLossLimit,
-        LockDurationHours = LockDurationHours
+        MaxContracts = MaxContracts,
+        LockDurationHours = LockDurationHours,
+        AntiTiltEnabled = AntiTiltEnabled,
+        TiltAveragingAllowed = TiltAveragingAllowed,
+        TiltAdvanced = TiltAdvanced,
+        TiltHoldSeconds = TiltHoldSeconds,
+        TiltEpisodeMinutes = TiltEpisodeMinutes
     };
 }
 
@@ -49,6 +101,62 @@ public sealed class SafetyMacroPersistedState
     /// restart resumes with a known P&amp;L instead of an inert loss rule.
     /// </summary>
     public double? LastAccountPnl { get; set; }
+
+    // --- Anti-tilt episode ---
+    //
+    // Persisted for the same reason the lock is: restarting the bridge must not be a way to skip a
+    // pause. The contextual conditions (averaging, contract cap) are deliberately absent — they are
+    // recomputed from the live position on every state update, so they have nothing to survive.
+
+    /// <summary>End of the running episode. Null when no episode is open.</summary>
+    public DateTime? TiltUntilUtc { get; set; }
+
+    /// <summary>What opened the running episode: "sizeEscalation", "giveBack" or "consecutiveLosses".</summary>
+    public string TiltReason { get; set; } = string.Empty;
+
+    /// <summary>Account realized P&amp;L observed at the start of <see cref="TradingDay"/>.</summary>
+    public double? BaselineRealizedPnl { get; set; }
+
+    /// <summary>
+    /// Highest session REALIZED P&amp;L reached during <see cref="TradingDay"/>, measured from
+    /// <see cref="BaselineRealizedPnl"/>. Realized and not realized+unrealized on purpose: a single
+    /// trade running to +200 and retracing would otherwise register as a 200 give-back, and the
+    /// rule would fire on every trade that breathes.
+    /// </summary>
+    public double HighWaterRealizedPnl { get; set; }
+
+    /// <summary>Losing trades closed back to back. Reset by any winner.</summary>
+    public int ConsecutiveLosses { get; set; }
+
+    /// <summary>Quantity of the last trade opened, used as the reference for size escalation.</summary>
+    public int LastTradeQuantity { get; set; }
+
+    /// <summary>Whether the last trade closed at a loss. Escalation only counts after a loss.</summary>
+    public bool LastTradeWasLoss { get; set; }
+}
+
+/// <summary>
+/// Partial update of the safety settings: every field is optional and only the ones supplied are
+/// applied. Grouped into an object rather than eleven positional parameters, which is where the
+/// previous signature was heading once the anti-tilt rules arrived.
+/// </summary>
+public sealed class SafetyConfigUpdate
+{
+    public int? MaxTradesWhenLosing { get; set; }
+    public double? DailyLossLimit { get; set; }
+    public int? MaxContracts { get; set; }
+    public double? LockDurationHours { get; set; }
+    public bool? AntiTiltEnabled { get; set; }
+    public bool? TiltAveragingAllowed { get; set; }
+    public bool? TiltAdvanced { get; set; }
+    public int? TiltHoldSeconds { get; set; }
+    public double? TiltEpisodeMinutes { get; set; }
+
+    /// <summary>True when the caller supplied nothing at all — the router rejects that outright.</summary>
+    public bool IsEmpty =>
+        MaxTradesWhenLosing == null && DailyLossLimit == null && MaxContracts == null &&
+        LockDurationHours == null && AntiTiltEnabled == null && TiltAveragingAllowed == null &&
+        TiltAdvanced == null && TiltHoldSeconds == null && TiltEpisodeMinutes == null;
 }
 
 /// <summary>
@@ -62,6 +170,17 @@ public sealed class SafetyStatus
     public double LockDurationHours { get; set; }
     public int MaxTradesWhenLosing { get; set; }
     public double DailyLossLimit { get; set; }
+
+    /// <summary>Contracts the account may hold. 0 = rule off.</summary>
+    public int MaxContracts { get; set; }
+
+    /// <summary>
+    /// The position is already at or above the cap, so anything that grows it is refused.
+    /// Published apart from <see cref="EntriesBlocked"/> because it is a normal state, not an
+    /// incident: only the keys that would add to the position react to it.
+    /// </summary>
+    public bool AtContractCap { get; set; }
+
     public int TradeCount { get; set; }
     public double SessionPnl { get; set; }
 
@@ -71,8 +190,38 @@ public sealed class SafetyStatus
     /// <summary>True when position-opening actions are currently refused.</summary>
     public bool EntriesBlocked { get; set; }
 
-    /// <summary>"", "dailyLoss" or "tradeLimit".</summary>
+    /// <summary>"", "dailyLoss" or "tradeLimit". The contract cap has its own flag above.</summary>
     public string BlockReason { get; set; } = string.Empty;
 
     public string TradingDay { get; set; } = string.Empty;
+
+    // --- Anti-tilt ---
+
+    /// <summary>Whether the anti-tilt rules are allowed to add friction at all.</summary>
+    public bool TiltEnabled { get; set; }
+
+    /// <summary>
+    /// True when the host must demand a long press before an entry leaves. False whenever the
+    /// friction is switched off, even if a criterion is currently met — the criterion still shows
+    /// through <see cref="TiltReason"/> and the log, which is what makes the disabled state usable
+    /// as an observation mode.
+    /// </summary>
+    public bool TiltActive { get; set; }
+
+    /// <summary>Seconds left on the running episode. 0 for the contextual conditions, which end
+    /// with the situation rather than with a clock.</summary>
+    public int TiltSecondsRemaining { get; set; }
+
+    /// <summary>"", "sizeEscalation", "giveBack", "consecutiveLosses", "averaging" or "maxContracts".</summary>
+    public string TiltReason { get; set; } = string.Empty;
+
+    /// <summary>
+    /// "all" for episodes, which describe the trader and therefore gate every entry.
+    /// "increaseOnly" for the contextual conditions, which describe the position: refusing to
+    /// speed up an order that REDUCES an oversized position would be exactly backwards.
+    /// </summary>
+    public string TiltScope { get; set; } = string.Empty;
+
+    /// <summary>How long an entry key must be held while the friction applies.</summary>
+    public int TiltHoldSeconds { get; set; }
 }

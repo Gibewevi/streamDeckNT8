@@ -263,12 +263,20 @@ public sealed class StateManager
                 // open or a close that never occurred.
                 if (previousKnown)
                 {
-                    // Detect position closed with a loss → trigger cooldown
-                    if (_cooldownEnabled && _previousPositionExists && !currentExists && _previousUnrealizedPnl < 0)
+                    if (_previousPositionExists && !currentExists)
                     {
-                        _cooldownUntil = DateTime.UtcNow.AddSeconds(_cooldownSeconds);
-                        _logger.LogWarning("Cooldown activated for {Secs}s after losing trade (PnL: {Pnl})",
-                            _cooldownSeconds, _previousUnrealizedPnl);
+                        // Detect position closed with a loss → trigger cooldown
+                        if (_cooldownEnabled && _previousUnrealizedPnl < 0)
+                        {
+                            _cooldownUntil = DateTime.UtcNow.AddSeconds(_cooldownSeconds);
+                            _logger.LogWarning("Cooldown activated for {Secs}s after losing trade (PnL: {Pnl})",
+                                _cooldownSeconds, _previousUnrealizedPnl);
+                        }
+
+                        // The anti-tilt counters are told about EVERY close, winners included, and
+                        // regardless of whether the cooldown is switched on: a winner is what
+                        // resets the losing streak, so skipping it would leave the streak stuck.
+                        _safety.RecordTradeClosed(_previousUnrealizedPnl);
                     }
 
                     // Flat → open on the same instrument counts as one trade for the safety macro.
@@ -277,9 +285,19 @@ public sealed class StateManager
                     if (!_previousPositionExists && currentExists &&
                         string.Equals(previousInstrument, _previousPositionInstrument, StringComparison.OrdinalIgnoreCase))
                     {
-                        _safety.RecordTradeOpened();
+                        _safety.RecordTradeOpened(_state.Position?.Quantity ?? 0);
                     }
                 }
+
+                // Feeds the contextual anti-tilt conditions (averaging down, contract cap). Kept
+                // out of the previousKnown guard because it describes the position as it is now,
+                // not a transition — but only called when NT8 actually published one, so an
+                // unresolved context leaves the conditions untouched instead of clearing them.
+                _safety.UpdatePositionContext(
+                    currentExists,
+                    _state.Position?.Quantity ?? 0,
+                    _state.Position?.Direction ?? "Flat",
+                    _state.Position?.UnrealizedPnl ?? 0);
 
                 _previousPositionKnown = true;
             }
@@ -413,7 +431,11 @@ public sealed class StateManager
         if (realized == null && unrealized == null)
             return;
 
-        _safety.UpdatePnl((realized ?? 0) + (unrealized ?? 0));
+        // Realized is forwarded on its own as well as inside the sum. The loss rules want the sum
+        // (an open loser counts against you), but the anti-tilt give-back rule needs realized
+        // alone: a high-water mark taken on realized+unrealized would score every trade that runs
+        // up and retraces as a give-back, and fire on ordinary price movement.
+        _safety.UpdatePnl((realized ?? 0) + (unrealized ?? 0), realized);
     }
 
     private static string ReadInstrumentName(JsonElement statePayload)
