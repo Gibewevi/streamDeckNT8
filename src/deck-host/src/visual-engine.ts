@@ -145,11 +145,19 @@ function formatSafetyDetail(safety: SafetyStatus): string {
 /**
  * Ce qu'une touche d'entrée doit afficher à la place de son libellé normal.
  * La macro de sécurité prime sur la temporisation, car c'est la règle que le trader ne peut pas
- * lever. `dimmed` distingue un blocage réel (la touche ne fait rien) d'un simple avis transitoire
- * (la touche fonctionne toujours) — une touche grisée ne doit jamais vouloir dire
- * « votre ordre a été rejeté ».
+ * lever. Le `tone` ci-dessous distingue un blocage réel d'un simple avis transitoire : une touche
+ * éteinte ne doit jamais vouloir dire « votre ordre a été rejeté ».
  */
-type EntryStatus = { label: string; dimmed: boolean } | null;
+/**
+ * `tone` distingue trois situations que le seul libellé ne suffit pas à séparer d'un coup d'œil :
+ *
+ *   refuse — Guard ou la temporisation refusent : rouge franc, c'est exceptionnel et coûteux à manquer ;
+ *   muted  — le plafond de contrats est atteint : la touche ne part pas, mais détenir sa taille
+ *            habituelle n'est PAS un incident. Un rouge permanent à chaque position finirait par
+ *            ne plus rien vouloir dire, et masquerait un vrai blocage le jour où il arrive ;
+ *   notice — avis non bloquant (appui long anti-tilt, rejet NT8) : la touche part encore.
+ */
+type EntryStatus = { label: string; tone: 'refuse' | 'muted' | 'notice' } | null;
 
 /**
  * Les cinq actions qui ouvrent ou retournent une position. Miroir exact de
@@ -200,27 +208,80 @@ function entryStatus(state: TradingState, ctx: VisualContext, actionId: string):
   if (state.safety?.entriesBlocked) {
     return {
       label: state.safety.blockReason === 'dailyLoss' ? 'LOSS LIMIT' : 'MAX TRADES',
-      dimmed: true,
+      tone: 'refuse',
     };
   }
-  // Plafond de contrats atteint. Seules les touches qui feraient GROSSIR la position sont grisées :
-  // griser celle qui permet d'en sortir laisserait croire qu'on est coincé dedans. La touche
-  // Sécurité, elle, ne bronche pas — être à sa taille normale n'est pas un incident.
+  // Plafond de contrats atteint. Seules les touches qui feraient GROSSIR la position réagissent :
+  // celle qui permet d'en sortir reste intacte, sans quoi on croirait y être coincé.
   if (state.safety?.atContractCap && augmenteExposition(actionId, state)) {
-    return { label: 'MAX QTY', dimmed: true };
+    return { label: 'MAX QTY', tone: 'muted' };
   }
-  if (state.cooldownActive) return { label: 'BLOCKED', dimmed: true };
+  if (state.cooldownActive) return { label: 'BLOCKED', tone: 'refuse' };
   // Anti-Tilt : la touche fonctionne toujours, elle exige seulement d'être tenue. Jamais grisée
   // donc — le gris est réservé à ce qui ne part pas — et affichée après les deux vrais blocages,
   // qui priment parce qu'aucun maintien ne les lèvera.
   if (tiltAppliesTo(actionId, state)) {
-    return { label: `HOLD ${state.safety.tiltHoldSeconds}s`, dimmed: false };
+    return { label: `HOLD ${state.safety.tiltHoldSeconds}s`, tone: 'notice' };
   }
   // NinjaTrader a refusé le dernier ordre : on prévient, mais la touche reste utilisable.
   if (ctx.lastRejectionAt && Date.now() - ctx.lastRejectionAt < REJECTION_BANNER_MS) {
-    return { label: 'REJECTED', dimmed: false };
+    return { label: 'REJECTED', tone: 'notice' };
   }
   return null;
+}
+
+/**
+ * Visuel d'une touche d'entrée.
+ *
+ * Achat et vente ne se distinguent plus par la teinte mais par l'INVERSION : l'achat est orange
+ * plein à texte blanc, la vente est noire à titre orange. Libérer le vert et le rouge est ce qui
+ * permet au rouge de ne plus signifier que le refus, partout sur le deck.
+ */
+function entryVisual(
+  titre: string,
+  sens: 'Buy' | 'Sell',
+  qty: number,
+  state: TradingState,
+  ctx: VisualContext,
+  actionId: string,
+): ButtonVisual {
+  const st = entryStatus(state, ctx, actionId);
+
+  // Refus : la touche ne partira pas. Seul endroit de la charte où une couleur d'alerte subsiste.
+  if (st?.tone === 'refuse') {
+    return { title: titre, subtitle: st.label, bgColor: Colors.refuse, textColor: Colors.textWhite };
+  }
+
+  // Plafond atteint : la touche ne part pas non plus, mais sans alarme. Elle s'éteint.
+  if (st?.tone === 'muted') {
+    return { title: titre, subtitle: st.label, bgColor: Colors.black, textColor: Colors.textDim, subtitleColor: Colors.textDim };
+  }
+
+  const connected = ctx.bridgeConnected && state.ntConnected;
+  const accent = connected ? Colors.orange : Colors.orangeDim;
+  const achat = sens === 'Buy';
+
+  // Un avis non bloquant (HOLD, REJECTED) remplace la quantité : la touche part encore, et c'est
+  // l'avis qui doit se lire, pas la taille.
+  const base = st?.label
+    ? { subtitle: st.label, subtitleAccent: undefined }
+    : { subtitle: `${sens} `, subtitleAccent: `×${qty}` };
+
+  return achat
+    ? {
+        title: titre, ...base,
+        bgColor: accent,
+        textColor: Colors.textWhite,
+        subtitleColor: Colors.textWhite,
+        accentColor: Colors.textWhite,
+      }
+    : {
+        title: titre, ...base,
+        bgColor: Colors.black,
+        textColor: accent,
+        subtitleColor: connected ? Colors.textWhite : Colors.textDim,
+        accentColor: accent,
+      };
 }
 
 export function computeVisual(
@@ -236,49 +297,27 @@ export function computeVisual(
   const defQty = state.defaultQuantity ?? ctx.defaultQuantity;
 
   switch (actionId) {
-    case 'com.trader.ninjatrader.buymarket': {
-      const st = entryStatus(state, ctx, actionId);
-      return {
-        title: 'MKT', subtitle: st?.label ?? `Buy ×${qty}`,
-        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
-        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
-      };
-    }
-    case 'com.trader.ninjatrader.sellmarket': {
-      const st = entryStatus(state, ctx, actionId);
-      return {
-        title: 'MKT', subtitle: st?.label ?? `Sell ×${qty}`,
-        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
-        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
-      };
-    }
-    case 'com.trader.ninjatrader.buylimit': {
-      const st = entryStatus(state, ctx, actionId);
-      return {
-        title: 'LMT', subtitle: st?.label ?? `Buy ×${qty}`,
-        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.buyGreen : Colors.buyGreenDim),
-        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
-      };
-    }
-    case 'com.trader.ninjatrader.selllimit': {
-      const st = entryStatus(state, ctx, actionId);
-      return {
-        title: 'LMT', subtitle: st?.label ?? `Sell ×${qty}`,
-        bgColor: st?.dimmed ? Colors.disabled : (connected ? Colors.sellRed : Colors.sellRedDim),
-        textColor: st?.dimmed ? Colors.textDim : '#FFFFFF',
-      };
-    }
+    case 'com.trader.ninjatrader.buymarket':
+      return entryVisual('MKT', 'Buy', qty, state, ctx, actionId);
+    case 'com.trader.ninjatrader.sellmarket':
+      return entryVisual('MKT', 'Sell', qty, state, ctx, actionId);
+    case 'com.trader.ninjatrader.buylimit':
+      return entryVisual('LMT', 'Buy', qty, state, ctx, actionId);
+    case 'com.trader.ninjatrader.selllimit':
+      return entryVisual('LMT', 'Sell', qty, state, ctx, actionId);
     // « FLAT » et non « Close » : la touche voisine (cancelOrders) affiche déjà CLOSE, et deux
     // libellés identiques sur des commandes différentes est un piège en séance.
     case 'com.trader.ninjatrader.flatten':
-      return { title: 'FLAT', subtitle: `Qty ${pos?.quantity ?? 0}`, bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'FLAT', subtitle: `Qty ${pos?.quantity ?? 0}`, bgColor: Colors.white, textColor: Colors.textBlack };
 
     case 'com.trader.ninjatrader.cancelorders': {
+      // Orange et non rouge quand une position existe : c'est une touche qui AGIT, et le rouge de
+      // la charte ne désigne que ce qui refuse de partir.
       const posQty = Math.abs(pos?.quantity ?? 0);
       return {
         title: 'QTY_CANCEL', subtitle: posQty > 0 ? `${posQty}` : '0',
-        bgColor: posQty > 0 ? Colors.sellRed : '#FFFFFF',
-        textColor: posQty > 0 ? '#FFFFFF' : '#000000',
+        bgColor: posQty > 0 ? Colors.orange : Colors.white,
+        textColor: posQty > 0 ? Colors.textWhite : Colors.textBlack,
       };
     }
     case 'com.trader.ninjatrader.cancelworkingorders': {
@@ -286,8 +325,8 @@ export function computeVisual(
       const orders = pos?.activeOrderCount ?? 0;
       return {
         title: 'CANCEL', subtitle: orders > 0 ? `${orders} order${orders > 1 ? 's' : ''}` : 'none',
-        bgColor: orders > 0 ? Colors.cancelYellow : Colors.cancelYellowDim,
-        textColor: orders > 0 ? '#000000' : Colors.textDim,
+        bgColor: orders > 0 ? Colors.orange : Colors.black,
+        textColor: orders > 0 ? Colors.textWhite : Colors.textDim,
       };
     }
     case 'com.trader.ninjatrader.reverse': {
@@ -295,38 +334,38 @@ export function computeVisual(
       const st = entryStatus(state, ctx, actionId);
       return {
         title: 'Invert', subtitle: st?.label ?? `Qty ${pos?.quantity ?? 0}`,
-        bgColor: st?.dimmed ? Colors.disabled : '#FFFFFF',
-        textColor: st?.dimmed ? Colors.textDim : '#000000',
+        bgColor: st?.tone === 'refuse' ? Colors.refuse : st?.tone === 'muted' ? Colors.black : Colors.white,
+        textColor: st?.tone === 'refuse' ? Colors.textWhite : st?.tone === 'muted' ? Colors.textDim : Colors.textBlack,
       };
     }
     case 'com.trader.ninjatrader.breakeven': {
       const offset = (settings.offsetTicks as number) ?? 0;
-      return { title: 'BE', subtitle: `+${offset}`, bgColor: Colors.flattenOrange, textColor: Colors.textWhite };
+      return { title: 'BE', subtitle: `+${offset}`, bgColor: Colors.orange, textColor: Colors.textWhite };
     }
 
     case 'com.trader.ninjatrader.stopplus':
-      return { title: 'QTY_STOP_UP', subtitle: '1', bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_STOP_UP', subtitle: '1', bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.stopminus':
-      return { title: 'QTY_STOP_DN', subtitle: '1', bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_STOP_DN', subtitle: '1', bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.targetplus':
-      return { title: 'QTY_TARGET_UP', subtitle: '1', bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_TARGET_UP', subtitle: '1', bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.targetminus':
-      return { title: 'QTY_TARGET_DN', subtitle: '1', bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_TARGET_DN', subtitle: '1', bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.beplus':
-      return { title: 'QTY_BE_UP', subtitle: '1', bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_BE_UP', subtitle: '1', bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.beminus':
-      return { title: 'QTY_BE_DN', subtitle: '1', bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_BE_DN', subtitle: '1', bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.qtyplus':
-      return { title: 'QTY_PLUS', subtitle: `${qty}`, bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_PLUS', subtitle: `${qty}`, bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.qtyminus':
-      return { title: 'QTY_MINUS', subtitle: `${qty}`, bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_MINUS', subtitle: `${qty}`, bgColor: Colors.white, textColor: Colors.textBlack };
     case 'com.trader.ninjatrader.qtyreset':
-      return { title: 'QTY_RESET', subtitle: `${defQty}`, bgColor: '#FFFFFF', textColor: '#000000' };
+      return { title: 'QTY_RESET', subtitle: `${defQty}`, bgColor: Colors.white, textColor: Colors.textBlack };
 
     case 'com.trader.ninjatrader.instrument': {
       const cfgInstrument = (settings.instrument as string) || '';
       if (!cfgInstrument) {
-        return { title: '---', subtitle: 'Config requis', bgColor: Colors.instrumentIndigo, textColor: Colors.textDim };
+        return { title: '---', subtitle: 'Config requis', bgColor: Colors.black, textColor: Colors.textDim };
       }
       const displayLabel = (settings.displayLabel as string) || cfgInstrument;
       // Correspondance sur la racine : « MNQ » correspond à « MNQ 06-25 », ou égalité stricte.
@@ -344,8 +383,8 @@ export function computeVisual(
       return {
         title: displayLabel,
         subtitle: isActive ? (pctText || 'ACTIVE') : 'INACTIVE',
-        bgColor: isActive ? Colors.instrumentActive : Colors.disabled,
-        textColor: isActive ? Colors.textGold : Colors.textDim,
+        bgColor: isActive ? Colors.orange : Colors.black,
+        textColor: Colors.textWhite,
       };
     }
     case 'com.trader.ninjatrader.account': {
@@ -354,35 +393,32 @@ export function computeVisual(
       return {
         title: formatAccountLabel(currentAccount),
         subtitle: isActive ? 'ACTIVE' : 'INACTIVE',
-        bgColor: isActive ? Colors.instrumentActive : Colors.disabled,
-        textColor: isActive ? Colors.textGold : Colors.textDim,
+        bgColor: isActive ? Colors.orange : Colors.black,
+        textColor: Colors.textWhite,
       };
     }
     case 'com.trader.ninjatrader.status': {
       const statusType = (settings.statusType as StatusType) || 'connection';
       const { title, subtitle } = getDisplayText(statusType, state);
+      // Indicateurs : orange quand il y a quelque chose en cours, noir au repos. Le P&L et la
+      // position abandonnent le vert/rouge — le signe et le chiffre portent seuls le résultat,
+      // et le rouge reste ainsi réservé à ce qui refuse de partir.
       let bgColor: string;
       switch (statusType) {
-        case 'account': bgColor = Colors.statusDark; break;
-        case 'instrument': bgColor = Colors.instrumentIndigo; break;
-        case 'position': {
-          const dir = pos?.direction;
-          bgColor = dir === 'Long' ? Colors.buyGreen : dir === 'Short' ? Colors.sellRed : Colors.statusDark;
-          break;
-        }
-        case 'pnl': {
-          const pnl = pos?.unrealizedPnl ?? 0;
-          bgColor = pnl > 0 ? Colors.buyGreen : pnl < 0 ? Colors.sellRed : Colors.statusDark;
-          break;
-        }
-        case 'quantity': bgColor = Colors.qtySlate; break;
-        case 'connection': bgColor = state.ntConnected ? Colors.buyGreen : Colors.sellRed; break;
+        case 'position': bgColor = pos?.exists ? Colors.orange : Colors.black; break;
+        case 'pnl': bgColor = pos?.exists ? Colors.orange : Colors.black; break;
+        case 'instrument': bgColor = state.instrument ? Colors.orange : Colors.black; break;
+        case 'account': bgColor = connected && state.account ? Colors.orange : Colors.black; break;
+        case 'quantity': bgColor = Colors.black; break;
+        // La déconnexion de NinjaTrader est le seul état d'indicateur qui mérite le rouge : rien
+        // ne peut plus partir, ce qui est bien un refus — et le manquer coûte une séance.
+        case 'connection': bgColor = state.ntConnected ? Colors.orange : Colors.refuse; break;
         case 'safety': {
           const safety = state.safety;
-          bgColor = !safety?.armed ? Colors.disabled : safety.entriesBlocked ? Colors.sellRed : Colors.buyGreen;
+          bgColor = !safety?.armed ? Colors.black : safety.entriesBlocked ? Colors.refuse : Colors.orange;
           break;
         }
-        default: bgColor = Colors.statusDark;
+        default: bgColor = Colors.black;
       }
       return { title, subtitle, bgColor, textColor: Colors.textWhite };
     }
@@ -391,7 +427,7 @@ export function computeVisual(
       const active = state.cooldownActive ?? false;
       const secs = state.cooldownSecondsRemaining ?? 0;
       if (active) {
-        return { title: 'COUNTDOWN', subtitle: `${secs}`, bgColor: Colors.sellRed, textColor: '#FFFFFF' };
+        return { title: 'COUNTDOWN', subtitle: `${secs}`, bgColor: Colors.refuse, textColor: Colors.textWhite };
       }
       // Active, la touche affiche la durée réglée plutôt qu'un « ON » que le fond vert dit déjà.
       // C'est la seule façon de vérifier d'un coup d'œil, avant la séance, combien de temps la
@@ -399,8 +435,8 @@ export function computeVisual(
       // réglage local, qui pourrait ne pas lui avoir été transmis.
       return {
         title: 'SEC', subtitle: enabled ? formatDuree(state.cooldownSeconds ?? 60) : 'OFF',
-        bgColor: enabled ? Colors.buyGreen : Colors.disabled,
-        textColor: enabled ? '#FFFFFF' : Colors.textDim,
+        bgColor: enabled ? Colors.orange : Colors.black,
+        textColor: Colors.textWhite,
       };
     }
     case 'com.trader.ninjatrader.safety': {
@@ -408,7 +444,7 @@ export function computeVisual(
       // Le mode développement lève la seule garantie de cette macro : il doit se voir sur la
       // touche elle-même, pas uniquement dans un formulaire de réglages qu'on n'ouvre jamais.
       const dev = settings.devMode === true;
-      const marque = dev ? { badge: 'DEV', badgeColor: Colors.cancelYellow } : {};
+      const marque = dev ? { badge: 'DEV', badgeColor: Colors.orange } : {};
 
       // Un ordre passé à la main dans NinjaTrader vient d'être annulé. Prime sur tout le reste :
       // c'est la seule chose qui, à cet instant, mérite le regard du trader.
@@ -417,7 +453,7 @@ export function computeVisual(
           ...marque,
           title: 'SAFETY:STOP', subtitle: 'MANUEL',
           detail: 'ORDRE ANNULE',
-          bgColor: Colors.sellRed, textColor: Colors.textWhite,
+          bgColor: Colors.refuse, textColor: Colors.textWhite,
         };
       }
 
@@ -427,7 +463,7 @@ export function computeVisual(
         return {
           ...marque,
           title: 'SAFETY:GUARD', subtitle: 'OFF',
-          bgColor: Colors.disabled, textColor: Colors.textDim,
+          bgColor: Colors.black, textColor: Colors.textWhite,
         };
       }
 
@@ -438,13 +474,14 @@ export function computeVisual(
           title: safety.blockReason === 'dailyLoss' ? 'SAFETY:LOSS' : 'SAFETY:MAX',
           subtitle: formatLockRemaining(safety.lockSecondsRemaining),
           detail: formatSafetyDetail(safety),
-          bgColor: Colors.sellRed, textColor: Colors.textWhite,
+          bgColor: Colors.refuse, textColor: Colors.textWhite,
         };
       }
 
-      // Anti-Tilt en cours. Jaune et non rouge, délibérément : le rouge de la touche veut dire
-      // « refusé » partout ailleurs, et ici rien n'est refusé — les entrées partent encore, il faut
-      // seulement les tenir. Placé après le blocage réel, qui prime parce qu'aucun appui ne le lèvera.
+      // Anti-Tilt en cours. Ni rouge ni orange plein, délibérément : le rouge veut dire « refusé »
+      // partout ailleurs et ici rien ne l'est — les entrées partent encore, il faut seulement les
+      // tenir. L'inversion (noir à texte orange) la distingue aussi bien du blocage rouge que de
+      // la macro simplement armée. Placée après le blocage réel, qui prime : aucun appui ne le lève.
       if (safety.tiltActive) {
         return {
           ...marque,
@@ -453,11 +490,11 @@ export function computeVisual(
           // la position qui l'a produite. Afficher « 0s » laisserait croire qu'elle vient de finir.
           subtitle: safety.tiltSecondsRemaining > 0 ? formatLockRemaining(safety.tiltSecondsRemaining) : 'HOLD',
           detail: motifTilt(safety.tiltReason),
-          bgColor: Colors.cancelYellow, textColor: '#000000',
+          bgColor: Colors.black, textColor: Colors.orange, subtitleColor: Colors.textWhite,
         };
       }
 
-      // Armée et rien à signaler. Le fond vert dit déjà que la protection est active : la place
+      // Armée et rien à signaler. Le fond orange dit déjà que la protection est active : la place
       // de la deuxième ligne sert donc à ce qui change, le temps de verrou restant, plutôt qu'à
       // un « ON » qui répète la couleur.
       //
@@ -469,7 +506,7 @@ export function computeVisual(
         title: 'SAFETY:GUARD',
         subtitle: formatLockRemaining(safety.lockSecondsRemaining),
         detail: formatSafetyRestant(safety),
-        bgColor: Colors.buyGreen, textColor: Colors.textWhite,
+        bgColor: Colors.orange, textColor: Colors.textWhite,
       };
     }
 
@@ -480,17 +517,17 @@ export function computeVisual(
       if (!ctx.autoBe.actif) {
         return {
           title: 'AUTOBE', subtitle: 'OFF',
-          bgColor: Colors.disabled, textColor: Colors.textDim,
+          bgColor: Colors.black, textColor: Colors.textWhite,
         };
       }
       if (ctx.autoBe.pose) {
-        return { title: 'AUTOBE', subtitle: 'POSE', bgColor: Colors.buyGreen, textColor: Colors.textWhite };
+        return { title: 'AUTOBE', subtitle: 'POSE', bgColor: Colors.orange, textColor: Colors.textWhite };
       }
       // Armé et en attente : afficher la progression vers le seuil est ce qui permet de savoir
       // que l'automatisme suit réellement la position.
       const gain = gainEnTicks(state);
       const attente = gain === null ? 'ARME' : `${Math.floor(gain)}/${declenchement}`;
-      return { title: 'AUTOBE', subtitle: attente, bgColor: Colors.beBlue, textColor: Colors.textWhite };
+      return { title: 'AUTOBE', subtitle: attente, bgColor: Colors.orange, textColor: Colors.textWhite };
     }
 
     // Action propre à l'hôte : la navigation entre pages était assurée par les touches
@@ -504,8 +541,8 @@ export function computeVisual(
       return {
         title: (settings.label as string) || auto,
         subtitle: detail,
-        bgColor: Colors.reverseViolet,
-        textColor: '#FFFFFF',
+        bgColor: Colors.black,
+        textColor: Colors.textWhite,
       };
     }
 

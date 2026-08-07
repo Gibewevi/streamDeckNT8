@@ -7,37 +7,37 @@
  * This module generates SVG strings that encode color, text, and state.
  */
 
-// Color palette — trading cockpit theme
+/**
+ * Charte du deck — trois couleurs, plus une.
+ *
+ *   ORANGE : la touche est engagée — un achat, l'instrument suivi, un automatisme armé.
+ *   BLANC  : utilitaire neutre — quantité, ajustement d'une protection, fermeture.
+ *   NOIR   : au repos, éteint, inactif.
+ *   ROUGE  : la SEULE couleur d'alerte conservée, et elle ne dit qu'une chose — cette touche
+ *            REFUSE de partir.
+ *
+ * Le rouge survit à la charte pour une raison précise : le noir devient ici la couleur la plus
+ * fréquente du deck, et un refus qui se lirait « noir au texte grisé » se confondrait avec une
+ * touche simplement au repos. C'est l'information la plus coûteuse à manquer en séance.
+ *
+ * Achat et vente ne se distinguent plus par la teinte mais par l'INVERSION : l'achat est orange
+ * plein, la vente est noire à titre orange. Le vert et le rouge d'origine sont ainsi libérés,
+ * le rouge pouvant alors ne signifier que le refus.
+ */
 export const Colors = {
-  // Backgrounds
-  buyGreen: '#1DA81D',
-  buyGreenDim: '#0F5C0F',
-  sellRed: '#D13B3B',
-  sellRedDim: '#7A2222',
-  flattenOrange: '#E65100',
-  flattenOrangeDim: '#6D2600',
-  cancelYellow: '#F9A825',
-  cancelYellowDim: '#6D4A00',
-  reverseViolet: '#7B1FA2',
-  reverseVioletDim: '#3A0E4D',
-  beBlue: '#1565C0',
-  beBlueDim: '#0A2F5C',
-  stopAmber: '#FF8F00',
-  stopAmberDim: '#6D3D00',
-  targetTeal: '#00838F',
-  targetTealDim: '#003D42',
-  qtySlate: '#455A64',
-  qtySlateDim: '#1C2529',
-  qtyActive: '#00ACC1',
-  instrumentIndigo: '#283593',
-  instrumentActive: '#3F51B5',
-  statusDark: '#212121',
-  connected: '#4CAF50',
-  disconnected: '#F44336',
-  disabled: '#424242',
+  orange: '#F07520',
+  /** Orange atténué : le bridge ou NinjaTrader manque, la touche ne peut rien produire. */
+  orangeDim: '#6B3410',
+  white: '#FFFFFF',
+  /** Noir des touches, volontairement au-dessus du noir pur qui « troue » l'écran du boîtier. */
+  black: '#141414',
+
+  /** Refus. Ne jamais l'employer pour autre chose, sous peine de lui retirer son sens. */
+  refuse: '#D13B3B',
+
   textWhite: '#FFFFFF',
-  textDim: '#757575',
-  textGold: '#FFD54F',
+  textBlack: '#000000',
+  textDim: '#6E6E6E',
 } as const;
 
 export interface ButtonVisual {
@@ -46,6 +46,13 @@ export interface ButtonVisual {
   textColor: string;
   subtitle?: string;
   subtitleColor?: string;
+  /**
+   * Fin de sous-titre rendue dans une autre couleur, à la suite du sous-titre et sur la même
+   * ligne. Sert à la quantité des touches d'entrée (« Sell » blanc, « ×1 » orange), que la
+   * charte accentue pour la rendre lisible d'un coup d'œil sans agrandir le texte.
+   */
+  subtitleAccent?: string;
+  accentColor?: string;
   detail?: string;      // third line, used by the 3-line layouts
   badge?: string;       // small indicator top-right
   badgeColor?: string;
@@ -82,7 +89,7 @@ export function renderButtonSvg(visual: ButtonVisual): string {
   // marquer un mode qui lève une protection.
   let badgeSvg = '';
   if (visual.badge) {
-    const bc = esc(visual.badgeColor || Colors.connected);
+    const bc = esc(visual.badgeColor || Colors.orange);
     if (visual.badge.length <= 1) {
       badgeSvg = `<circle cx="124" cy="20" r="8" fill="${bc}"/>`;
     } else {
@@ -101,15 +108,18 @@ export function renderButtonSvg(visual: ButtonVisual): string {
     const isStop = t.startsWith('QTY_STOP_');
     const isBE = t.startsWith('QTY_BE_');
     const label = isStop ? 'Stop' : isBE ? 'BE' : 'Target';
+    // Triangle PLEIN de la couleur du texte, chiffre creusé dedans dans la couleur du fond.
+    // L'ancien triangle gris translucide avec le chiffre par-dessus se lisait mal : à 144 px le
+    // contraste d'un aplat vaut mieux qu'une superposition.
     const arrow = isUp
-      ? `<polygon points="72,42 108,96 36,96" fill="#AAAAAA" opacity="0.55"/>`
-      : `<polygon points="72,96 108,42 36,42" fill="#AAAAAA" opacity="0.55"/>`;
-    const textY = isUp ? 82 : 69;
+      ? `<polygon points="72,40 110,98 34,98" fill="${tc}"/>`
+      : `<polygon points="72,98 110,40 34,40" fill="${tc}"/>`;
+    const textY = isUp ? 84 : 68;
     contentSvg = `
       <text x="72" y="28" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="${tc}">${label}</text>
       ${arrow}
-      <text x="72" y="${textY}" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="24" font-weight="bold" fill="${tc}">${sub}</text>
-      <text x="72" y="124" text-anchor="middle" font-family="sans-serif" font-size="18" fill="#000000">ticks</text>`;
+      <text x="72" y="${textY}" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="24" font-weight="bold" fill="${bg}">${sub}</text>
+      <text x="72" y="126" text-anchor="middle" font-family="sans-serif" font-size="18" fill="${tc}">ticks</text>`;
 
   } else if (t === 'QTY_CANCEL') {
     // Le nombre est la TAILLE DE LA POSITION, pas un nombre d'ordres : la mention « orders »
@@ -135,11 +145,14 @@ export function renderButtonSvg(visual: ButtonVisual): string {
 
   } else if (t.startsWith('SAFETY')) {
     // Safety macro — status word ("SAFETY:<word>"), lock countdown, then trades / session P&L
+    // Le mot-clé domine le sous-titre, comme sur toutes les autres touches : c'est lui qui dit
+    // l'état, le décompte n'est qu'un complément. L'inverse donnait une touche où « OFF » criait
+    // plus fort que « GUARD ».
     const word = esc(t.split(':')[1] || 'GUARD');
     contentSvg = `
-      <text x="72" y="42" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="bold" fill="${tc}">${word}</text>
-      <text x="72" y="86" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${sub}</text>
-      <text x="72" y="122" text-anchor="middle" font-family="sans-serif" font-size="18" fill="${sc}">${esc(visual.detail || '')}</text>`;
+      <text x="72" y="46" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${word}</text>
+      <text x="72" y="88" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="bold" fill="${sc}">${sub}</text>
+      <text x="72" y="122" text-anchor="middle" font-family="sans-serif" font-size="17" fill="${sc}">${esc(visual.detail || '')}</text>`;
 
   } else if (t === 'COUNTDOWN') {
     // Cooldown countdown. Sous Elgato ce SVG restait vide : le gros chiffre venait de setTitle,
@@ -160,10 +173,15 @@ export function renderButtonSvg(visual: ButtonVisual): string {
 
   } else {
     // Standard layout: title centered, subtitle below
-    if (sub) {
+    if (sub || visual.subtitleAccent) {
+      // Le `tspan` prolonge la même ligne : l'ancrage central s'applique à l'ensemble, la
+      // quantité reste donc collée au mot qu'elle complète quel que soit son nombre de chiffres.
+      const accent = visual.subtitleAccent
+        ? `<tspan fill="${esc(visual.accentColor || visual.subtitleColor || tc)}">${esc(visual.subtitleAccent)}</tspan>`
+        : '';
       contentSvg = `
         <text x="72" y="62" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${esc(t)}</text>
-        <text x="72" y="100" text-anchor="middle" font-family="sans-serif" font-size="20" fill="${sc}">${sub}</text>`;
+        <text x="72" y="100" text-anchor="middle" font-family="sans-serif" font-size="20" fill="${sc}">${sub}${accent}</text>`;
     } else {
       contentSvg = `
         <text x="72" y="84" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="bold" fill="${tc}">${esc(t)}</text>`;
@@ -182,7 +200,7 @@ export function renderButtonSvg(visual: ButtonVisual): string {
   }
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">
-  <rect width="144" height="144" rx="12" fill="${bg}"/>
+  <rect width="144" height="144" rx="20" fill="${bg}"/>
   ${contentSvg}
   ${badgeSvg}
   ${progressSvg}
@@ -217,7 +235,8 @@ export function buildTitle(visual: ButtonVisual): string {
   }
   if (visual.title === 'COUNTDOWN') return visual.subtitle || '';
   // Standard 2-line title
-  return visual.subtitle ? `${visual.title}\n${visual.subtitle}` : visual.title;
+  const sub = `${visual.subtitle ?? ''}${visual.subtitleAccent ?? ''}`;
+  return sub ? `${visual.title}\n${sub}` : visual.title;
 }
 
 
