@@ -8,67 +8,15 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import { dirname, join } from 'path';
 import * as log from './logger.js';
+import { Layout, Page, SlotAssignment, seedLayout } from './layout-model.js';
 
-/** Une touche affectée. `settings` est libre : le catalogue décrit les champs attendus. */
-export interface SlotAssignment {
-  actionId: string;
-  settings: Record<string, unknown>;
-}
-
-export interface Page {
-  name: string;
-  /** Indexé par numéro d'emplacement (0 = haut-gauche), en ligne d'abord. */
-  slots: Record<string, SlotAssignment>;
-}
-
-export interface Layout {
-  version: 1;
-  /** Modèle de deck ciblé, pour valider la taille de grille. */
-  device: { columns: number; rows: number };
-  brightness: number;
-  pages: Page[];
-}
+// Ré-exportés pour ne pas obliger les importeurs à connaître la scission.
+export { seedLayout };
+export type { Layout, Page, SlotAssignment };
 
 export const DEFAULT_DATA_DIR = join(process.env.APPDATA || process.cwd(), 'StreamDeckTrader');
 export const DEFAULT_LAYOUT_PATH = join(DEFAULT_DATA_DIR, 'layout.json');
 
-/**
- * Layout de démarrage : transcription exacte du profil Elgato actif au 31/07/2026,
- * pour que l'hôte démarre sur la configuration déjà en service plutôt qu'un deck vide.
- * Les coordonnées Elgato « colonne,ligne » sont converties en index `ligne * colonnes + colonne`.
- */
-export function seedLayout(columns = 5, rows = 3): Layout {
-  const at = (col: number, row: number) => String(row * columns + col);
-  const slots: Record<string, SlotAssignment> = {};
-  const put = (col: number, row: number, actionId: string, settings: Record<string, unknown> = {}) => {
-    slots[at(col, row)] = { actionId, settings };
-  };
-
-  put(0, 0, 'com.trader.ninjatrader.buymarket');
-  put(1, 0, 'com.trader.ninjatrader.qtyplus');
-  put(2, 0, 'com.trader.ninjatrader.buylimit');
-  put(3, 0, 'com.trader.ninjatrader.targetplus');
-  put(4, 0, 'com.trader.ninjatrader.targetminus');
-
-  put(0, 1, 'com.trader.ninjatrader.sellmarket');
-  put(1, 1, 'com.trader.ninjatrader.qtyminus');
-  put(2, 1, 'com.trader.ninjatrader.selllimit');
-  put(3, 1, 'com.trader.ninjatrader.beplus');
-  put(4, 1, 'com.trader.ninjatrader.beminus');
-
-  put(0, 2, 'com.trader.ninjatrader.breakeven', { offsetTicks: 8 });
-  put(1, 2, 'com.trader.ninjatrader.cancelorders');
-  put(2, 2, 'com.trader.ninjatrader.instrument', { instrument: 'MNQ', displayLabel: '' });
-  put(3, 2, 'com.trader.ninjatrader.account');
-  put(4, 2, 'com.trader.ninjatrader.cooldown');
-
-  return {
-    version: 1,
-    device: { columns, rows },
-    brightness: 80,
-    pages: [{ name: 'Page 1', slots }],
-  };
-}
 
 /**
  * Valide un layout venant d'une source non sûre, et rend une copie normalisée.
@@ -77,6 +25,17 @@ export function seedLayout(columns = 5, rows = 3): Layout {
  * était contrôlé auparavant, alors que le réseau est la source la moins fiable des deux : un
  * `saveLayout` avec `pages: []` passait, et `host.navigate` calculait alors `(0 + 1) % 0`, soit
  * `NaN`, ce qui figeait le deck.
+ *
+ * ---
+ * **Une seconde validation existe côté Bitlearn, et ce doublon est le dispositif — pas un défaut.**
+ *
+ * Voir `lib/tradeDeck/layout.js`. Elle est plus stricte de onze contrôles, parce qu'elle protège
+ * d'autre chose : un document hostile venu d'Internet et destiné à une colonne `Json` de
+ * PostgreSQL. Celle-ci protège d'un fichier local corrompu. Les deux s'appliquent **en série** —
+ * ce qui arrive de Bitlearn repasse ici (`bitlearn.ts`), et c'est voulu.
+ *
+ * Ce fichier n'est donc PAS dans l'ensemble partagé de `scripts/emit-shared.mjs`. Seul
+ * `layout-model.ts` (les types et la graine) l'est. Ne pas « unifier » par symétrie.
  */
 export function validateLayout(value: unknown): Layout {
   const l = value as Partial<Layout> | null;

@@ -10,16 +10,20 @@
  */
 import { BridgeClient } from './bridge-client.js';
 import {
-  DEFAULT_GLOBAL_SETTINGS, DEFAULT_SAFETY_STATUS, TradingState, OrderUpdate, GuardViolation, SafetyStatus, createCommand,
+  DEFAULT_GLOBAL_SETTINGS, DEFAULT_SAFETY_STATUS, DISCONNECTED_STATE, TradingState, OrderUpdate, GuardViolation, SafetyStatus, createCommand,
 } from './messages.js';
 import { DeckDevice } from './device.js';
 import { LayoutStore, SlotAssignment } from './layout.js';
 import { computeVisual, gainEnTicks, tiltAppliesTo, VIOLATION_BANNER_MS, VisualContext } from './visual-engine.js';
-import { renderButtonSvg } from './visuals.js';
+import { renderButtonDataUri } from './render-node.js';
 import { ConfigServer, UiSnapshot } from './server.js';
 import { BridgeSupervisor, neutraliserElgato } from './supervisor.js';
 import { empreinteDe, journaliserTransitions, journaliserConfiguration, Empreinte } from './transitions.js';
 import { actionName, CATALOG_BY_ID, HOLD_CONFIRM_MS } from './catalog.js';
+import { BitlearnClient } from './bitlearn.js';
+import { EventRecorder } from './journal.js';
+import { JournalUploader, comptesJournalises } from './uploader.js';
+import { hostname } from 'os';
 import * as log from './logger.js';
 
 const VERSION = '0.1.0';
@@ -30,17 +34,13 @@ const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
 log.installProcessHandlers();
 log.logSessionHeader(VERSION);
 
-const DISCONNECTED_STATE: TradingState = {
-  account: '', instrument: '', quantity: 1, defaultQuantity: 1,
-  ntConnected: false, pluginConnected: false, position: null, instrumentInfo: null,
-  availableAccounts: [], cooldownEnabled: false, cooldownActive: false,
-  cooldownSecondsRemaining: 0, cooldownSeconds: 60, safety: { ...DEFAULT_SAFETY_STATUS },
-};
-
 const bridge = new BridgeClient(BRIDGE_URL);
 const device = new DeckDevice();
 const store = new LayoutStore();
 const supervisor = new BridgeSupervisor(BRIDGE_PORT);
+const bitlearn = new BitlearnClient();
+const journal = new EventRecorder();
+const uploader = new JournalUploader(bitlearn, () => comptesJournalises(store.layout));
 
 let lastState: TradingState | null = null;
 let lastRejectionAt: number | null = null;
@@ -121,7 +121,7 @@ function snapshot(): UiSnapshot {
   const count = device.connected ? device.keyCount : store.layout.device.columns * store.layout.device.rows;
   for (let i = 0; i < count; i++) {
     const v = visualFor(i);
-    if (v) previews[String(i)] = renderButtonSvg(v);
+    if (v) previews[String(i)] = renderButtonDataUri(v);
   }
   return {
     deviceConnected: device.connected,
@@ -260,15 +260,25 @@ async function pushSafetyConfig(settings: Record<string, unknown>): Promise<void
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
   };
 
-  for (const key of ['maxTradesWhenLosing', 'dailyLossLimit', 'maxContracts', 'lockDurationHours']) {
+  for (const key of [
+    'maxTradesWhenLosing', 'dailyLossLimit', 'maxContracts', 'lockDurationHours',
+    'pauseAfterMinutes', 'pauseDurationMinutes',
+  ]) {
     const value = nombre(key);
     if (value !== null) payload[key] = value;
   }
   // Les bascules ne sont transmises que si elles existent dans le layout : une absence doit laisser
   // le défaut du bridge en place, et non être lue comme un « false » que personne n'a demandé.
-  for (const key of ['antiTiltEnabled', 'tiltAveragingAllowed', 'tiltAdvanced']) {
+  for (const key of ['antiTiltEnabled', 'tiltAveragingAllowed', 'tiltAdvanced', 'autoFlattenOnDailyLoss']) {
     const value = settings[key];
     if (typeof value === 'boolean') payload[key] = value;
+  }
+
+  // La tolérance n'a de sens qu'avec la liquidation active. Hors de là, ne pas la transmettre
+  // laisse le bridge sur sa valeur, sans effacer ce qui avait été saisi.
+  if (settings.autoFlattenOnDailyLoss === true) {
+    const value = nombre('autoFlattenGraceSeconds');
+    if (value !== null) payload.autoFlattenGraceSeconds = value;
   }
 
   // Les durées avancées : hors de la section, elles ne sont pas transmises et le bridge
@@ -698,8 +708,12 @@ function annulerMaintien(raison: string): void {
   clearInterval(maintien.timer);
   const { slot, assignment, debut, duree } = maintien;
   maintien = null;
+  const tenuMs = Date.now() - debut;
   log.event('KeyDown', `${actionName(assignment.actionId)} annulée — maintien trop court`, {
-    slot, tenuMs: Date.now() - debut, requisMs: duree, raison,
+    slot, tenuMs, requisMs: duree, raison,
+  });
+  journal.recordHoldAbandoned(assignment.actionId, tenuMs, duree, {
+    account: lastState?.account ?? '', instrument: lastState?.instrument ?? '',
   });
   void paintAll();
 }
@@ -791,6 +805,13 @@ bridge.onStateUpdate((state) => {
   // Avant tout traitement : c'est ce qui donne le contexte de tout ce qui suit dans le journal.
   const nouvelle = empreinteDe(state);
   journaliserTransitions(empreinte, nouvelle);
+  // Même comparaison, second consommateur : le journal comportemental. Redétecter les
+  // transitions de son côté aurait garanti que les deux finissent par diverger.
+  journal.observe(empreinte, nouvelle);
+  // Retour à plat : l'aller-retour vient de se terminer, c'est le moment où il devient
+  // consultable dans Bitlearn. Attendre le tour périodique ferait patienter une minute pour
+  // un trade que l'on vient de clôturer et que l'on veut relire tout de suite.
+  if (empreinte?.posExists && !nouvelle.posExists) void uploader.flush('retour à plat');
   empreinte = nouvelle;
 
   if (state.cooldownActive) startCooldownTimer();
@@ -834,6 +855,7 @@ bridge.onMessage((msg) => {
       motif: v.violation, action: v.orderAction, type: v.orderType,
       quantite: v.quantity, instrument: v.instrument, erreur: v.error,
     });
+    journal.recordViolation(v, lastState?.account ?? '');
     void paintAll();
     setTimeout(() => void paintAll(), VIOLATION_BANNER_MS + 200);
   }
@@ -891,12 +913,52 @@ async function main(): Promise<void> {
   bridge.start();
   await paintAll();
 
+  // Après `device.start()` : la grille du boîtier détermine quelle disposition demander, et elle
+  // n'est connue qu'une fois l'USB ouvert.
+  // Relu à chaque battement : le boîtier peut être branché après le démarrage et NinjaTrader se
+  // connecter en cours de séance. C'est cet état changeant que l'éditeur affiche.
+  const contexteSync = () => ({
+    columns: device.connected ? device.columns : store.layout.device.columns,
+    rows: device.connected ? device.rows : store.layout.device.rows,
+    status: {
+      deck: device.connected,
+      deckModel: device.productName || '',
+      bridge: bridge.isConnected,
+      nt: lastState?.ntConnected ?? false,
+      appVersion: VERSION,
+    },
+  });
+
+  if (bitlearn.paired) {
+    // Volontairement pas attendu : Bitlearn injoignable ne doit retarder le démarrage d'aucune
+    // milliseconde, le cache local suffit à trader.
+    bitlearn.startLayoutSync(store, contexteSync);
+    // Relu à chaque envoi plutôt que capturé : cocher « Journaliser ce compte » doit prendre
+    // effet sans redémarrer l'hôte.
+    uploader.start();
+  } else {
+    // L'appairage attend un clic humain, jusqu'à cinq minutes. Il ne peut donc pas se trouver
+    // sur le chemin du démarrage : le deck est déjà opérationnel pendant ce temps, sur la
+    // disposition en cache.
+    log.event('Bitlearn', 'Poste non appairé — disposition locale utilisée en attendant');
+    void bitlearn.requestPairing(hostname(), VERSION).then((ok) => {
+      if (ok) {
+        bitlearn.startLayoutSync(store, contexteSync);
+        uploader.start();
+      }
+    });
+  }
+
   log.event('Session', 'Hôte prêt', { ui: url, bridge: BRIDGE_URL, layout: store.path });
   process.stdout.write(`\n  Interface de configuration : ${url}\n\n`);
 }
 
 async function shutdown(signal: string): Promise<void> {
   log.event('Session', 'Arrêt demandé', { signal });
+  // Avant de couper le lien : c'est le dernier rattrapage possible avant l'extinction.
+  await uploader.flush('arrêt');
+  uploader.stop();
+  bitlearn.stop();
   supervisor.stop();
   // Le bridge n'est volontairement pas tué (il porte le verrou de sécurité), mais notre client
   // doit cesser de se reconnecter, sinon le minuteur maintient le processus en vie.

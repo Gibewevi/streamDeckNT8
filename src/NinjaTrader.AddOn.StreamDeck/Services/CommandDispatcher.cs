@@ -34,6 +34,9 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                         return _engine.SellLimit(cmd);
                     case "flatten":
                         return _engine.Flatten(cmd);
+                    // No key produces this action: the safety macro is its only emitter.
+                    case "flattenAccount":
+                        return _engine.FlattenAccount(cmd);
                     case "cancelOrders":
                         return _engine.CancelOrders(cmd);
                     case "cancelWorkingOrders":

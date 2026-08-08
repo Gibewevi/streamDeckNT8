@@ -31,6 +31,8 @@ export interface Empreinte {
   targetPrice: number;
   activeOrders: number;
   safetyArmed: boolean;
+  /** Verrou en cours : la macro ne peut pas être désarmée avant son expiration. */
+  safetyLocked: boolean;
   entriesBlocked: boolean;
   blockReason: string;
   cooldownEnabled: boolean;
@@ -57,6 +59,7 @@ export function empreinteDe(s: TradingState): Empreinte {
     targetPrice: p?.targetPrice ?? 0,
     activeOrders: p?.activeOrderCount ?? 0,
     safetyArmed: s.safety?.armed === true,
+    safetyLocked: s.safety?.locked === true,
     entriesBlocked: s.safety?.entriesBlocked === true,
     blockReason: s.safety?.blockReason ?? '',
     cooldownEnabled: s.cooldownEnabled === true,

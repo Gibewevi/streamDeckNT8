@@ -7,7 +7,7 @@
  */
 import { Colors, ButtonVisual } from './visuals.js';
 import { TradingState, SafetyStatus, DEFAULT_SAFETY_STATUS } from './messages.js';
-import { getDisplayText, StatusType } from './status-display.js';
+import { formatAccountLabel, getDisplayText, StatusType } from './status-display.js';
 
 /** Contexte que l'hôte fournit au moteur, en plus de l'état publié par le bridge. */
 export interface VisualContext {
@@ -20,6 +20,22 @@ export interface VisualContext {
   /** État de l'automatisme Auto BE — vit dans l'hôte, pas dans l'état publié par le bridge. */
   autoBe: { actif: boolean; pose: boolean };
 }
+
+/**
+ * Contexte « rien n'est branché », pendant de `DISCONNECTED_STATE`.
+ *
+ * Inutilisé par l'hôte, qui a toujours un contexte réel. Il existe pour l'éditeur Bitlearn, et il
+ * vit ici plutôt que là-bas pour une raison précise : le jour où `VisualContext` gagne un champ,
+ * le compilateur de l'hôte le signale immédiatement. Défini côté Bitlearn, il aurait dérivé en
+ * silence, ce qui est exactement le défaut que ce partage supprime.
+ */
+export const RESTING_CONTEXT: VisualContext = {
+  bridgeConnected: false,
+  lastRejectionAt: null,
+  lastViolationAt: null,
+  defaultQuantity: 1,
+  autoBe: { actif: false, pose: false },
+};
 
 /** Gain en ticks au-delà du prix moyen, dans le sens de la position. */
 export function gainEnTicks(state: TradingState): number | null {
@@ -41,24 +57,6 @@ const REJECTION_BANNER_MS = 5000;
  */
 export const VIOLATION_BANNER_MS = 20000;
 
-function formatAccountLabel(account: string): string {
-  const value = account.trim();
-  if (!value) return 'ACCT';
-
-  const compact = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-  const letters = (value.match(/[A-Za-z]/g) ?? []).join('').toUpperCase();
-  const digits = (value.match(/\d/g) ?? []).join('');
-
-  const prefix = (letters.length >= 3 ? letters : compact || value.toUpperCase()).slice(0, 3);
-  const suffix = digits.length >= 3
-    ? digits.slice(-3)
-    : compact.length > prefix.length
-      ? compact.slice(-3)
-      : '';
-
-  return suffix ? `${prefix}-${suffix}` : prefix;
-}
-
 function formatLockRemaining(seconds: number): string {
   if (seconds <= 0) return '--';
   if (seconds >= 3600) {
@@ -69,6 +67,12 @@ function formatLockRemaining(seconds: number): string {
   if (seconds >= 60) return `${Math.floor(seconds / 60)}m`;
   return `${seconds}s`;
 }
+
+/**
+ * Préavis avant la pause obligatoire. Un quart d'heure : de quoi terminer la position en cours et
+ * ne pas en ouvrir une nouvelle, sans occuper la touche pendant toute la séance.
+ */
+const PAUSE_PREAVIS_S = 15 * 60;
 
 /** Durée courte et lisible sur une touche : `45s`, `2m`, `1m30`, `1h`. */
 function formatDuree(seconds: number): string {
@@ -206,10 +210,26 @@ function augmenteExposition(actionId: string, state: TradingState): boolean {
 
 function entryStatus(state: TradingState, ctx: VisualContext, actionId: string): EntryStatus {
   if (state.safety?.entriesBlocked) {
-    return {
-      label: state.safety.blockReason === 'dailyLoss' ? 'LOSS LIMIT' : 'MAX TRADES',
-      tone: 'refuse',
-    };
+    // La pause ne refuse que ce qui CRÉE de l'exposition. La touche qui permet de sortir reste
+    // fonctionnelle côté bridge — l'afficher en rouge ferait croire au trader qu'il est enfermé
+    // dans sa position, et c'est cette croyance, pas le blocage, qui coûte cher : on n'essaie pas
+    // une touche qu'on croit morte.
+    const sortiePossible =
+      state.safety.blockReason === 'mandatoryPause' && !augmenteExposition(actionId, state);
+
+    if (!sortiePossible) {
+      // Le motif décide du libellé : « MAX TRADES » sur une pause obligatoire enverrait le trader
+      // chercher une limite qu'il n'a pas atteinte, au lieu de lui dire d'aller se lever.
+      const motifs: Record<string, string> = {
+        dailyLoss: 'LOSS LIMIT',
+        mandatoryPause: 'PAUSE',
+        tradeLimit: 'MAX TRADES',
+      };
+      return {
+        label: motifs[state.safety.blockReason] ?? 'MAX TRADES',
+        tone: 'refuse',
+      };
+    }
   }
   // Plafond de contrats atteint. Seules les touches qui feraient GROSSIR la position réagissent :
   // celle qui permet d'en sortir reste intacte, sans quoi on croirait y être coincé.
@@ -391,7 +411,7 @@ export function computeVisual(
       const currentAccount = state.ntConnected ? (state.account || '') : '';
       const isActive = connected && currentAccount !== '';
       return {
-        title: formatAccountLabel(currentAccount),
+        title: formatAccountLabel(currentAccount, 'ACCT'),
         subtitle: isActive ? 'ACTIVE' : 'INACTIVE',
         bgColor: isActive ? Colors.orange : Colors.black,
         textColor: Colors.textWhite,
@@ -467,6 +487,45 @@ export function computeVisual(
         };
       }
 
+      // La liquidation a échoué : des positions peuvent être encore ouvertes alors que tout
+      // annonce la fin de journée. Prime sur absolument tout le reste, y compris le blocage —
+      // c'est le seul état où le trader doit agir immédiatement à la main.
+      if (safety.autoFlattenFailed) {
+        return {
+          ...marque,
+          title: 'SAFETY:ERR', subtitle: 'LIQUID.',
+          detail: 'VERIFIER NT',
+          bgColor: Colors.refuse, textColor: Colors.textWhite,
+        };
+      }
+
+      // Le seuil est franchi, la tolérance s'écoule. Annoncé pour qu'il reste possible de fermer
+      // à ses conditions : quelques secondes de préavis valent mieux qu'une liquidation surprise,
+      // et la règle n'y perd rien puisque le délai s'écoule de toute façon.
+      if (safety.autoFlattenPending) {
+        return {
+          ...marque,
+          title: 'SAFETY:LIQUID',
+          subtitle: `${safety.autoFlattenSecondsRemaining}s`,
+          detail: formatSafetyDetail(safety),
+          bgColor: Colors.refuse, textColor: Colors.textWhite,
+        };
+      }
+
+      // Pause obligatoire. Rouge comme les autres blocages — les entrées sont bien refusées — mais
+      // avec SON décompte et non celui du verrou : ici le trader attend la fin de la pause, pas la
+      // fin du verrou, et afficher les heures du verrou lui ferait croire sa séance terminée.
+      // Placée avant le cas général, qui n'a aucune minuterie propre à montrer.
+      if (safety.entriesBlocked && safety.blockReason === 'mandatoryPause') {
+        return {
+          ...marque,
+          title: 'SAFETY:PAUSE',
+          subtitle: formatLockRemaining(safety.pauseSecondsRemaining),
+          detail: 'REPOS',
+          bgColor: Colors.refuse, textColor: Colors.textWhite,
+        };
+      }
+
       // Armée et une limite atteinte — les entrées sont refusées jusqu'à la fin du verrou.
       if (safety.entriesBlocked) {
         return {
@@ -501,11 +560,20 @@ export function computeVisual(
       // Le compte à rebours s'affiche aussi en mode développement. Il y a bien une nuance — le
       // verrou peut alors être levé d'un appui, la durée n'engage donc à rien — mais c'est le
       // badge DEV qui porte cet avertissement, l'écrire une seconde fois ne l'ajoutait pas.
+      //
+      // La pause qui approche prend la troisième ligne le temps de son dernier quart d'heure. Une
+      // coupure qui tombe sans prévenir se subit — on la découvre au moment où l'on voulait entrer,
+      // et c'est ainsi qu'on finit par désarmer la protection. Annoncée, elle se prépare : on
+      // termine la position en cours au lieu d'en ouvrir une.
+      const pauseImminente = safety.pauseDueInSeconds > 0 && safety.pauseDueInSeconds <= PAUSE_PREAVIS_S;
+
       return {
         ...marque,
         title: 'SAFETY:GUARD',
         subtitle: formatLockRemaining(safety.lockSecondsRemaining),
-        detail: formatSafetyRestant(safety),
+        detail: pauseImminente
+          ? `PAUSE ${formatLockRemaining(safety.pauseDueInSeconds)}`
+          : formatSafetyRestant(safety),
         bgColor: Colors.orange, textColor: Colors.textWhite,
       };
     }

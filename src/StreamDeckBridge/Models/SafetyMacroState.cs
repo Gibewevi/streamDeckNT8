@@ -61,6 +61,51 @@ public sealed class SafetyMacroSettings
     /// <summary>Episode length. Only used when <see cref="TiltAdvanced"/>.</summary>
     public double TiltEpisodeMinutes { get; set; } = 15;
 
+    // --- Mandatory break ---
+    //
+    // An endurance rule, not a risk rule: attention decays with continuous screen time, and the
+    // trader who most needs to step away is the least likely to decide it himself.
+    //
+    // The clock is anchored on the FIRST TRADE, never on the session start. Someone who watches
+    // the market for three hours without touching it has spent nothing, and a rule that pauses him
+    // anyway is experienced as arbitrary — which is how rules end up switched off.
+
+    /// <summary>
+    /// Minutes of trading, counted from the first trade, before a break falls due. 0 disables the
+    /// rule, which is the default: nobody should start being refused entries after an update they
+    /// did not ask for.
+    /// </summary>
+    public double PauseAfterMinutes { get; set; }
+
+    /// <summary>
+    /// How long the mandatory break lasts. Time already spent away from the market counts towards
+    /// it — see <see cref="SafetyMacroPersistedState.LastTradeAtUtc"/>.
+    /// </summary>
+    public double PauseDurationMinutes { get; set; } = 10;
+
+    // --- Automatic liquidation on daily loss ---
+    //
+    // The only rule in this file that SENDS an order instead of refusing one. Everything else here
+    // can, at worst, stop the trader from doing something; this one acts on his account by itself.
+    // That asymmetry is why it is opt-in and why its failure path is loud.
+
+    /// <summary>
+    /// Close every position and cancel every order on the account when the daily loss limit is
+    /// reached. OFF by default, and not negotiable: software that starts sending market orders
+    /// after an update nobody asked for has no business being trusted with an account.
+    /// </summary>
+    public bool AutoFlattenOnDailyLoss { get; set; }
+
+    /// <summary>
+    /// Seconds the limit must stay breached before the account is liquidated.
+    ///
+    /// Session P&amp;L includes UNREALIZED, so a single wick can cross the threshold and come back.
+    /// Refusing an entry on that wick costs nothing; liquidating on it turns a recoverable open
+    /// loss into a realised one, at the worst price of the move. This delay is what separates the
+    /// two — the limit has to still be breached once the wick has passed.
+    /// </summary>
+    public double AutoFlattenGraceSeconds { get; set; } = 5;
+
     public SafetyMacroSettings Clone() => new()
     {
         MaxTradesWhenLosing = MaxTradesWhenLosing,
@@ -71,7 +116,11 @@ public sealed class SafetyMacroSettings
         TiltAveragingAllowed = TiltAveragingAllowed,
         TiltAdvanced = TiltAdvanced,
         TiltHoldSeconds = TiltHoldSeconds,
-        TiltEpisodeMinutes = TiltEpisodeMinutes
+        TiltEpisodeMinutes = TiltEpisodeMinutes,
+        PauseAfterMinutes = PauseAfterMinutes,
+        PauseDurationMinutes = PauseDurationMinutes,
+        AutoFlattenOnDailyLoss = AutoFlattenOnDailyLoss,
+        AutoFlattenGraceSeconds = AutoFlattenGraceSeconds
     };
 }
 
@@ -133,6 +182,46 @@ public sealed class SafetyMacroPersistedState
 
     /// <summary>Whether the last trade closed at a loss. Escalation only counts after a loss.</summary>
     public bool LastTradeWasLoss { get; set; }
+
+    // --- Mandatory break ---
+    //
+    // Persisted for the same reason the lock is: restarting the bridge must not be a way to skip a
+    // break. Both are UTC so that a machine changing time zone mid-session cannot shorten one.
+
+    /// <summary>
+    /// Start of the current work stretch — the first trade opened while no stretch was running.
+    /// Null before the first trade of the day, and again once a break has been served, so the next
+    /// trade opens a fresh stretch.
+    /// </summary>
+    public DateTime? WorkStartedAtUtc { get; set; }
+
+    /// <summary>
+    /// Last trade opened. The break is measured from it rather than from the moment it falls due,
+    /// so time already spent away from the market counts towards it. Without this, a trader who
+    /// had stopped on his own would be made to serve the break a second time.
+    /// </summary>
+    public DateTime? LastTradeAtUtc { get; set; }
+
+    // --- Automatic liquidation ---
+
+    /// <summary>
+    /// Trading day on which the account was liquidated. Empty while it has not happened.
+    ///
+    /// This is the once-per-day latch, and it is persisted for the opposite reason to the lock:
+    /// not to stop the trader escaping, but to stop the software firing twice. A bridge restart
+    /// during a liquidated session must not send a second wave of market orders.
+    ///
+    /// The grace countdown is deliberately NOT persisted — a restart should observe the breach
+    /// afresh rather than act on a timer it did not watch elapse.
+    /// </summary>
+    public string AutoFlattenDay { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Set when the liquidation was sent but did not go through. The trader has to be told: he was
+    /// shown "day over" while his position is still live, which is the one state worse than having
+    /// no rule at all.
+    /// </summary>
+    public bool AutoFlattenFailed { get; set; }
 }
 
 /// <summary>
@@ -151,12 +240,18 @@ public sealed class SafetyConfigUpdate
     public bool? TiltAdvanced { get; set; }
     public int? TiltHoldSeconds { get; set; }
     public double? TiltEpisodeMinutes { get; set; }
+    public double? PauseAfterMinutes { get; set; }
+    public double? PauseDurationMinutes { get; set; }
+    public bool? AutoFlattenOnDailyLoss { get; set; }
+    public double? AutoFlattenGraceSeconds { get; set; }
 
     /// <summary>True when the caller supplied nothing at all — the router rejects that outright.</summary>
     public bool IsEmpty =>
         MaxTradesWhenLosing == null && DailyLossLimit == null && MaxContracts == null &&
         LockDurationHours == null && AntiTiltEnabled == null && TiltAveragingAllowed == null &&
-        TiltAdvanced == null && TiltHoldSeconds == null && TiltEpisodeMinutes == null;
+        TiltAdvanced == null && TiltHoldSeconds == null && TiltEpisodeMinutes == null &&
+        PauseAfterMinutes == null && PauseDurationMinutes == null &&
+        AutoFlattenOnDailyLoss == null && AutoFlattenGraceSeconds == null;
 }
 
 /// <summary>
@@ -190,10 +285,50 @@ public sealed class SafetyStatus
     /// <summary>True when position-opening actions are currently refused.</summary>
     public bool EntriesBlocked { get; set; }
 
-    /// <summary>"", "dailyLoss" or "tradeLimit". The contract cap has its own flag above.</summary>
+    /// <summary>"", "dailyLoss", "tradeLimit" or "mandatoryPause". The contract cap has its own flag above.</summary>
     public string BlockReason { get; set; } = string.Empty;
 
     public string TradingDay { get; set; } = string.Empty;
+
+    // --- Mandatory break ---
+
+    /// <summary>
+    /// True while the break is being enforced. Redundant with <see cref="EntriesBlocked"/> and a
+    /// <see cref="BlockReason"/> of "mandatoryPause", and published anyway: the deck needs to tell
+    /// a break apart from a loss limit without parsing a string.
+    /// </summary>
+    public bool PauseActive { get; set; }
+
+    /// <summary>Seconds left on the running break. 0 when none is running.</summary>
+    public int PauseSecondsRemaining { get; set; }
+
+    /// <summary>
+    /// Seconds of trading left before the break falls due. 0 when the rule is off, when nothing
+    /// has been traded yet, or when the break is already due. Published so the deck can warn
+    /// beforehand — a break that lands without notice is the surest way to get the rule turned off.
+    /// </summary>
+    public int PauseDueInSeconds { get; set; }
+
+    // --- Automatic liquidation ---
+
+    /// <summary>Whether the account is liquidated when the daily loss limit is reached.</summary>
+    public bool AutoFlattenEnabled { get; set; }
+
+    /// <summary>
+    /// The limit is currently breached and the grace delay is running. Published so the deck can
+    /// show the countdown: a trader who sees "LIQUIDATION 4s" can still flatten on his own terms,
+    /// which is a better outcome than being liquidated by surprise.
+    /// </summary>
+    public bool AutoFlattenPending { get; set; }
+
+    /// <summary>Seconds left before the account is liquidated. 0 when nothing is pending.</summary>
+    public int AutoFlattenSecondsRemaining { get; set; }
+
+    /// <summary>The account was liquidated today. The day is over.</summary>
+    public bool AutoFlattenDone { get; set; }
+
+    /// <summary>The liquidation was attempted and did not go through. Positions may still be open.</summary>
+    public bool AutoFlattenFailed { get; set; }
 
     // --- Anti-tilt ---
 

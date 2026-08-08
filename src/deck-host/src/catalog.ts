@@ -40,6 +40,14 @@ export interface SettingField {
    * invisible, ce qui est le pire des deux mondes.
    */
   showIf?: { key: string; equals: boolean | string | number };
+  /**
+   * Plancher applicable **aux valeurs non nulles**, 0 valant « règle désactivée ».
+   *
+   * Distinct de `min`, qui ne saurait pas exprimer « 0, ou bien 5 et plus ». Sans lui, l'éditeur
+   * acceptait une valeur que le bridge relevait ensuite en silence : l'écran affichait 2 min et
+   * la protection en appliquait 5.
+   */
+  floor?: number;
 }
 
 export interface ActionDef {
@@ -144,6 +152,14 @@ export const CATALOG: ActionDef[] = [
     description: 'Fait défiler les comptes disponibles.',
     settings: [
       { key: 'accounts', label: 'Comptes (un par ligne)', type: 'textarea', placeholder: 'Sim101\nSim102', help: 'Vide = tous les comptes remontés par NinjaTrader.' },
+      // Porté par la touche Compte plutôt que par une action dédiée : journaliser est une
+      // propriété du compte courtier, pas une commande que l'on déclenche.
+      {
+        key: 'journal', label: 'Journaliser ce compte', type: 'toggle',
+        help: 'Remonte les sessions de ce compte vers Bitlearn : trades, statistiques et '
+            + 'comportement. Le journal créé est privé, publiable comme les autres. '
+            + 'Désactivé, rien ne quitte ce PC.',
+      },
     ],
   },
 
@@ -191,9 +207,42 @@ export const CATALOG: ActionDef[] = [
         help: 'Refuse les entrées qui porteraient la position au-delà. Réduire reste toujours possible. 0 = pas de limite.',
       },
       { key: 'dailyLossLimit', label: 'Perte journalière max', type: 'number', min: 0, help: 'En devise du compte. 0 = pas de limite.' },
+      // La seule règle qui ENVOIE un ordre au lieu d'en refuser un. Désactivée par défaut, et ce
+      // n'est pas négociable : un logiciel qui se met à passer des ordres au marché après une mise
+      // à jour que personne n'a demandée n'a rien à faire sur un compte.
+      {
+        key: 'autoFlattenOnDailyLoss', label: 'Clôturer tout à la perte max', type: 'toggle',
+        help: 'Ferme toutes les positions du compte et annule tous les ordres dès que la perte '
+            + 'journalière est atteinte. La journée est terminée : les entrées restent refusées ensuite.',
+      },
+      {
+        key: 'autoFlattenGraceSeconds', label: 'Tolérance avant clôture (s)', type: 'number',
+        min: 1, max: 60, step: 1, default: 5,
+        showIf: { key: 'autoFlattenOnDailyLoss', equals: true },
+        help: 'Le seuil doit rester franchi pendant ce délai. Le P&L de séance inclut le latent : '
+            + 'sans ce délai, une simple mèche liquiderait le compte au plus mauvais prix.',
+      },
       // min aligné sur SafetyMacro.MinLockHours : en dessous, le bridge refuse avec un
       // INVALID_PAYLOAD que rien n'expliquait à l'écran.
       { key: 'lockDurationHours', label: 'Durée du verrou (heures)', type: 'number', min: 0.05, max: 24, help: 'Le verrou ne peut pas être levé avant son expiration.' },
+      // --- Pause obligatoire ---
+      // Règle Guard : elle REFUSE les entrées, comme les limites ci-dessus, et non une friction
+      // Anti-Tilt. Le compteur démarre au PREMIER TRADE et non à l'ouverture de la séance —
+      // regarder le marché ne fatigue pas, et une pause imposée à quelqu'un qui n'a rien pris
+      // serait vécue comme arbitraire, ce qui est la façon la plus sûre de faire désactiver une
+      // règle. Tout arrêt d'au moins la durée de la pause remet le compteur à zéro.
+      {
+        key: 'pauseAfterMinutes', label: 'Pause après (min de trading)', type: 'number',
+        min: 0, max: 480, step: 5, default: 0, floor: 5,
+        help: 'Minutes de trading, comptées depuis le premier trade, avant qu\'une pause ne devienne '
+            + 'obligatoire. 0 = pas de pause. En dessous de 5 min, ramené à 5.',
+      },
+      {
+        key: 'pauseDurationMinutes', label: 'Durée de la pause (min)', type: 'number',
+        min: 1, max: 120, step: 1, default: 10,
+        help: 'Durée de la coupure. Le temps déjà passé sans trader compte dedans : revenir de '
+            + 'déjeuner ne déclenche pas une pause supplémentaire. Clôturer et réduire restent possibles.',
+      },
       // --- Anti-Tilt ---
       // Trois réglages, pas onze. Les seuils (escalade de taille, restitution de gain, série de
       // pertes, durée d'épisode, durée de maintien) sont dérivés par le bridge des deux limites

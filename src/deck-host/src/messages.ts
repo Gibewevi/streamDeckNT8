@@ -57,8 +57,37 @@ export interface SafetyStatus {
   pnlAvailable: boolean;
   /** True when the bridge is currently refusing position-opening actions. */
   entriesBlocked: boolean;
-  blockReason: '' | 'dailyLoss' | 'tradeLimit';
+  blockReason: '' | 'dailyLoss' | 'tradeLimit' | 'mandatoryPause';
   tradingDay: string;
+
+  // --- Pause obligatoire ---
+  //
+  // Le décompte tourne même macro désarmée ; seule l'application est conditionnée à `armed`. Voir
+  // la pause arriver avant d'armer est ce qui la rend prévisible plutôt que subie.
+
+  /** La pause est appliquée. Redondant avec `blockReason`, publié pour éviter au deck d'analyser une chaîne. */
+  pauseActive: boolean;
+  /** Secondes restantes sur la pause en cours. 0 s'il n'y en a pas. */
+  pauseSecondsRemaining: number;
+  /** Secondes de trading avant que la pause ne tombe. 0 si la règle est inactive, si rien n'a été tradé, ou si la pause est déjà due. */
+  pauseDueInSeconds: number;
+
+  // --- Liquidation automatique sur perte journalière ---
+  //
+  // La seule règle de Guard qui ENVOIE un ordre au lieu d'en refuser un. Le décompte est publié
+  // pour qu'un trader qui voit « LIQUID 4s » puisse encore fermer à ses conditions — meilleure
+  // issue que d'être liquidé par surprise, et cela ne coûte rien à la règle.
+
+  /** Le compte est-il liquidé quand la perte journalière est atteinte ? */
+  autoFlattenEnabled: boolean;
+  /** Le seuil est franchi et la tolérance s'écoule. */
+  autoFlattenPending: boolean;
+  /** Secondes avant la liquidation. 0 si rien n'est en attente. */
+  autoFlattenSecondsRemaining: number;
+  /** Le compte a été liquidé aujourd'hui. La journée est terminée. */
+  autoFlattenDone: boolean;
+  /** La liquidation est partie mais n'a pas abouti : des positions peuvent être encore ouvertes. */
+  autoFlattenFailed: boolean;
 
   // --- Anti-tilt ---
   //
@@ -99,12 +128,38 @@ export const DEFAULT_SAFETY_STATUS: SafetyStatus = {
   entriesBlocked: false,
   blockReason: '',
   tradingDay: '',
+  pauseActive: false,
+  pauseSecondsRemaining: 0,
+  pauseDueInSeconds: 0,
+  autoFlattenEnabled: false,
+  autoFlattenPending: false,
+  autoFlattenSecondsRemaining: 0,
+  autoFlattenDone: false,
+  autoFlattenFailed: false,
   tiltEnabled: false,
   tiltActive: false,
   tiltSecondsRemaining: 0,
   tiltReason: '',
   tiltScope: '',
   tiltHoldSeconds: 20,
+};
+
+/**
+ * L'état « rien n'est branché » : ni bridge, ni NinjaTrader, aucune position, aucun compte.
+ *
+ * Vit ici plutôt que dans `host.ts` parce qu'il a deux consommateurs. L'hôte s'en sert au démarrage,
+ * avant la première publication du bridge. L'éditeur Bitlearn s'en sert en permanence : il ne
+ * connaît pas l'état du marché, et dessiner l'aperçu d'une touche à partir d'un état inventé serait
+ * pire qu'un repos honnête.
+ *
+ * C'est cet objet qui rend inutile toute ré-écriture manuelle des visuels au repos — la seule
+ * chose dont l'éditeur a besoin, c'est de passer ceci à `computeVisual`.
+ */
+export const DISCONNECTED_STATE: TradingState = {
+  account: '', instrument: '', quantity: 1, defaultQuantity: 1,
+  ntConnected: false, pluginConnected: false, position: null, instrumentInfo: null,
+  availableAccounts: [], cooldownEnabled: false, cooldownActive: false,
+  cooldownSecondsRemaining: 0, cooldownSeconds: 60, safety: { ...DEFAULT_SAFETY_STATUS },
 };
 
 export interface PositionState {

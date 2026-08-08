@@ -320,6 +320,11 @@ public sealed class BridgeServer : BackgroundService
                 {
                     await SendToPlugin(toPlugin, ct);
                 }
+
+                // The message just processed carried the P&L the safety macro reads. This is
+                // therefore the only place where a liquidation can be decided on fresh data, and
+                // it is sequential — no two liquidations can overlap.
+                await MaybeLiquidateAccount(ct);
             }
         }
         catch (WebSocketException ex)
@@ -462,22 +467,65 @@ public sealed class BridgeServer : BackgroundService
         }
     }
 
-    private async Task SendToAddon(BridgeMessage msg, CancellationToken ct)
+    /// <summary>
+    /// Sends the account-wide liquidation when the safety macro says one is due.
+    ///
+    /// The latch closes only if the order actually left the socket. A disconnected add-on means
+    /// nothing was sent, so there is nothing to guard against repeating — the next state update
+    /// tries again. Anything else is treated as sent and never retried: firing a second wave of
+    /// market orders after an unexplained failure would turn one problem into two.
+    /// </summary>
+    private async Task MaybeLiquidateAccount(CancellationToken ct)
+    {
+        var command = _router.BuildAutoFlattenCommand();
+        if (command == null) return;
+
+        var socket = _addonSocket;
+        if (socket?.State != WebSocketState.Open)
+        {
+            _logger.LogError("Auto-liquidation due but the add-on is disconnected — nothing sent, will retry");
+            return;
+        }
+
+        try
+        {
+            // Only a confirmed write closes the latch. `SendToAddon` swallows socket failures
+            // internally, so its return value is the sole honest signal here — trusting the
+            // absence of an exception would mark the day handled on a message that never left.
+            if (await SendToAddon(command, ct)) _router.ConfirmAutoFlatten(true);
+            else _logger.LogError("Auto-liquidation could not be written to the add-on socket — nothing sent, will retry");
+        }
+        catch (Exception ex)
+        {
+            _router.ConfirmAutoFlatten(false, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Writes a message to the add-on. Returns whether the bytes actually left the socket.
+    ///
+    /// Most callers ignore the result — a lost state forward is corrected by the next one. The
+    /// liquidation cannot: it has to know whether anything was sent before deciding it has done
+    /// its job for the day.
+    /// </summary>
+    private async Task<bool> SendToAddon(BridgeMessage msg, CancellationToken ct)
     {
         var socket = _addonSocket;
-        if (socket?.State != WebSocketState.Open) return;
+        if (socket?.State != WebSocketState.Open) return false;
         await _addonSendLock.WaitAsync(ct);
         try
         {
-            if (socket.State != WebSocketState.Open) return;
+            if (socket.State != WebSocketState.Open) return false;
             var json = JsonSerializer.Serialize(msg, JsonOpts);
             var bytes = Encoding.UTF8.GetBytes(json);
             await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
             _logger.LogDebug("Bridge → AddOn: {Json}", json);
+            return true;
         }
         catch (WebSocketException ex)
         {
             _logger.LogWarning("SendToAddon failed (socket closed): {Msg}", ex.Message);
+            return false;
         }
         finally
         {

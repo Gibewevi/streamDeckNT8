@@ -87,6 +87,21 @@ public sealed class SafetyMacro
     public const double MinTiltEpisodeMinutes = 1;
     public const double MaxTiltEpisodeMinutes = 60;
 
+    // --- Mandatory break bounds ---
+    // The floor is 5 minutes rather than 1: below that the rule stops being a break and becomes a
+    // rate limiter, which is not what it is for. 8 hours is a full session at the top end.
+    public const double MinPauseAfterMinutes = 5;
+    public const double MaxPauseAfterMinutes = 480;
+    public const double MinPauseDurationMinutes = 1;
+    public const double MaxPauseDurationMinutes = 120;
+
+    // --- Automatic liquidation ---
+    // The floor is 1 s and not 0: a zero delay would fire on the very tick that crosses the
+    // threshold, which is exactly the wick this delay exists to ride out. 60 s at the top — beyond
+    // that the limit stops being a circuit breaker and becomes a suggestion.
+    public const double MinAutoFlattenGraceSeconds = 1;
+    public const double MaxAutoFlattenGraceSeconds = 60;
+
     /// <summary>Actions that open or flip a position. Everything else stays available while blocked.</summary>
     private static readonly HashSet<string> EntryActions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -106,6 +121,15 @@ public sealed class SafetyMacro
     //
     // Runtime only, never persisted: these are recomputed from the position on every state update,
     // so there is nothing for them to survive across a restart.
+    /// <summary>
+    /// When the daily loss limit started being breached without interruption. Reset the moment
+    /// session P&amp;L climbs back above the threshold, which is what makes a wick harmless.
+    ///
+    /// In memory only, deliberately: after a restart the bridge should watch the breach itself
+    /// rather than inherit a countdown it never saw run.
+    /// </summary>
+    private DateTime? _lossBreachSince;
+
     private double? _realizedPnl;
     private int _positionQuantity;
     private string _positionDirection = "Flat";
@@ -286,18 +310,40 @@ public sealed class SafetyMacro
             if (update.TiltEpisodeMinutes.HasValue)
                 settings.TiltEpisodeMinutes = Math.Clamp(update.TiltEpisodeMinutes.Value, MinTiltEpisodeMinutes, MaxTiltEpisodeMinutes);
 
+            // 0 stays 0 — it is how the rule is switched off, like DailyLossLimit and MaxContracts.
+            // Clamping it up to the floor would silently turn the rule ON for someone who typed 0.
+            if (update.PauseAfterMinutes.HasValue)
+            {
+                var demande = update.PauseAfterMinutes.Value;
+                settings.PauseAfterMinutes = demande <= 0
+                    ? 0
+                    : Math.Clamp(demande, MinPauseAfterMinutes, MaxPauseAfterMinutes);
+            }
+
+            if (update.PauseDurationMinutes.HasValue)
+                settings.PauseDurationMinutes = Math.Clamp(update.PauseDurationMinutes.Value, MinPauseDurationMinutes, MaxPauseDurationMinutes);
+
+            if (update.AutoFlattenOnDailyLoss.HasValue)
+                settings.AutoFlattenOnDailyLoss = update.AutoFlattenOnDailyLoss.Value;
+
+            if (update.AutoFlattenGraceSeconds.HasValue)
+                settings.AutoFlattenGraceSeconds = Math.Clamp(update.AutoFlattenGraceSeconds.Value, MinAutoFlattenGraceSeconds, MaxAutoFlattenGraceSeconds);
+
             Persist();
 
             // The derived thresholds are logged alongside the settings, because they are the only
             // place the trader can see what the rules actually resolved to for their limits.
             _logger.LogInformation(
                 "Safety macro configured — maxTradesWhenLosing={MaxTrades}, dailyLossLimit={Loss}, maxContracts={Contracts}, lockDuration={Hours}h, "
-                + "antiTilt={Tilt} (averaging={Averaging}, advanced={Advanced}) "
+                + "antiTilt={Tilt} (averaging={Averaging}, advanced={Advanced}), break={Break} "
                 + "— effective: escalation={Escalation}%, giveBack={GiveBack:0.##}, lossStreak={Losses}, episode={Episode}min, hold={Hold}s",
                 settings.MaxTradesWhenLosing, settings.DailyLossLimit, settings.MaxContracts, settings.LockDurationHours,
                 settings.AntiTiltEnabled ? "ON" : "OFF",
                 settings.TiltAveragingAllowed ? "allowed" : "forbidden",
                 settings.TiltAdvanced ? "ON" : "OFF",
+                settings.PauseAfterMinutes > 0
+                    ? $"{settings.PauseDurationMinutes:0.##}min every {settings.PauseAfterMinutes:0.##}min of trading"
+                    : "OFF",
                 TiltSizeEscalationPct, DerivedGiveBackLimit(), DerivedLossStreak(),
                 EffectiveEpisodeMinutes(), EffectiveHoldSeconds());
 
@@ -326,7 +372,7 @@ public sealed class SafetyMacro
             // the trader armed the macro, so they must be the message he reads when both apply.
             if (_state.Armed)
             {
-                var breach = FindBreach();
+                var breach = FindBreach(action);
                 if (breach != null)
                     return (true, breach.Value.Code, breach.Value.Message);
             }
@@ -386,6 +432,7 @@ public sealed class SafetyMacro
             Refresh();
             _accountPnl = accountPnl;
             _state.LastAccountPnl = accountPnl;
+            TrackDailyLossBreach();
 
             if (realizedPnl.HasValue)
             {
@@ -422,6 +469,12 @@ public sealed class SafetyMacro
         {
             Refresh();
             _state.TradeCount++;
+
+            // Mandatory-break anchors. WorkStartedAtUtc is only set when no stretch is running:
+            // the clock must measure the whole stretch, not restart at every trade inside it.
+            var maintenant = DateTime.UtcNow;
+            _state.WorkStartedAtUtc ??= maintenant;
+            _state.LastTradeAtUtc = maintenant;
 
             // Anti-tilt C1 — size escalation after a loss. Compared BEFORE the reference is moved
             // on, and only after a losing trade: a scalper's size should be constant, so a jump
@@ -531,28 +584,245 @@ public sealed class SafetyMacro
 
     private readonly record struct LimitBreach(string Reason, string Code, string Message);
 
-    private LimitBreach? FindBreach()
+    /// <param name="action">
+    /// The order being evaluated, or null when building the published status — where there is no
+    /// particular order and the question is simply "are entries refused right now".
+    /// </param>
+    private LimitBreach? FindBreach(string? action)
     {
-        // Without account P&L from NinjaTrader both rules are meaningless — say so
-        // through PnlAvailable rather than silently blocking or silently allowing.
-        if (!HasPnl()) return null;
-
         var settings = _state.Settings;
-        var pnl = SessionPnl();
 
-        if (settings.DailyLossLimit > 0 && pnl <= -settings.DailyLossLimit)
+        // The P&L rules come first: they are the more severe of the two families, so theirs is the
+        // message the trader must read when a break and a loss limit apply at the same time.
+        // Without account P&L from NinjaTrader they are meaningless — say so through PnlAvailable
+        // rather than silently blocking or silently allowing.
+        if (HasPnl())
         {
-            return new LimitBreach("dailyLoss", "SAFETY_DAILY_LOSS_REACHED",
-                $"Daily loss limit reached ({pnl:0.##} / -{settings.DailyLossLimit:0.##}). The safety macro blocks new positions.");
+            var pnl = SessionPnl();
+
+            if (settings.DailyLossLimit > 0 && pnl <= -settings.DailyLossLimit)
+            {
+                return new LimitBreach("dailyLoss", "SAFETY_DAILY_LOSS_REACHED",
+                    $"Daily loss limit reached ({pnl:0.##} / -{settings.DailyLossLimit:0.##}). The safety macro blocks new positions.");
+            }
+
+            if (settings.MaxTradesWhenLosing > 0 && pnl < 0 && _state.TradeCount >= settings.MaxTradesWhenLosing)
+            {
+                return new LimitBreach("tradeLimit", "SAFETY_TRADE_LIMIT_REACHED",
+                    $"Trade limit reached while losing ({_state.TradeCount}/{settings.MaxTradesWhenLosing}, session P&L {pnl:0.##}). The safety macro blocks new positions.");
+            }
         }
 
-        if (settings.MaxTradesWhenLosing > 0 && pnl < 0 && _state.TradeCount >= settings.MaxTradesWhenLosing)
+        // Evaluated outside the P&L gate on purpose: a break is owed for time spent, and time is
+        // known even when NinjaTrader publishes no account P&L.
+        return FindPauseBreach(action);
+    }
+
+    // --- Mandatory break ---
+    //
+    // Three properties make this rule bearable, and each one is a deliberate choice:
+    //
+    //   1. The clock starts at the FIRST TRADE, not at session start. Watching the market costs
+    //      nothing; only trading does.
+    //   2. It is evaluated when an entry is attempted, never on a background timer. A break can
+    //      therefore not elapse unnoticed while the trader is away from the desk — it exists only
+    //      at the moment it would actually restrain someone.
+    //   3. Time already spent away from the market counts towards it. Someone who stopped on his
+    //      own is not made to serve the break twice, and someone who returns from lunch is not
+    //      pushed into a break he has already, in substance, taken.
+    //
+    // Together these mean the rule is silent for anyone who is not trading, and firm for anyone
+    // who is trading continuously — which is the only population it was written for.
+
+    // --- Automatic liquidation on daily loss ---
+    //
+    // The only rule here that ACTS instead of refusing. Three safeguards, each answering a way it
+    // could do more harm than the loss it prevents:
+    //
+    //   1. A grace delay, because session P&L includes unrealized. A wick that crosses the limit
+    //      and comes back costs nothing when the rule merely refuses an entry; liquidating on it
+    //      realises a loss that was still recoverable, at the worst price of the move.
+    //   2. Once per trading day, persisted. A liquidated session must not be liquidated twice by a
+    //      bridge restart.
+    //   3. The latch closes only once the order has actually LEFT the machine. A send that failed
+    //      because the add-on was disconnected sent nothing, so there is nothing to protect
+    //      against repeating — it is retried. A send that left and was then rejected by
+    //      NinjaTrader is NOT retried: firing market orders again after an unexplained refusal
+    //      turns one problem into two. It surfaces as a failure instead, in red.
+
+    /// <summary>The order the bridge must send. Null while nothing is due.</summary>
+    public sealed record AutoFlattenRequest(double SessionPnl, double Limit);
+
+    /// <summary>
+    /// Follows how long the daily loss limit has been continuously breached. Called on every P&amp;L
+    /// publish — a couple of times a second — so the reset is immediate the moment price comes back.
+    /// </summary>
+    private void TrackDailyLossBreach()
+    {
+        var settings = _state.Settings;
+
+        if (!settings.AutoFlattenOnDailyLoss || settings.DailyLossLimit <= 0 || !HasPnl())
         {
-            return new LimitBreach("tradeLimit", "SAFETY_TRADE_LIMIT_REACHED",
-                $"Trade limit reached while losing ({_state.TradeCount}/{settings.MaxTradesWhenLosing}, session P&L {pnl:0.##}). The safety macro blocks new positions.");
+            _lossBreachSince = null;
+            return;
         }
 
-        return null;
+        if (SessionPnl() > -settings.DailyLossLimit)
+        {
+            _lossBreachSince = null;
+            return;
+        }
+
+        _lossBreachSince ??= DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// The liquidation the bridge should send right now, or null.
+    ///
+    /// Pure: it latches nothing. The caller confirms with <see cref="MarkAutoFlattenSent"/> or
+    /// <see cref="MarkAutoFlattenFailed"/> once it knows whether the order left the machine.
+    /// </summary>
+    public AutoFlattenRequest? PendingAutoFlatten()
+    {
+        lock (_lock)
+        {
+            Refresh();
+
+            if (!_state.Armed) return null;
+            var settings = _state.Settings;
+            if (!settings.AutoFlattenOnDailyLoss) return null;
+            if (_state.AutoFlattenDay == _state.TradingDay) return null;
+            if (_lossBreachSince is not { } since) return null;
+            if (DateTime.UtcNow - since < TimeSpan.FromSeconds(settings.AutoFlattenGraceSeconds)) return null;
+
+            return new AutoFlattenRequest(SessionPnl(), settings.DailyLossLimit);
+        }
+    }
+
+    /// <summary>Called once the liquidation has actually been written to the add-on socket.</summary>
+    public void MarkAutoFlattenSent()
+    {
+        lock (_lock)
+        {
+            _state.AutoFlattenDay = _state.TradingDay;
+            _state.AutoFlattenFailed = false;
+            Persist();
+            _logger.LogWarning(
+                "Safety macro: ACCOUNT LIQUIDATION sent — daily loss limit {Limit:0.##} breached for {Grace:0.##}s (session P&L {Pnl:0.##})",
+                _state.Settings.DailyLossLimit, _state.Settings.AutoFlattenGraceSeconds, SessionPnl());
+        }
+    }
+
+    /// <summary>
+    /// Called when the liquidation left the machine but did not go through. Latches like a success
+    /// — see safeguard 3 above — and raises the flag the deck turns red on.
+    /// </summary>
+    public void MarkAutoFlattenFailed(string reason)
+    {
+        lock (_lock)
+        {
+            _state.AutoFlattenDay = _state.TradingDay;
+            _state.AutoFlattenFailed = true;
+            Persist();
+            _logger.LogError(
+                "Safety macro: ACCOUNT LIQUIDATION FAILED ({Reason}) — positions may still be open, manual action required",
+                reason);
+        }
+    }
+
+    /// <summary>Moment the current break ends: one break duration after the last trade opened.</summary>
+    private DateTime? PauseEndsAt() =>
+        _state.LastTradeAtUtc?.AddMinutes(_state.Settings.PauseDurationMinutes);
+
+    /// <summary>Moment the break falls due: one work stretch after the first trade of the stretch.</summary>
+    private DateTime? PauseDueAt() =>
+        _state.WorkStartedAtUtc?.AddMinutes(_state.Settings.PauseAfterMinutes);
+
+    /// <summary>
+    /// Would this order CREATE exposure — open from flat, add to a position, or flip it?
+    ///
+    /// This is the line every blocking rule has to respect. An order in the reducing direction is a
+    /// way out, and a rule that refuses a way out locks the trader inside a position he was trying
+    /// to leave — the one outcome none of these rules may ever produce.
+    ///
+    /// The test is direction-based and deliberately never size-based: a sell while long goes
+    /// through whatever its quantity, even the quantity that would flip the position. Someone
+    /// deliberately over-sizing an exit to flip during a break is circumventing on purpose, it is
+    /// journalled as such, and that costs far less than trapping everyone else in a losing trade.
+    ///
+    /// `flatten` and `cancelOrders` never reach here — they are not entry actions at all.
+    /// </summary>
+    private bool CreatesExposure(string action)
+    {
+        // A reverse closes and immediately re-opens the same size the other way round. It is an
+        // entry, not an exit, and it is exactly the gesture a break exists to interrupt.
+        if (action.Equals("reverse", StringComparison.OrdinalIgnoreCase)) return true;
+
+        var buying = action.StartsWith("buy", StringComparison.OrdinalIgnoreCase);
+        var selling = action.StartsWith("sell", StringComparison.OrdinalIgnoreCase);
+        if (!buying && !selling) return false;
+
+        // Flat: anything opens a position.
+        if (_positionDirection is not ("Long" or "Short") || _positionQuantity <= 0) return true;
+
+        // Holding: only the same direction grows it. The other way reduces or closes.
+        return (_positionDirection == "Long" && buying) || (_positionDirection == "Short" && selling);
+    }
+
+    private LimitBreach? FindPauseBreach(string? action)
+    {
+        var settings = _state.Settings;
+        if (settings.PauseAfterMinutes <= 0) return null;
+        if (PauseDueAt() is not { } dueAt || PauseEndsAt() is not { } endsAt) return null;
+
+        var now = DateTime.UtcNow;
+        if (now < dueAt) return null;
+
+        // Due, but the trader has already been away long enough — ExpirePauseIfServed will have
+        // cleared the anchor. Checked here too so the rule stays correct on its own rather than
+        // depending on the order two private methods happen to run in.
+        if (now >= endsAt) return null;
+
+        // The whole point: a break stops you from taking a NEW position, never from leaving the one
+        // you are in. Getting out must stay available at all times — that is not a concession to
+        // convenience, it is the condition that makes a forced break acceptable at all.
+        //
+        // A null action is the status query, not an order: the break is reported as running,
+        // because opening IS refused. The exit stays open per key, which is what the deck renders.
+        if (action != null && !CreatesExposure(action)) return null;
+
+        return new LimitBreach("mandatoryPause", "SAFETY_MANDATORY_PAUSE",
+            $"Mandatory break in progress: {FormatDuration(endsAt - now)} left "
+            + $"(after {settings.PauseAfterMinutes:0.##} min of trading). Closing and reducing stay available.");
+    }
+
+    /// <summary>
+    /// Clears the work anchor once the trader has been away from the market for a full break, so
+    /// the next trade opens a fresh stretch.
+    ///
+    /// Deliberately NOT conditioned on the break having fallen due. The rule this enforces is
+    /// "never trade more than PauseAfterMinutes without a PauseDurationMinutes break", so someone
+    /// who already breaks up his own session has nothing left to enforce — and a voluntary break
+    /// that did not reset the clock would be a break he is asked to take twice.
+    ///
+    /// It also removes the need to special-case anything: overnight, a weekend and lunch are all
+    /// simply gaps longer than a break, and the trading-day roll has no business resetting a
+    /// stretch that runs through local midnight.
+    ///
+    /// Run from <see cref="Refresh"/> and not from the block check, which must stay free of side
+    /// effects — it is also called to build the published status.
+    /// </summary>
+    private void ExpirePauseIfServed()
+    {
+        if (_state.Settings.PauseAfterMinutes <= 0) return;
+        if (_state.WorkStartedAtUtc == null) return;
+        if (PauseEndsAt() is not { } finPause || DateTime.UtcNow < finPause) return;
+
+        _state.WorkStartedAtUtc = null;
+        Persist();
+        _logger.LogInformation(
+            "Safety macro: {Duration:0.##} min away from the market — mandatory-break clock reset",
+            _state.Settings.PauseDurationMinutes);
     }
 
     // --- Anti-tilt ---
@@ -684,7 +954,7 @@ public sealed class SafetyMacro
 
     private SafetyStatus BuildStatus()
     {
-        LimitBreach? breach = _state.Armed ? FindBreach() : null;
+        LimitBreach? breach = _state.Armed ? FindBreach(null) : null;
 
         // Sitting at the cap is published separately from EntriesBlocked, and on purpose: holding
         // your normal size is not an incident. Turning the Safety key red every time you reach it
@@ -696,6 +966,8 @@ public sealed class SafetyMacro
 
         var remaining = RemainingLock();
         var tilt = TiltCondition();
+        var pause = PauseCountdown();
+        var liquidation = AutoFlattenCountdown();
 
         // The friction is the only part gated on the switches. Detection, the reason and the log
         // all keep running while they are off, so the trader can calibrate the thresholds against
@@ -723,8 +995,57 @@ public sealed class SafetyMacro
             PnlAvailable = HasPnl(),
             EntriesBlocked = breach != null,
             BlockReason = breach?.Reason ?? string.Empty,
-            TradingDay = _state.TradingDay
+            TradingDay = _state.TradingDay,
+            PauseActive = breach?.Reason == "mandatoryPause",
+            PauseSecondsRemaining = pause.Remaining,
+            PauseDueInSeconds = pause.DueIn,
+            AutoFlattenEnabled = _state.Settings.AutoFlattenOnDailyLoss,
+            AutoFlattenPending = liquidation > 0,
+            AutoFlattenSecondsRemaining = liquidation,
+            AutoFlattenDone = _state.AutoFlattenDay == _state.TradingDay,
+            AutoFlattenFailed = _state.AutoFlattenFailed
         };
+    }
+
+    /// <summary>
+    /// Seconds left before the account is liquidated, 0 when nothing is pending.
+    ///
+    /// Published so the deck can count down out loud. A trader who sees "LIQUIDATION 4s" can still
+    /// close on his own terms — which is a strictly better outcome than being flattened by
+    /// surprise, and costs the rule nothing since the delay elapses either way.
+    /// </summary>
+    private int AutoFlattenCountdown()
+    {
+        if (!_state.Armed) return 0;
+        if (!_state.Settings.AutoFlattenOnDailyLoss) return 0;
+        if (_state.AutoFlattenDay == _state.TradingDay) return 0;
+        if (_lossBreachSince is not { } since) return 0;
+
+        var left = TimeSpan.FromSeconds(_state.Settings.AutoFlattenGraceSeconds) - (DateTime.UtcNow - since);
+        return left > TimeSpan.Zero ? (int)Math.Ceiling(left.TotalSeconds) : 0;
+    }
+
+    /// <summary>
+    /// The two countdowns the deck shows for the mandatory break: how long a running break still
+    /// has to run, and how much trading time is left before one falls due.
+    ///
+    /// Both are published even when the macro is disarmed. The clock runs regardless — exactly like
+    /// the trade count and the P&amp;L baseline — and only enforcement is gated on Armed; seeing the
+    /// countdown before arming is what makes the rule predictable rather than a surprise.
+    /// </summary>
+    private (int Remaining, int DueIn) PauseCountdown()
+    {
+        if (_state.Settings.PauseAfterMinutes <= 0) return (0, 0);
+        if (PauseDueAt() is not { } echeance || PauseEndsAt() is not { } finPause) return (0, 0);
+
+        var now = DateTime.UtcNow;
+        var due = echeance - now;
+
+        // Not due yet: nothing is running, and what matters is the warning.
+        if (due > TimeSpan.Zero) return (0, (int)Math.Ceiling(due.TotalSeconds));
+
+        var reste = finPause - now;
+        return (reste > TimeSpan.Zero ? (int)Math.Ceiling(reste.TotalSeconds) : 0, 0);
     }
 
     private void Refresh()
@@ -732,6 +1053,7 @@ public sealed class SafetyMacro
         RollTradingDay();
         ExpireLockIfDue();
         ExpireTiltIfDue();
+        ExpirePauseIfServed();
     }
 
     private void RollTradingDay()
@@ -743,6 +1065,12 @@ public sealed class SafetyMacro
         _state.TradeCount = 0;
         _state.BaselinePnl = _accountPnl;
 
+        // The mandatory-break anchors are NOT reset here either, and for a stronger reason than the
+        // episode: a trader working through local midnight is in one continuous stretch, and
+        // handing him a fresh clock at 00:00 would be a free extension of exactly the kind the rule
+        // exists to prevent. They need no reset — any gap longer than a break clears them, and a
+        // night is always longer than a break.
+        //
         // Anti-tilt counters are all about the day's behaviour, so they start over with it.
         // A running episode is NOT cleared here: it is a short pause the trader is serving, and a
         // day boundary falling inside it is no reason to hand back the keys early.
@@ -751,6 +1079,11 @@ public sealed class SafetyMacro
         _state.ConsecutiveLosses = 0;
         _state.LastTradeQuantity = 0;
         _state.LastTradeWasLoss = false;
+
+        // A new day, a new liquidation allowance. The failure flag goes with it: it described
+        // yesterday's positions, and leaving it up would turn a real alert into wallpaper.
+        _state.AutoFlattenFailed = false;
+        _lossBreachSince = null;
         Persist();
 
         _logger.LogInformation("Safety macro: trading day is now {Day} — trade count, P&L baseline and anti-tilt counters reset", today);

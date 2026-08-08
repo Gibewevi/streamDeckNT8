@@ -5,7 +5,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/emit-shared.mjs && tsc",
+    "emit:check": "node scripts/emit-shared.mjs --check",
     "watch": "tsc --watch",
     "start": "node dist/host.js",
     "dev": "tsc && node dist/host.js",

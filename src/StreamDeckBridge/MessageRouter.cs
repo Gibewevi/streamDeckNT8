@@ -331,6 +331,52 @@ public sealed class MessageRouter
     }
 
     /// <summary>
+    /// The account-wide liquidation to send, or null when nothing is due.
+    ///
+    /// Lives here rather than in <c>BridgeServer</c> because the router already owns both the
+    /// safety macro and the state — widening the server's dependencies just to read an account
+    /// name would spread the decision across two files.
+    ///
+    /// Nothing is latched by this call: the server confirms afterwards, through
+    /// <see cref="ConfirmAutoFlatten"/>, once it knows whether the order actually left.
+    /// </summary>
+    public BridgeMessage? BuildAutoFlattenCommand()
+    {
+        if (_safety.PendingAutoFlatten() is not { } request) return null;
+
+        var account = _stateManager.GetSnapshot().Account;
+        if (string.IsNullOrWhiteSpace(account))
+        {
+            // No resolved account means nothing can be liquidated. Not latched — the next state
+            // update will carry one, and silently marking the day "handled" would leave the trader
+            // believing a rule had run when it never did.
+            _logger.LogError("Auto-liquidation due (session P&L {Pnl:0.##} / limit {Limit:0.##}) "
+                + "but no account is resolved — nothing sent", request.SessionPnl, request.Limit);
+            return null;
+        }
+
+        var payload = JsonSerializer.SerializeToElement(new { account });
+
+        return new BridgeMessage
+        {
+            Type = "command",
+            Source = "bridge",
+            RequestId = $"safety-flatten-{Guid.NewGuid():N}",
+            // Deliberately not in MessageValidator.KnownActions: this action must never be
+            // reachable from a key press, only from the rule that owns it.
+            Action = "flattenAccount",
+            Payload = payload,
+        };
+    }
+
+    /// <summary>Records what became of the liquidation once the server knows.</summary>
+    public void ConfirmAutoFlatten(bool sent, string reason = "")
+    {
+        if (sent) _safety.MarkAutoFlattenSent();
+        else _safety.MarkAutoFlattenFailed(reason);
+    }
+
+    /// <summary>
     /// Runs an arm/disarm/toggle/configure request against the safety macro.
     /// Both success and refusal carry the resulting status so the plugin can refresh its
     /// buttons from a single round trip.
@@ -357,7 +403,11 @@ public sealed class MessageRouter
                 TiltAveragingAllowed = GetPayloadBoolOrNull(message, "tiltAveragingAllowed"),
                 TiltAdvanced = GetPayloadBoolOrNull(message, "tiltAdvanced"),
                 TiltHoldSeconds = GetPayloadInt(message, "tiltHoldSeconds"),
-                TiltEpisodeMinutes = GetPayloadDouble(message, "tiltEpisodeMinutes")
+                TiltEpisodeMinutes = GetPayloadDouble(message, "tiltEpisodeMinutes"),
+                PauseAfterMinutes = GetPayloadDouble(message, "pauseAfterMinutes"),
+                PauseDurationMinutes = GetPayloadDouble(message, "pauseDurationMinutes"),
+                AutoFlattenOnDailyLoss = GetPayloadBoolOrNull(message, "autoFlattenOnDailyLoss"),
+                AutoFlattenGraceSeconds = GetPayloadDouble(message, "autoFlattenGraceSeconds")
             })
         };
 

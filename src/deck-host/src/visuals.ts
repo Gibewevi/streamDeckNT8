@@ -67,15 +67,26 @@ export interface ButtonVisual {
  * suffisait à faire échouer le rendu, et `DeckDevice.paint` interprétait cet échec comme une perte
  * du boîtier : le deck tombait en boucle de reconnexion.
  */
-const esc = (value: string): string =>
-  value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const esc = (value: unknown): string =>
+  String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /**
- * Generate a full SVG with background, text, and overlays for setImage().
- * All text is rendered inside the SVG for full control over color and layout.
- * Returns a data URI suitable for setImage().
+ * Options de sortie. Le boîtier veut 144×144 en dur ; un navigateur veut une image qui suit la
+ * taille de sa case. Le `viewBox` étant toujours émis, les deux lisent le même dessin.
  */
-export function renderButtonSvg(visual: ButtonVisual): string {
+export interface RenderOptions {
+  width?: number | string;
+  height?: number | string;
+}
+
+/**
+ * Rend le **markup** SVG d'une touche : fond, texte et surcouches.
+ *
+ * Rend une chaîne et non un data URI, et c'est ce qui rend ce fichier isomorphe : `Buffer` n'existe
+ * pas dans un navigateur. L'emballage en data URI vit dans `render-node.ts`, côté hôte seul —
+ * l'éditeur Bitlearn, lui, injecte ce markup directement.
+ */
+export function renderButtonSvg(visual: ButtonVisual, opts: RenderOptions = {}): string {
   const bg = esc(visual.bgColor);
   const tc = esc(visual.textColor || '#FFFFFF');
   const sub = esc(visual.subtitle || '');
@@ -199,44 +210,15 @@ export function renderButtonSvg(visual: ButtonVisual): string {
       <rect x="10" y="126" width="${(124 * p).toFixed(1)}" height="8" rx="4" fill="#FFFFFF"/>`;
   }
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">
+  // `viewBox` toujours présent : c'est lui qui rend le dessin indépendant de la taille de sortie.
+  // resvg honore `width`/`height`, un navigateur peut demander « 100% » sans rien déformer.
+  const width = opts.width ?? 144;
+  const height = opts.height ?? 144;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 144" width="${width}" height="${height}">
   <rect width="144" height="144" rx="20" fill="${bg}"/>
   ${contentSvg}
   ${badgeSvg}
   ${progressSvg}
 </svg>`;
-
-  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
 }
-
-/**
- * Build the title string for setTitle(). Uses \n for line breaks.
- */
-export function buildTitle(visual: ButtonVisual): string {
-  const isQty = visual.title.startsWith('QTY_');
-  if (isQty) {
-    if (visual.title === 'QTY_CANCEL') {
-      const count = visual.subtitle || '0';
-      const hasItems = count !== '0';
-      return hasItems ? `CLOSE\n${count}` : 'CLOSE\n0';
-    }
-    if (visual.title === 'QTY_PLUS') return `Qty\n+\n${visual.subtitle || ''}`;
-    if (visual.title === 'QTY_MINUS') return `Qty\n−\n${visual.subtitle || ''}`;
-    if (visual.title === 'QTY_RESET') return `Qty\nReset\n${visual.subtitle || ''}`;
-    // Stop/Target/BE arrows
-    const isStop = visual.title.startsWith('QTY_STOP_');
-    const isBE = visual.title.startsWith('QTY_BE_');
-    const label = isStop ? 'Stop' : isBE ? 'BE' : 'Target';
-    return `${label}\n${visual.subtitle || ''}`;
-  }
-  if (visual.title.startsWith('SAFETY')) {
-    const word = visual.title.split(':')[1] || 'GUARD';
-    return [word, visual.subtitle, visual.detail].filter(Boolean).join('\n');
-  }
-  if (visual.title === 'COUNTDOWN') return visual.subtitle || '';
-  // Standard 2-line title
-  const sub = `${visual.subtitle ?? ''}${visual.subtitleAccent ?? ''}`;
-  return sub ? `${visual.title}\n${sub}` : visual.title;
-}
-
-

@@ -16,6 +16,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
     {
         private readonly BridgeClient _bridgeClient;
         private readonly GuardEnforcer _enforcer;
+        /// <summary>Optional: absent, fills simply are not journalled and trading is unaffected.</summary>
+        private readonly ExecutionRecorder _recorder;
         private readonly object _lock = new object();
         private Account _subscribed;
         private bool _disposed;
@@ -31,10 +33,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// </summary>
         public Action StateChanged { get; set; }
 
-        public OrderMonitor(BridgeClient bridgeClient, GuardEnforcer enforcer)
+        public OrderMonitor(BridgeClient bridgeClient, GuardEnforcer enforcer, ExecutionRecorder recorder = null)
         {
             _bridgeClient = bridgeClient;
             _enforcer = enforcer;
+            _recorder = recorder;
         }
 
         /// <summary>
@@ -53,6 +56,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                     {
                         _subscribed.OrderUpdate -= OnOrderUpdate;
                         _subscribed.PositionUpdate -= OnPositionUpdate;
+                        if (_recorder != null) _subscribed.ExecutionUpdate -= _recorder.OnExecutionUpdate;
                     }
                     catch (Exception ex) { SdLogger.Warn("Could not unsubscribe order updates: {0}", ex.Message); }
                     _subscribed = null;
@@ -64,6 +68,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 {
                     account.OrderUpdate += OnOrderUpdate;
                     account.PositionUpdate += OnPositionUpdate;
+                    // ExecutionUpdate rather than OrderUpdate for the journal: an order reports its
+                    // state, an execution reports what actually traded — price, quantity and
+                    // commission. Reconstructing fills from order transitions means guessing, and
+                    // a journal that guesses its own P&L is worse than none.
+                    if (_recorder != null) account.ExecutionUpdate += _recorder.OnExecutionUpdate;
                     _subscribed = account;
                     SdLogger.Info("Order monitor tracking account {0}", account.Name);
                 }
@@ -208,6 +217,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                     {
                         _subscribed.OrderUpdate -= OnOrderUpdate;
                         _subscribed.PositionUpdate -= OnPositionUpdate;
+                        if (_recorder != null) _subscribed.ExecutionUpdate -= _recorder.OnExecutionUpdate;
                     }
                     catch { }
                     _subscribed = null;

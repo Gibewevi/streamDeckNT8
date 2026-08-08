@@ -155,6 +155,68 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         #region Position Management
 
+        /// <summary>
+        /// Closes EVERY position on the account and cancels every working order on it.
+        ///
+        /// Distinct from <see cref="Flatten"/>, which only touches the selected instrument. This
+        /// one backs the automatic liquidation on daily loss, and there the account is the unit
+        /// that matters: the limit is computed on account P&amp;L, so announcing "the day is over"
+        /// while a position stays open on an instrument the trader was not watching would be worse
+        /// than doing nothing — he would believe he was flat.
+        ///
+        /// Orders are cancelled FIRST and account-wide, including on instruments carrying no
+        /// position: a resting entry that fills afterwards would reopen exactly the exposure that
+        /// was just closed.
+        ///
+        /// Never reachable from a key press. Its only caller is the safety macro, via the bridge.
+        /// </summary>
+        public BridgeMessage FlattenAccount(BridgeMessage cmd)
+        {
+            var accountName = cmd.GetPayloadString("account");
+            if (string.IsNullOrWhiteSpace(accountName))
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "CONTEXT_MISSING", "Account name is required.");
+
+            var account = _resolver.FindAccount(accountName);
+            if (account == null)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "ACCOUNT_NOT_FOUND", $"Account '{accountName}' not found.");
+
+            try
+            {
+                var orders = _resolver.FindAllActiveOrders(account);
+                if (orders.Count > 0) account.Cancel(orders);
+
+                var instruments = new List<Instrument>();
+                lock (account.Positions)
+                {
+                    foreach (Position position in account.Positions)
+                    {
+                        if (position.MarketPosition != MarketPosition.Flat && position.Instrument != null)
+                            instruments.Add(position.Instrument);
+                    }
+                }
+
+                if (instruments.Count > 0) account.Flatten(instruments);
+
+                SdLogger.Warn("[REQ:{0}] ACCOUNT LIQUIDATION on {1} — {2} order(s) cancelled, {3} position(s) flattened",
+                    cmd.RequestId, account.Name, orders.Count, instruments.Count);
+
+                return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
+                {
+                    ordersCancelled = orders.Count,
+                    positionsFlattened = instruments.Count,
+                    message = $"Account {account.Name} liquidated: {instruments.Count} position(s), {orders.Count} order(s)"
+                });
+            }
+            catch (Exception ex)
+            {
+                // The worst outcome this whole feature can produce: the trader is told the day is
+                // closed while his position is still live. Logged as an error and reported as a
+                // failure so the deck can turn red instead of pretending it worked.
+                SdLogger.Error(ex, $"[REQ:{cmd.RequestId}] ACCOUNT LIQUIDATION FAILED on {accountName}");
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "ORDER_REJECTED", ex.Message);
+            }
+        }
+
         public BridgeMessage Flatten(BridgeMessage cmd)
         {
             var ctx = ResolveContext(cmd);

@@ -9,9 +9,16 @@ import { TradingState } from './messages.js';
 
 export type StatusType = 'account' | 'instrument' | 'position' | 'pnl' | 'quantity' | 'connection' | 'safety';
 
-function formatAccountLabel(account: string): string {
+/**
+ * Abrège un nom de compte pour tenir sur une touche.
+ *
+ * `fallback` est le seul point sur lequel les appelants divergeaient : l'indicateur d'état écrit
+ * « --- », la touche de sélection écrit « ACCT ». Les deux copies de cette fonction ne différaient
+ * que par cette chaîne — et elles auraient fini par différer sur autre chose.
+ */
+export function formatAccountLabel(account: string, fallback: string): string {
   const value = account.trim();
-  if (!value) return '---';
+  if (!value) return fallback;
 
   const compact = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
   const letters = (value.match(/[A-Za-z]/g) ?? []).join('').toUpperCase();
@@ -34,7 +41,7 @@ export function getDisplayText(statusType: StatusType, state: TradingState | nul
 
   switch (statusType) {
     case 'account':
-      return { title: formatAccountLabel(state.account || ''), subtitle: 'Account' };
+      return { title: formatAccountLabel(state.account || '', '---'), subtitle: 'Account' };
 
     case 'instrument':
       return {

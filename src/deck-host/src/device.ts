@@ -9,7 +9,8 @@
 import { listStreamDecks, openStreamDeck, type StreamDeck } from '@elgato-stream-deck/node';
 import { Resvg } from '@resvg/resvg-js';
 import { existsSync } from 'fs';
-import { renderButtonSvg, ButtonVisual } from './visuals.js';
+import { ButtonVisual } from './visuals.js';
+import { renderButtonDataUri } from './render-node.js';
 import * as log from './logger.js';
 
 /**
@@ -179,7 +180,7 @@ export class DeckDevice {
 
   /** Rasterise un visuel en RGBA à la taille des touches du boîtier. */
   #raster(visual: ButtonVisual, width: number): Buffer {
-    const dataUri = renderButtonSvg(visual);
+    const dataUri = renderButtonDataUri(visual);
     const svg = Buffer.from(dataUri.split(',')[1], 'base64').toString('utf8');
     return new Resvg(svg, {
       fitTo: { mode: 'width', value: width },

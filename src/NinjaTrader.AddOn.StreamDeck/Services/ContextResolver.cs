@@ -621,6 +621,36 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             return orders;
         }
 
+        /// <summary>
+        /// Every active order on the account, whatever the instrument.
+        ///
+        /// Exists for the account-wide liquidation: a resting entry on an instrument the trader is
+        /// not currently watching would otherwise survive a "the day is over" flatten and fill
+        /// afterwards — reopening the exposure the rule had just closed.
+        /// </summary>
+        public List<Order> FindAllActiveOrders(Account account)
+        {
+            var orders = new List<Order>();
+            if (account == null) return orders;
+
+            try
+            {
+                lock (account.Orders)
+                {
+                    foreach (Order order in account.Orders)
+                    {
+                        if (IsActiveOrder(order)) orders.Add(order);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Error(ex, "Error finding active orders account-wide");
+            }
+
+            return orders;
+        }
+
         private List<Order> FindOrdersByType(Account account, Instrument instrument, OrderType orderType)
         {
             var orders = new List<Order>();

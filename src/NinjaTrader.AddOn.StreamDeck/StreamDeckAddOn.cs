@@ -24,6 +24,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private StatePublisher _statePublisher;
         private OrderMonitor _orderMonitor;
         private GuardEnforcer _guardEnforcer;
+        private ExecutionRecorder _executionRecorder;
         private AddOnConfig _config;
 
         protected override void OnStateChange()
@@ -69,7 +70,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // never cross it, so the safety macro has to be applied from inside the platform.
                 _guardEnforcer = new GuardEnforcer(_resolver, _bridgeClient);
 
-                _orderMonitor = new OrderMonitor(_bridgeClient, _guardEnforcer);
+                // Records every fill to a local spool. Passed to the monitor, which owns the
+                // account subscription and is therefore the only place that can attach it.
+                _executionRecorder = new ExecutionRecorder();
+                _orderMonitor = new OrderMonitor(_bridgeClient, _guardEnforcer, _executionRecorder);
                 _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor);
 
                 // Fills and cancellations refresh the deck on the spot instead of waiting for the
@@ -98,7 +102,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 SdLogger.Event("Session", "Add-On shutting down (NinjaTrader closing or NinjaScript reload)");
                 if (_statePublisher != null) _statePublisher.Dispose();
+                // After the monitor, which detaches the subscription that feeds it: closing the
+                // spool first would leave fills arriving at a disposed writer.
                 if (_orderMonitor != null) _orderMonitor.Dispose();
+                if (_executionRecorder != null) _executionRecorder.Dispose();
                 if (_bridgeClient != null) _bridgeClient.Dispose();
                 SdLogger.Event("Session", "=== StreamDeck Add-On session ended ===");
             }
