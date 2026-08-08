@@ -26,7 +26,7 @@ import { JournalUploader, comptesJournalises } from './uploader.js';
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.3.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -260,10 +260,7 @@ async function pushSafetyConfig(settings: Record<string, unknown>): Promise<void
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
   };
 
-  for (const key of [
-    'maxTradesWhenLosing', 'dailyLossLimit', 'maxContracts', 'lockDurationHours',
-    'pauseAfterMinutes', 'pauseDurationMinutes',
-  ]) {
+  for (const key of ['maxTradesWhenLosing', 'dailyLossLimit', 'maxContracts', 'lockDurationHours']) {
     const value = nombre(key);
     if (value !== null) payload[key] = value;
   }
@@ -621,7 +618,47 @@ async function pushCooldownConfig(): Promise<void> {
 /** Rejoue vers le bridge tous les réglages qu'il possède mais que le layout décrit. */
 async function syncConfig(): Promise<void> {
   await syncSafetyConfig();
+  await syncPauseConfig();
   await pushCooldownConfig();
+}
+
+/**
+ * Pousse les réglages de la pause obligatoire, qui a sa propre touche.
+ *
+ * Envoi séparé et non fondu dans `pushSafetyConfig` : le bridge n'accepte un changement pendant que
+ * Guard est armé que si la charge ne contient QUE des champs de pause. Les mêler rendrait la pause
+ * inconfigurable dès qu'on arme Guard — or elle n'est plus une règle de Guard.
+ *
+ * Sans touche Pause dans le layout, rien n'est transmis et le bridge garde ce qu'il avait. C'est
+ * volontaire : retirer la touche ne doit pas effacer en silence une règle que le trader s'était
+ * imposée.
+ */
+async function syncPauseConfig(): Promise<void> {
+  for (const p of store.layout.pages) {
+    for (const a of Object.values(p.slots)) {
+      if (a.actionId !== 'com.trader.ninjatrader.pause') continue;
+
+      const payload: Record<string, unknown> = {};
+      for (const key of ['pauseAfterMinutes', 'pauseDurationMinutes']) {
+        const value = a.settings?.[key];
+        if (typeof value === 'number' && Number.isFinite(value)) payload[key] = value;
+      }
+      if (Object.keys(payload).length === 0 || !bridge.isConnected) return;
+
+      const resp = await bridge.sendCommand(createCommand('configureSafety', payload));
+      if (resp.error) {
+        // `PAUSE_IN_PROGRESS` est un refus attendu : on ne change pas la règle pendant qu'elle
+        // s'applique. Le dire sans en faire une erreur.
+        const attendu = resp.error.code === 'PAUSE_IN_PROGRESS';
+        const message = 'Réglages de pause non appliqués';
+        if (attendu) log.event('Pause', message, { raison: resp.error.message });
+        else log.eventWarn('Pause', message, { code: resp.error.code, raison: resp.error.message });
+      } else {
+        log.event('Pause', 'Réglages de pause poussés vers le bridge', payload);
+      }
+      return;
+    }
+  }
 }
 
 /** Rejoue la configuration de sécurité présente dans le layout — à la connexion et après édition. */

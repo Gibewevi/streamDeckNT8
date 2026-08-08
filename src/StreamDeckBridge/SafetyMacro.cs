@@ -267,6 +267,15 @@ public sealed class SafetyMacro
     /// <summary>
     /// Updates the rules. Refused while armed, so the trader cannot loosen the limits
     /// mid-session. Only the supplied fields are changed.
+    ///
+    /// The mandatory break is the exception, because it is no longer a Guard rule: it has its own
+    /// macro, applies whether or not Guard is armed, and its settings have therefore no business
+    /// being held by Guard's lock. Someone who never arms Guard must still be able to set his
+    /// rhythm; someone who arms it must still be able to change that rhythm.
+    ///
+    /// It has its own guard instead, and a narrower one: not while a break is actually running.
+    /// Editing the rhythm mid-break would turn the break into a suggestion, which is the one thing
+    /// it cannot be.
     /// </summary>
     public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Configure(SafetyConfigUpdate update)
     {
@@ -274,10 +283,20 @@ public sealed class SafetyMacro
         {
             Refresh();
 
-            if (_state.Armed)
+            var toucheLaPause = update.PauseAfterMinutes.HasValue || update.PauseDurationMinutes.HasValue;
+            var pauseSeule = toucheLaPause && update.OnlyPauseFields;
+
+            if (_state.Armed && !pauseSeule)
             {
                 return (false, "SAFETY_MACRO_LOCKED",
                     $"Safety macro settings are locked for another {FormatDuration(RemainingLock())}.",
+                    BuildStatus());
+            }
+
+            if (toucheLaPause && FindPauseBreach(null) != null)
+            {
+                return (false, "PAUSE_IN_PROGRESS",
+                    "A mandatory break is running: its settings cannot be changed until it ends.",
                     BuildStatus());
             }
 
@@ -376,6 +395,18 @@ public sealed class SafetyMacro
                 if (breach != null)
                     return (true, breach.Value.Code, breach.Value.Message);
             }
+
+            // The mandatory break is NOT gated on Armed either, and for its own reason: it has its
+            // own macro on the deck. A rule whose key sits there, configured, but that only takes
+            // effect when a DIFFERENT macro happens to be armed is a trap — the trader would set
+            // it, see nothing happen, and conclude it does not work.
+            //
+            // It costs nothing to keep it standing: unlike the daily loss and the trade budget, a
+            // break is owed for time spent trading, which is true whether or not a session is
+            // formally under Guard.
+            var pause = FindPauseBreach(action);
+            if (pause != null)
+                return (true, pause.Value.Code, pause.Value.Message);
 
             // The contract cap is deliberately NOT gated on Armed. It is a standing risk limit on
             // the account, not a session rule: unlike the daily loss and the trade budget it needs
@@ -613,9 +644,9 @@ public sealed class SafetyMacro
             }
         }
 
-        // Evaluated outside the P&L gate on purpose: a break is owed for time spent, and time is
-        // known even when NinjaTrader publishes no account P&L.
-        return FindPauseBreach(action);
+        // The mandatory break is NOT here: it has its own macro, is evaluated outside the Armed
+        // gate, and is checked by its callers alongside this one. See `Evaluate` and `BuildStatus`.
+        return null;
     }
 
     // --- Mandatory break ---
@@ -954,7 +985,10 @@ public sealed class SafetyMacro
 
     private SafetyStatus BuildStatus()
     {
-        LimitBreach? breach = _state.Armed ? FindBreach(null) : null;
+        // Session rules only count while armed; the mandatory break stands on its own, so its
+        // status must be published even when the macro is disarmed — otherwise the Pause key would
+        // sit dark while the break is refusing entries.
+        LimitBreach? breach = (_state.Armed ? FindBreach(null) : null) ?? FindPauseBreach(null);
 
         // Sitting at the cap is published separately from EntriesBlocked, and on purpose: holding
         // your normal size is not an incident. Turning the Safety key red every time you reach it
@@ -1035,6 +1069,7 @@ public sealed class SafetyMacro
     /// </summary>
     private (int Remaining, int DueIn) PauseCountdown()
     {
+        // No Armed check: the break has its own macro and applies on its own.
         if (_state.Settings.PauseAfterMinutes <= 0) return (0, 0);
         if (PauseDueAt() is not { } echeance || PauseEndsAt() is not { } finPause) return (0, 0);
 

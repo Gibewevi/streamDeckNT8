@@ -225,24 +225,6 @@ export const CATALOG: ActionDef[] = [
       // min aligné sur SafetyMacro.MinLockHours : en dessous, le bridge refuse avec un
       // INVALID_PAYLOAD que rien n'expliquait à l'écran.
       { key: 'lockDurationHours', label: 'Durée du verrou (heures)', type: 'number', min: 0.05, max: 24, help: 'Le verrou ne peut pas être levé avant son expiration.' },
-      // --- Pause obligatoire ---
-      // Règle Guard : elle REFUSE les entrées, comme les limites ci-dessus, et non une friction
-      // Anti-Tilt. Le compteur démarre au PREMIER TRADE et non à l'ouverture de la séance —
-      // regarder le marché ne fatigue pas, et une pause imposée à quelqu'un qui n'a rien pris
-      // serait vécue comme arbitraire, ce qui est la façon la plus sûre de faire désactiver une
-      // règle. Tout arrêt d'au moins la durée de la pause remet le compteur à zéro.
-      {
-        key: 'pauseAfterMinutes', label: 'Pause après (min de trading)', type: 'number',
-        min: 0, max: 480, step: 5, default: 0, floor: 5,
-        help: 'Minutes de trading, comptées depuis le premier trade, avant qu\'une pause ne devienne '
-            + 'obligatoire. 0 = pas de pause. En dessous de 5 min, ramené à 5.',
-      },
-      {
-        key: 'pauseDurationMinutes', label: 'Durée de la pause (min)', type: 'number',
-        min: 1, max: 120, step: 1, default: 10,
-        help: 'Durée de la coupure. Le temps déjà passé sans trader compte dedans : revenir de '
-            + 'déjeuner ne déclenche pas une pause supplémentaire. Clôturer et réduire restent possibles.',
-      },
       // --- Anti-Tilt ---
       // Trois réglages, pas onze. Les seuils (escalade de taille, restitution de gain, série de
       // pertes, durée d'épisode, durée de maintien) sont dérivés par le bridge des deux limites
@@ -284,6 +266,35 @@ export const CATALOG: ActionDef[] = [
         showIf: { key: 'tiltAdvanced', equals: true },
         help: 'Désarme la macro sans attendre la fin du verrou, pour la mettre au point. '
             + 'La touche affiche DEV. À laisser désactivé en séance.',
+      },
+    ],
+  },
+
+  // --- Pause obligatoire ---
+  // Macro à part entière, et non un réglage de Guard. Ce n'est pas une règle de risque mais une
+  // règle d'endurance : elle ne mesure pas ce qu'on perd, elle mesure depuis combien de temps on
+  // trade. Elle s'applique donc que Guard soit armé ou non — une touche posée et réglée qui ne
+  // ferait rien tant qu'une AUTRE macro n'est pas armée serait un piège.
+  //
+  // Le compteur démarre au PREMIER TRADE, jamais à l'ouverture de la séance : regarder le marché
+  // ne fatigue pas. Et tout arrêt d'au moins la durée de la pause remet le compteur à zéro, ce qui
+  // fait de la nuit, du week-end et du déjeuner de simples trous — aucun cas particulier à écrire.
+  {
+    id: 'com.trader.ninjatrader.pause', name: 'Pause obligatoire', group: 'Affichage',
+    description: 'Impose une coupure après un temps de trading. Affiche le décompte, puis la '
+               + 'pause en cours. Clôturer et réduire restent toujours possibles.',
+    settings: [
+      {
+        key: 'pauseAfterMinutes', label: 'Pause après (min de trading)', type: 'number',
+        min: 0, max: 480, step: 5, default: 0, floor: 5,
+        help: 'Minutes de trading, comptées depuis le premier trade, avant qu\'une pause ne devienne '
+            + 'obligatoire. 0 = pas de pause. En dessous de 5 min, ramené à 5.',
+      },
+      {
+        key: 'pauseDurationMinutes', label: 'Durée de la pause (min)', type: 'number',
+        min: 1, max: 120, step: 1, default: 10,
+        help: 'Durée de la coupure. Le temps déjà passé sans trader compte dedans : revenir de '
+            + 'déjeuner ne déclenche pas une pause supplémentaire. Seules les entrées sont refusées.',
       },
     ],
   },

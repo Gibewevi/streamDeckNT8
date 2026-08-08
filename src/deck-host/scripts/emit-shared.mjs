@@ -90,6 +90,28 @@ function verifierIsomorphie(nom, source) {
   return fautes;
 }
 
+/**
+ * La version est déclarée à deux endroits qui ne peuvent pas se lire l'un l'autre :
+ * `package.json`, dont l'installateur tire son numéro, et `host.ts`, qui l'écrit dans l'en-tête de
+ * log et la transmet à Bitlearn comme `appVersion`.
+ *
+ * Un écart entre les deux produit exactement le pire diagnostic possible : un poste dont le journal
+ * annonce une version, l'installateur une autre, et Bitlearn une troisième. Vérifié ici plutôt que
+ * dans le script d'empaquetage, parce que `npm run build` passe toujours par là.
+ */
+function verifierVersion() {
+  const paquet = JSON.parse(readFileSync(resolve(ICI, '..', 'package.json'), 'utf8')).version;
+  const host = readFileSync(join(SOURCE, 'host.ts'), 'utf8').match(/const VERSION = '([^']+)'/)?.[1];
+
+  if (paquet !== host) {
+    console.error(`\nVersion incohérente : package.json dit ${paquet}, host.ts dit ${host ?? '(introuvable)'}.`);
+    console.error('Les deux doivent porter le même numéro — c\'est celui que lit l\'installateur.');
+    process.exit(1);
+  }
+  return paquet;
+}
+
+const version = verifierVersion();
 const check = process.argv.includes('--check');
 const dossier = cible();
 let ecarts = 0;
@@ -150,5 +172,5 @@ if (check && ecarts > 0) {
 }
 
 console.log(check
-  ? `[emit-shared] ${rendus.size} fichiers partagés à jour.`
-  : `[emit-shared] ${rendus.size} fichiers émis vers ${dossier}${ecarts ? ` (${ecarts} mis à jour)` : ' (aucun changement)'}`);
+  ? `[emit-shared] v${version} — ${rendus.size} fichiers partagés à jour.`
+  : `[emit-shared] v${version} — ${rendus.size} fichiers émis vers ${dossier}${ecarts ? ` (${ecarts} mis à jour)` : ' (aucun changement)'}`);

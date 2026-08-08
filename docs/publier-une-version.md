@@ -1,0 +1,119 @@
+# Publier une version de TradeDeck
+
+Procédure pour produire un installateur et le rendre téléchargeable depuis Bitlearn.
+
+## Quand
+
+**Dès qu'une modification touche `src/deck-host`, `src/StreamDeckBridge` ou
+`src/NinjaTrader.AddOn.StreamDeck`.** Sans attendre qu'on le demande.
+
+La raison n'est pas l'hygiène : Bitlearn se déploie d'un `git pull`, mais l'hôte est un `.exe`
+installé sur le poste du trader. Tant qu'il n'est pas reconstruit, l'éditeur Bitlearn propose des
+réglages que le boîtier ne sait pas appliquer. C'est le pire état possible — l'écran promet une
+protection qui n'existe pas côté moteur, et personne ne le découvre avant qu'elle serve.
+
+Une modification qui ne touche que Bitlearn (pages, journal, statistiques) n'a besoin de rien.
+
+## Numérotation
+
+`MAJEUR.MINEUR.CORRECTIF`, avant 1.0 :
+
+- **MINEUR** — nouvelle macro, nouvelle règle, changement de comportement d'une protection
+- **CORRECTIF** — correction sans changement de comportement observable
+
+Historique : `0.1.0` premier installateur · `0.2.0` journalisation, pause obligatoire, liquidation
+automatique, partage du code avec Bitlearn · `0.3.0` la pause devient une macro autonome.
+
+## Où vit le numéro
+
+Quatre endroits, et **`npm run build` refuse de construire s'ils divergent** (voir
+`scripts/emit-shared.mjs`) :
+
+| Fichier | Rôle |
+|---|---|
+| `src/deck-host/package.json` | la source — `build-installer.ps1` lit celle-ci |
+| `src/deck-host/package-lock.json` | deux occurrences, à jour sous peine de bruit dans `git diff` |
+| `src/deck-host/src/host.ts` | en-tête de log, et `appVersion` transmis à Bitlearn |
+| `src/deck-host/packaging/TradeDeck.iss` | repli si l'on invoque ISCC à la main |
+
+## Procédure
+
+```bash
+# 1. Le numéro, partout
+cd "src/deck-host"
+sed -i 's/"version": "0.2.0"/"version": "0.3.0"/' package.json package-lock.json
+sed -i "s/^const VERSION = '0.2.0';/const VERSION = '0.3.0';/" src/host.ts
+sed -i 's/#define AppVersion "0.2.0"/#define AppVersion "0.3.0"/' packaging/TradeDeck.iss
+
+# 2. Arrêter l'hôte et le bridge — sinon les fichiers sont verrouillés
+#    (PowerShell : Stop-Process sur node.exe / StreamDeckBridge.exe / wscript.exe
+#     dont la ligne de commande contient TradeDeck ou StreamDeckTrader)
+
+# 3. LE BRIDGE, EN RELEASE  ← voir le piège ci-dessous
+dotnet build ../StreamDeckBridge/StreamDeckBridge.csproj -c Release
+
+# 4. L'hôte (régénère aussi deck-core/ côté Bitlearn)
+npm run build
+
+# 5. L'installateur
+powershell -ExecutionPolicy Bypass -File packaging/build-installer.ps1
+
+# 6. Publier — l'ancien est SUPPRIMÉ, la route sert le plus récent et
+#    laisser les deux serait un piège
+rm -f ../../../Bitlearn/private/tradedeck/BitlearnTradeDeck-Setup-*.exe
+cp ../../build/BitlearnTradeDeck-Setup-0.3.0.exe ../../../Bitlearn/private/tradedeck/
+```
+
+## Le piège : Release contre Debug
+
+**`dotnet build` compile en Debug. L'installateur consomme la sortie *Release*.**
+
+Vécu le 07/08/2026 : trois modifications du bridge (pause obligatoire, liquidation automatique)
+compilées et vérifiées toute une session — en Debug. La sortie Release datait de la veille. Sans
+l'étape 3, l'installateur aurait embarqué un bridge sans aucune de ces règles, et rien ne l'aurait
+signalé : le build réussit, l'installateur se construit, il est simplement faux.
+
+Contrôle après coup, à faire systématiquement :
+
+```bash
+node -e '
+const fs=require("fs");
+const t=(f,s)=>{const b=fs.readFileSync(f);
+  return b.includes(Buffer.from(s,"utf16le"))||b.includes(Buffer.from(s,"latin1"));};
+const b="build/payload/bridge/StreamDeckBridge.dll";
+console.log("pause:", t(b,"SAFETY_MANDATORY_PAUSE"), "| liquidation:", t(b,"flattenAccount"));
+console.log("version:", fs.readFileSync("build/payload/dist/host.js","utf8")
+  .match(/VERSION = .([\d.]+)./)?.[1]);'
+```
+
+Chercher le **motif d'octets**, pas avec `strings` : cette commande n'existe pas dans le Git Bash
+de cette machine et échoue en silence, `grep` compte alors zéro et l'on conclut « absent » à tort.
+Les littéraux .NET sont en UTF-16, un décodage global rate ceux placés à un décalage impair —
+d'où la recherche de `Buffer.from(s, "utf16le")` à n'importe quelle position.
+
+## Ce que la publication déclenche côté Bitlearn
+
+Rien à déployer. `tradeDeckReleaseService` lit le dossier à chaque affichage :
+
+- le bouton de `/tradedeck` passe à `Télécharger [v0.3.0]`
+- la ligne sous le bouton donne la taille et la date
+- `GET /api/tradedeck/download` sert le nouveau fichier, sous habilitation
+
+Déposer le `.exe` suffit. Le vérifier : `npx jest app/server/services/tradeDeckReleaseService`.
+
+## Signature de code — non fait
+
+L'installateur n'est pas signé. SmartScreen affiche « Éditeur inconnu » et cache le bouton
+d'exécution derrière « Informations complémentaires ». Sur un produit payant, c'est un frein de
+conversion réel.
+
+Un certificat OV coûte 200–400 €/an, la réputation SmartScreen se construisant ensuite sur quelques
+centaines de téléchargements ; un EV l'accorde immédiatement, pour environ le double.
+`build-installer.ps1` accepte déjà `-SignPfx <chemin.pfx> -SignPassword <motdepasse>`.
+
+## Après installation
+
+Le trader doit relancer TradeDeck. Les réglages sont conservés : le layout vit dans Bitlearn,
+l'état de la macro de sécurité dans `%APPDATA%\StreamDeckTrader\safety-macro.json`. L'installateur
+arrête lui-même l'hôte et le bridge (`PrepareToInstall`), et le verrou de sécurité survit à la
+mise à jour — c'est vérifié, redémarrer n'est pas un moyen de le lever.

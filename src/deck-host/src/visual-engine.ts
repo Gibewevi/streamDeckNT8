@@ -459,6 +459,53 @@ export function computeVisual(
         textColor: Colors.textWhite,
       };
     }
+    // Pause obligatoire — macro à part, indépendante de l'armement de Guard.
+    //
+    // Trois états, et le troisième est le plus important : le décompte AVANT la pause. Une coupure
+    // qui tombe sans prévenir se découvre au moment où l'on voulait entrer, et c'est ainsi qu'on
+    // finit par désactiver la règle. Annoncée, elle se prépare — on termine la position en cours
+    // au lieu d'en ouvrir une.
+    case 'com.trader.ninjatrader.pause': {
+      const safety = state.safety ?? DEFAULT_SAFETY_STATUS;
+      const reglee = Number(settings.pauseAfterMinutes) > 0;
+
+      if (!reglee) {
+        return { title: 'PAUSE', subtitle: 'OFF', bgColor: Colors.black, textColor: Colors.textWhite };
+      }
+
+      // La pause s'applique : rouge, comme tout ce qui refuse une entrée.
+      if (safety.pauseActive) {
+        return {
+          title: 'PAUSE',
+          subtitle: formatLockRemaining(safety.pauseSecondsRemaining),
+          detail: 'REPOS',
+          bgColor: Colors.refuse, textColor: Colors.textWhite,
+        };
+      }
+
+      // Le compteur ne tourne pas encore : aucun trade pris depuis la dernière coupure. C'est un
+      // état normal, pas une règle inactive — le dire évite de croire que le réglage n'a pas pris.
+      if (safety.pauseDueInSeconds <= 0) {
+        return {
+          title: 'PAUSE', subtitle: 'PRET',
+          detail: `${Math.round(Number(settings.pauseDurationMinutes) || 0)}min`,
+          bgColor: Colors.black, textColor: Colors.orange, subtitleColor: Colors.textWhite,
+        };
+      }
+
+      // Décompte. Orange plein dans le dernier quart d'heure : c'est le moment où l'information
+      // change de nature — elle cesse d'être un rappel et devient une consigne.
+      const imminente = safety.pauseDueInSeconds <= PAUSE_PREAVIS_S;
+      return {
+        title: 'PAUSE',
+        subtitle: formatLockRemaining(safety.pauseDueInSeconds),
+        detail: 'RESTANT',
+        bgColor: imminente ? Colors.orange : Colors.black,
+        textColor: Colors.textWhite,
+        subtitleColor: imminente ? Colors.textWhite : Colors.orange,
+      };
+    }
+
     case 'com.trader.ninjatrader.safety': {
       const safety = state.safety ?? DEFAULT_SAFETY_STATUS;
       // Le mode développement lève la seule garantie de cette macro : il doit se voir sur la

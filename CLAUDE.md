@@ -5,6 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > Rédigé en français comme le reste de la documentation du projet ; le code et ses commentaires
 > restent en anglais.
 
+> **Ce projet s'étend sur DEUX dépôts.** Celui-ci est le moteur ; l'éditeur, le journal et les
+> statistiques vivent dans `Bitlearn` (`C:\Users\pixel\Desktop\Bitlearn`). Six fichiers de ce dépôt
+> y sont **copiés automatiquement** par `npm run build` — ne jamais les éditer là-bas.
+>
+> Si vous découvrez le projet, lire **`docs/carte-des-deux-depots.md`** avant tout le reste.
+>
+> Toute modification du moteur exige de **reconstruire l'installateur** :
+> `docs/publier-une-version.md`. Sans ça, l'éditeur Bitlearn propose des réglages que le boîtier
+> installé chez le trader ne sait pas appliquer.
+
 ## Vue d'ensemble
 
 Surface de contrôle trading pour NinjaTrader 8 via Elgato Stream Deck. **Trois processus

@@ -245,6 +245,19 @@ public sealed class SafetyConfigUpdate
     public bool? AutoFlattenOnDailyLoss { get; set; }
     public double? AutoFlattenGraceSeconds { get; set; }
 
+    /// <summary>
+    /// True when the update carries ONLY mandatory-break fields.
+    ///
+    /// The break has its own macro on the deck, so its key pushes its own settings and nothing
+    /// else. That is what lets `Configure` let it through while Guard is armed without opening a
+    /// hole: a payload that also carries a risk limit is not a break update and stays locked.
+    /// </summary>
+    public bool OnlyPauseFields =>
+        MaxTradesWhenLosing == null && DailyLossLimit == null && MaxContracts == null &&
+        LockDurationHours == null && AntiTiltEnabled == null && TiltAveragingAllowed == null &&
+        TiltAdvanced == null && TiltHoldSeconds == null && TiltEpisodeMinutes == null &&
+        AutoFlattenOnDailyLoss == null && AutoFlattenGraceSeconds == null;
+
     /// <summary>True when the caller supplied nothing at all — the router rejects that outright.</summary>
     public bool IsEmpty =>
         MaxTradesWhenLosing == null && DailyLossLimit == null && MaxContracts == null &&
