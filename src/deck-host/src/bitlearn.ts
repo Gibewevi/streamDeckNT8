@@ -323,7 +323,18 @@ export class BitlearnClient {
    * cette condition : réémettre est gratuit — les index uniques côté serveur rendent un doublon
    * impossible — alors que perdre une exécution est définitif.
    */
-  async sendJournal(lot: { executions: unknown[]; events: unknown[] }): Promise<boolean> {
+  /**
+   * `soldes` : cash value par nom de compte, telle que NinjaTrader la publie à l'instant de l'envoi.
+   *
+   * Voyage avec le journal plutôt que dans le battement, parce que c'est le journal qui crée les
+   * comptes côté Bitlearn — le solde doit arriver en même temps que les trades qu'il explique, pas
+   * cinq secondes avant ou après.
+   */
+  async sendJournal(lot: {
+    executions: unknown[];
+    events: unknown[];
+    soldes?: Record<string, number>;
+  }): Promise<boolean> {
     if (!this.#token) return false;
 
     try {

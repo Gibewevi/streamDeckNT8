@@ -24,6 +24,12 @@ export interface TradingState {
   position: PositionState | null;
   instrumentInfo: InstrumentInfo | null;
   availableAccounts: string[];
+  /**
+   * Cash value du compte, quand NinjaTrader l'expose. Sert au journal Bitlearn à partir du capital
+   * réel : le P&L dit ce qui a changé, jamais à partir de quoi, et sans ce point de départ tout
+   * pourcentage affiché est faux.
+   */
+  cashValue?: number | null;
   cooldownEnabled: boolean;
   cooldownActive: boolean;
   cooldownSecondsRemaining: number;

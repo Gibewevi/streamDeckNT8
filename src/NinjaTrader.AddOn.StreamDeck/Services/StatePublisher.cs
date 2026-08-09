@@ -397,6 +397,41 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             accountDict["realizedPnl"] = realized;
             accountDict["unrealizedPnl"] = unrealized;
             accountDict["pnlAvailable"] = available;
+            AddAccountBalance(accountDict, account);
+        }
+
+        /// <summary>
+        /// Account cash value, forwarded so the Bitlearn journal can start from the real capital.
+        ///
+        /// Without it the journal opens at zero, and every percentage it computes is meaningless —
+        /// a gain of 200 on nothing is not a percentage. The P&amp;L alone cannot supply it: it says
+        /// what changed, never what it changed FROM.
+        ///
+        /// Kept separate from <see cref="AddAccountPnl"/> because it fails independently: a provider
+        /// can expose P&amp;L and not cash value, and losing the balance must not cost us the P&amp;L on
+        /// which the safety macro's loss limits depend.
+        /// </summary>
+        private static DateTime _lastBalanceWarning = DateTime.MinValue;
+
+        private static void AddAccountBalance(Dictionary<string, object> accountDict, Account account)
+        {
+            if (account == null) return;
+
+            try
+            {
+                accountDict["cashValue"] = account.Get(AccountItem.CashValue, account.Denomination);
+            }
+            catch (Exception ex)
+            {
+                // Throttled like the P&L warning: this runs on every publish tick.
+                if ((DateTime.UtcNow - _lastBalanceWarning).TotalMinutes >= 1)
+                {
+                    _lastBalanceWarning = DateTime.UtcNow;
+                    SdLogger.EventWarn("Account",
+                        "Cash value unavailable for {0}: {1} — the Bitlearn journal will keep its current starting capital",
+                        account.Name, ex.Message);
+                }
+            }
         }
 
         public void Dispose()

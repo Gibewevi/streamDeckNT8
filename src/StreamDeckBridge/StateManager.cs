@@ -333,6 +333,11 @@ public sealed class StateManager
                     if (!string.IsNullOrEmpty(name))
                         _state.Account = name;
                 }
+
+                if (acctObj.TryGetProperty("cashValue", out var cash) && cash.ValueKind == JsonValueKind.Number)
+                {
+                    _state.CashValue = cash.GetDouble();
+                }
             }
             // Update NT connected status from addon heartbeat
             if (statePayload.TryGetProperty("connected", out var conn) && conn.ValueKind == JsonValueKind.True)

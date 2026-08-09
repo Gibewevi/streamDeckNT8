@@ -82,9 +82,22 @@ export class JournalUploader {
    * un envoi. Relu à chaque envoi plutôt que capturé, pour que cocher la bascule prenne effet
    * sans redémarrer l'hôte.
    */
-  constructor(bitlearn: BitlearnClient, getFiltre: () => FiltreComptes, dossier = JOURNAL_DIR) {
+  /**
+   * `getSolde` rend la cash value du compte sélectionné, ou null. Une fonction plutôt qu'une valeur :
+   * le solde bouge à chaque trade, et l'envoyer figé au démarrage aurait été pire que ne rien
+   * envoyer — un capital de départ faux est plus trompeur qu'un capital absent.
+   */
+  #getSolde: () => { compte: string; solde: number } | null;
+
+  constructor(
+    bitlearn: BitlearnClient,
+    getFiltre: () => FiltreComptes,
+    getSolde: () => { compte: string; solde: number } | null = () => null,
+    dossier = JOURNAL_DIR,
+  ) {
     this.#bitlearn = bitlearn;
     this.#getFiltre = getFiltre;
+    this.#getSolde = getSolde;
     this.#dossier = dossier;
     this.#curseurs = this.#chargerCurseurs();
   }
@@ -128,9 +141,17 @@ export class JournalUploader {
 
       if (executions.lignes.length === 0 && events.lignes.length === 0) return;
 
+      // Le solde n'accompagne que le compte que l'hôte a réellement sous les yeux. Deviner celui
+      // des autres à partir de leur P&L reviendrait à inventer un capital de départ.
+      const courant = this.#getSolde();
+      const soldes = courant && retenu(courant.compte, filtre)
+        ? { [courant.compte]: courant.solde }
+        : undefined;
+
       const envoye = await this.#bitlearn.sendJournal({
         executions: executions.lignes,
         events: events.lignes,
+        soldes,
       });
       if (!envoye) return;
 

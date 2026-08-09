@@ -26,7 +26,7 @@ import { JournalUploader, comptesJournalises } from './uploader.js';
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -40,7 +40,17 @@ const store = new LayoutStore();
 const supervisor = new BridgeSupervisor(BRIDGE_PORT);
 const bitlearn = new BitlearnClient();
 const journal = new EventRecorder();
-const uploader = new JournalUploader(bitlearn, () => comptesJournalises(store.layout));
+const uploader = new JournalUploader(
+  bitlearn,
+  () => comptesJournalises(store.layout),
+  // Lu à chaque envoi, jamais capturé : un capital de départ figé au démarrage serait faux dès le
+  // premier trade, et un chiffre faux est pire qu'un chiffre absent.
+  () => {
+    const compte = lastState?.account?.trim();
+    const solde = lastState?.cashValue;
+    return compte && typeof solde === 'number' && Number.isFinite(solde) ? { compte, solde } : null;
+  },
+);
 
 let lastState: TradingState | null = null;
 let lastRejectionAt: number | null = null;

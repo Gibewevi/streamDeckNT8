@@ -14,6 +14,16 @@ public sealed class TradingState
     public PositionState? Position { get; set; }
     public InstrumentInfo? InstrumentInfo { get; set; }
     public List<string> AvailableAccounts { get; set; } = [];
+
+    /// <summary>
+    /// Cash value du compte, telle que NinjaTrader la publie. Null quand le fournisseur ne l'expose
+    /// pas — le journal Bitlearn garde alors son capital de départ actuel plutôt que d'en inventer un.
+    ///
+    /// Le bridge ne s'en sert pas : il ne fait que la transporter. Elle existe parce que le P&amp;L
+    /// dit ce qui a changé, jamais à partir de QUOI — et sans ce point de départ, tout pourcentage
+    /// affiché par le journal est faux.
+    /// </summary>
+    public double? CashValue { get; set; }
     public bool CooldownEnabled { get; set; }
     public bool CooldownActive { get; set; }
     public int CooldownSecondsRemaining { get; set; }
