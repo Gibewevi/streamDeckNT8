@@ -254,3 +254,65 @@ export function createCommand(action: string, payload: Record<string, unknown> =
     payload,
   };
 }
+
+/**
+ * État vivant du poste, tel qu'il part vers Bitlearn à chaque battement.
+ *
+ * Bitlearn possède le même moteur de visuels que l'hôte (`visual-engine.ts` lui est copié). Lui
+ * envoyer exactement ce que `computeVisual` consomme lui permet donc de dessiner ce que montre le
+ * boîtier, pour toutes les macros à la fois — au lieu d'énumérer un champ par macro et de laisser
+ * les deux affichages diverger au premier ajout.
+ *
+ * `autoBe` voyage à part parce que l'Auto BE est un automatisme de l'hôte : le bridge ne le connaît
+ * pas, il n'est donc pas dans `TradingState`.
+ *
+ * `lastRejectionAt` et `lastViolationAt` sont volontairement absents. Ce sont des bannières de
+ * quelques secondes, pas un état : arrivées avec plusieurs secondes de retard, elles annonceraient
+ * dans l'éditeur un rejet déjà oublié sur le boîtier.
+ */
+export interface DeckStateReport {
+  /** Horloge du POSTE à la capture. Sert à vieillir les décomptes, jamais à dater un événement. */
+  capturedAt: number;
+  state: TradingState;
+  autoBe: { actif: boolean; pose: boolean };
+}
+
+/**
+ * Champs qui sont des comptes à rebours : ils décroissent d'eux-mêmes, seconde après seconde.
+ *
+ * Les isoler sert deux fois. Bitlearn les exclut de sa détection de changement — sans quoi l'état
+ * « changerait » à chaque battement et réécrirait la ligne en base toutes les cinq secondes, pour
+ * toujours. Et l'affichage les vieillit au lieu de les croire, ce qui les fait s'égrener de façon
+ * fluide entre deux remontées espacées de plusieurs secondes.
+ */
+const DECOMPTES_ETAT = ['cooldownSecondsRemaining'] as const;
+const DECOMPTES_SAFETY = [
+  'lockSecondsRemaining',
+  'pauseSecondsRemaining',
+  'pauseDueInSeconds',
+  'autoFlattenSecondsRemaining',
+  'tiltSecondsRemaining',
+] as const;
+
+/**
+ * Rejoue le temps écoulé depuis la capture sur tous les décomptes, sans jamais passer sous zéro.
+ *
+ * L'écart d'horloge entre le poste et le navigateur ne rentre pas en compte : on soustrait une
+ * DURÉE mesurée localement, pas une différence entre deux horloges. Un poste en avance de deux
+ * heures n'a donc aucun effet.
+ */
+export function vieillirEtat(rapport: DeckStateReport, ecouleMs: number): TradingState {
+  const ecoule = Math.max(0, Math.floor(ecouleMs / 1000));
+  if (ecoule === 0) return rapport.state;
+
+  const moins = (v: number) => Math.max(0, (typeof v === 'number' ? v : 0) - ecoule);
+  const state = { ...rapport.state, safety: { ...rapport.state.safety } };
+
+  for (const cle of DECOMPTES_ETAT) state[cle] = moins(state[cle]);
+  for (const cle of DECOMPTES_SAFETY) state.safety[cle] = moins(state.safety[cle]);
+
+  // Un décompte arrivé à zéro ne suffit pas à lever le blocage : c'est le bridge qui en décide, et
+  // il le dira au prochain battement. On laisse donc `cooldownActive` tel quel — afficher « libre »
+  // une seconde trop tôt inviterait à un appui que le bridge refuserait.
+  return state;
+}

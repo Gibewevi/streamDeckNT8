@@ -68,11 +68,42 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             {
                 if (_disposed || e == null || e.Execution == null) return;
                 Write(Describe(e.Execution));
+                WarnIfNoCommission(e.Execution);
             }
             catch (Exception ex)
             {
                 SdLogger.Fail("Journal", ex, "Execution not recorded");
             }
+        }
+
+        /// <summary>Last zero-commission warning, so this stays one line an hour and not one a fill.</summary>
+        private static DateTime _lastNoCommissionWarning = DateTime.MinValue;
+
+        /// <summary>
+        /// Says out loud that a fill carried no commission, because the consequence is invisible
+        /// otherwise: the Bitlearn journal computes `net = gross - commission`, so a commission of
+        /// zero silently publishes a GROSS P&amp;L that looks perfectly legitimate.
+        ///
+        /// The cause is never a bug here. NinjaTrader only fills this field from the commission
+        /// template assigned to the account — Rithmic and the other futures feeds do not report
+        /// commissions in their execution reports. An account without a template therefore records
+        /// zero on every fill, for as long as nobody notices. That is exactly what happened: months
+        /// of live journals showing a P&amp;L before costs, while the simulation account — which HAD a
+        /// template — looked correct and hid the problem.
+        ///
+        /// Warning and not error: the fill itself is recorded correctly, and a trader who genuinely
+        /// pays no commission is entitled to a quiet log.
+        /// </summary>
+        private static void WarnIfNoCommission(Execution exec)
+        {
+            if (exec.Commission != 0 || exec.Fee != 0) return;
+            if ((DateTime.UtcNow - _lastNoCommissionWarning).TotalHours < 1) return;
+
+            _lastNoCommissionWarning = DateTime.UtcNow;
+            SdLogger.EventWarn("Journal",
+                "No commission on the fills for {0} — assign a commission template to this account in "
+                + "NinjaTrader, otherwise the Bitlearn journal reports P&L GROSS of costs",
+                exec.Account != null ? exec.Account.Name : "(unknown account)");
         }
 
         /// <summary>

@@ -13,7 +13,9 @@ import {
   DEFAULT_GLOBAL_SETTINGS, DEFAULT_SAFETY_STATUS, DISCONNECTED_STATE, TradingState, OrderUpdate, GuardViolation, SafetyStatus, createCommand,
 } from './messages.js';
 import { DeckDevice } from './device.js';
-import { LayoutStore, SlotAssignment } from './layout.js';
+import { DEFAULT_DATA_DIR, LayoutStore, SlotAssignment } from './layout.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
 import { computeVisual, gainEnTicks, tiltAppliesTo, VIOLATION_BANNER_MS, VisualContext } from './visual-engine.js';
 import { renderButtonDataUri } from './render-node.js';
 import { ConfigServer, UiSnapshot } from './server.js';
@@ -26,7 +28,7 @@ import { JournalUploader, comptesJournalises } from './uploader.js';
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.9.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -43,14 +45,39 @@ const journal = new EventRecorder();
 const uploader = new JournalUploader(
   bitlearn,
   () => comptesJournalises(store.layout),
-  // Lu à chaque envoi, jamais capturé : un capital de départ figé au démarrage serait faux dès le
-  // premier trade, et un chiffre faux est pire qu'un chiffre absent.
+  // Relu à chaque envoi, jamais figé au démarrage : un capital capturé une fois pour toutes serait
+  // faux dès le premier trade, et un chiffre faux est pire qu'un chiffre absent.
   () => {
     const compte = lastState?.account?.trim();
-    const solde = lastState?.cashValue;
-    return compte && typeof solde === 'number' && Number.isFinite(solde) ? { compte, solde } : null;
+    if (!compte) return null;
+
+    // Le solde frais s'il est là, le dernier connu sinon. NinjaTrader ne le publie pas à chaque
+    // instant — il manque à la reconnexion, pendant la fenêtre de garde du bridge, et dès que la
+    // liaison hoquette. Exiger qu'il soit présent à la seconde précise de l'envoi revenait à le
+    // perdre presque toujours, et le journal restait à zéro.
+    //
+    // Se rabattre sur une valeur d'il y a quelques minutes ne fausse rien : Bitlearn calcule
+    // `capital de départ = solde − P&L cumulé`, une soustraction qui se corrige d'elle-même au
+    // passage suivant. C'est un capital FIGÉ au démarrage qu'il fallait éviter, pas un solde
+    // légèrement en retard.
+    const frais = lastState?.cashValue;
+    if (typeof frais === 'number' && Number.isFinite(frais)) {
+      soldesConnus.set(compte, frais);
+      return { compte, solde: frais };
+    }
+
+    const memorise = soldesConnus.get(compte);
+    return typeof memorise === 'number' ? { compte, solde: memorise } : null;
   },
 );
+
+/**
+ * Dernier solde connu par compte.
+ *
+ * Vit dans l'hôte et non dans le layout : c'est une observation, pas un réglage. Perdu au
+ * redémarrage, ce qui est sans conséquence — NinjaTrader le republie dès qu'il se reconnecte.
+ */
+const soldesConnus = new Map<string, number>();
 
 let lastState: TradingState | null = null;
 let lastRejectionAt: number | null = null;
@@ -420,10 +447,10 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
     // Arme la macro, ou tente de la désarmer une fois le verrou expiré. Un refus pendant le
     // verrou est le comportement attendu, par conception.
     case 'com.trader.ninjatrader.safety': {
-      // `force` n'est transmis que si le mode développement est activé sur cette touche. Le
-      // bridge reste seul juge : il journalise tout contournement en avertissement.
-      const force = s.devMode === true;
-      const resp = await bridge.sendCommand(createCommand('toggleSafety', force ? { force: true } : {}));
+      // Aucun paramètre de contournement n'est transmis, et le bridge n'en accepte plus : le
+      // verrou ne se lève qu'à son échéance. Un appui pendant le verrou est donc refusé, ce qui
+      // est le service rendu et non une panne.
+      const resp = await bridge.sendCommand(createCommand('toggleSafety', {}));
       applySafetyResponse(resp);
       if (resp.error) {
         log.eventWarn('Safety', 'toggleSafety refusé (verrou toujours actif)', { code: resp.error.code, reason: resp.error.message });
@@ -432,7 +459,6 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
       log.event('Safety', 'Macro de sécurité basculée', {
         armed: lastState?.safety?.armed ?? false,
         lockSecondsRemaining: lastState?.safety?.lockSecondsRemaining ?? 0,
-        modeDeveloppement: force || undefined,
       });
       return;
     }
@@ -448,15 +474,14 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
 // découlent : il ne part qu'une fois par prix moyen, il abandonne après quelques échecs plutôt
 // que de marteler, et son armement est visible en permanence sur la touche.
 //
-// L'armement SURVIT au redémarrage (persisté dans le layout, voir `actif` ci-dessous) : une
-// protection que le trader croit armée doit l'être encore après un plantage de l'hôte. En
+// L'armement SURVIT au redémarrage (persisté dans `autobe.json`, voir `persisterArmementAutoBe`) :
+// une protection que le trader croit armée doit l'être encore après un plantage de l'hôte. En
 // revanche la mémoire de la pose en cours, elle, ne survit pas — elle est propre à une position
 // et n'aurait aucun sens au redémarrage.
 const autoBe = {
   /**
-   * Armement. Persisté dans le layout : la macro doit rester active tant qu'elle est armée,
-   * y compris après un redémarrage de l'hôte. Seul l'armement survit — la mémoire de la pose
-   * en cours est propre à la position et n'aurait aucun sens au redémarrage.
+   * Armement. Persisté dans l'état du poste — jamais dans le layout, que Bitlearn réécrit
+   * intégralement à chaque poussée.
    */
   actif: false,
   /** Prix moyen pour lequel le break-even a déjà été posé. */
@@ -466,6 +491,8 @@ const autoBe = {
   dernierEssai: 0,
   dernierAvert: 0,
   dernierAvertStop: 0,
+  /** Limite la fréquence de l'avertissement de réglage impossible — l'évaluation tourne à 5 Hz. */
+  dernierAvertConfig: 0,
 };
 
 const AUTOBE_MAX_ECHECS = 5;
@@ -491,24 +518,59 @@ function trouverAutoBe(): SlotAssignment | null {
   return trouverTouche('host.autobe');
 }
 
-/** Écrit l'armement dans le layout pour qu'il survive à un redémarrage. */
+/**
+ * L'armement vit dans l'état du POSTE, à côté de celui de la macro de sécurité — surtout pas dans
+ * le layout.
+ *
+ * Il y a été, et c'était juste tant que le layout appartenait à l'hôte. Depuis que Bitlearn en est
+ * la source de vérité, le layout local n'est plus qu'un **cache à sens unique** : chaque poussée
+ * le remplace intégralement, et l'armement disparaissait avec. Il suffisait d'éditer n'importe
+ * quelle touche dans l'éditeur — ou de redémarrer l'hôte, dont la première synchronisation
+ * réapplique la disposition de Bitlearn — pour désarmer l'Auto BE sans que rien ne le signale.
+ *
+ * Un armement est un état d'exécution, pas une configuration : sa place est ici, avec le verrou de
+ * la macro et le compteur de séance, dans un fichier que Bitlearn ne réécrit jamais.
+ */
+const AUTOBE_STATE_PATH = join(DEFAULT_DATA_DIR, 'autobe.json');
+
 function persisterArmementAutoBe(): void {
-  const cfg = trouverAutoBe();
-  if (!cfg) return;
-  (cfg.settings ||= {}).armed = autoBe.actif;
-  store.update(store.layout);
+  try {
+    mkdirSync(dirname(AUTOBE_STATE_PATH), { recursive: true });
+    writeFileSync(AUTOBE_STATE_PATH, JSON.stringify({ armed: autoBe.actif }, null, 2), 'utf8');
+  } catch (err) {
+    // Ne jamais faire échouer un appui de touche pour un défaut d'écriture : l'armement reste
+    // valable pour cette session, il ne survivra simplement pas au redémarrage.
+    log.fail('AutoBE', err, 'Armement non persisté — il sera perdu au prochain démarrage');
+  }
 }
 
 /** Reprend l'armement enregistré au démarrage. */
 function restaurerArmementAutoBe(): void {
-  const cfg = trouverAutoBe();
-  if (cfg?.settings?.armed === true) {
-    autoBe.actif = true;
-    log.event('AutoBE', 'Automatisme repris ARMÉ au démarrage', {
-      seuilTicks: Number(cfg.settings.triggerTicks) || 0,
-      offsetTicks: Number(cfg.settings.offsetTicks) || 0,
-    });
+  let arme = false;
+  try {
+    if (existsSync(AUTOBE_STATE_PATH)) {
+      arme = JSON.parse(readFileSync(AUTOBE_STATE_PATH, 'utf8'))?.armed === true;
+    }
+  } catch (err) {
+    log.fail('AutoBE', err, 'État d\'armement illisible — automatisme considéré désarmé');
   }
+
+  // Reprise des installations antérieures, où l'armement vivait dans le layout. Lu une seule fois :
+  // la prochaine poussée de Bitlearn effacera cette clé, et c'est bien pour cela qu'on en part.
+  const cfg = trouverAutoBe();
+  if (!arme && cfg?.settings?.armed === true) {
+    arme = true;
+    log.event('AutoBE', 'Armement récupéré depuis l\'ancien emplacement (layout) et déplacé');
+  }
+
+  if (!arme) return;
+
+  autoBe.actif = true;
+  persisterArmementAutoBe();
+  log.event('AutoBE', 'Automatisme repris ARMÉ au démarrage', {
+    seuilTicks: Number(cfg?.settings?.triggerTicks) || 0,
+    offsetTicks: Number(cfg?.settings?.offsetTicks) || 0,
+  });
 }
 
 function evaluerAutoBe(state: TradingState): void {
@@ -545,6 +607,25 @@ function evaluerAutoBe(state: TradingState): void {
   // Une stratégie ATM n'est donc plus nécessaire pour être protégé.
   const declenchement = Number(cfg.settings?.triggerTicks) || 0;
   if (declenchement <= 0) return;
+
+  // Un décalage supérieur ou égal au seuil place le break-even AU-DELÀ du marché à l'instant même
+  // où il se déclenche : NinjaTrader le refuse en `INVALID_STOP_PRICE`, l'automatisme retente cinq
+  // fois puis abandonne pour toute la durée de la position. Le trader croit sa protection posée
+  // alors qu'elle n'existe pas.
+  //
+  // Vécu le 10/08/2026 avec seuil=8 et décalage=60 : dix rejets en quatre minutes, deux positions
+  // laissées sans protection. Refuser d'essayer et le DIRE vaut mieux qu'un échec silencieux.
+  const decalage = Number(cfg.settings?.offsetTicks) || 0;
+  if (decalage >= declenchement) {
+    if (Date.now() - autoBe.dernierAvertConfig > 60_000) {
+      autoBe.dernierAvertConfig = Date.now();
+      log.eventWarn('AutoBE', 'Réglage impossible — le break-even serait toujours du mauvais côté du marché', {
+        seuilTicks: declenchement, decalageTicks: decalage,
+        correction: `le décalage doit rester sous le seuil (${declenchement})`,
+      });
+    }
+    return;
+  }
 
   // Un renfort déplace le prix moyen : la comparaison se fait à un demi-tick près, car ce sont
   // des flottants et l'égalité stricte finirait par reposer un break-even déjà posé.
@@ -676,14 +757,6 @@ async function syncSafetyConfig(): Promise<void> {
   for (const p of store.layout.pages) {
     for (const a of Object.values(p.slots)) {
       if (a.actionId === 'com.trader.ninjatrader.safety') {
-        // Le mode développement rend la macro contournable d'un appui. Le signaler à chaque
-        // démarrage et à chaque édition évite qu'il reste actif sans qu'on s'en souvienne, une
-        // fois la macro éprouvée. Le badge DEV sur la touche joue le même rôle en séance.
-        if (a.settings?.devMode === true) {
-          log.eventWarn('Safety', 'MODE DÉVELOPPEMENT ACTIF — la macro peut être désarmée sans attendre le verrou', {
-            rappel: 'à désactiver une fois la macro éprouvée',
-          });
-        }
         await pushSafetyConfig(a.settings ?? {});
         return;
       }
@@ -974,6 +1047,15 @@ async function main(): Promise<void> {
       nt: lastState?.ntConnected ?? false,
       appVersion: VERSION,
     },
+    // L'état exact que reçoit `computeVisual` : l'éditeur ayant le même moteur de visuels, il
+    // dessine ce que le boîtier dessine. Une macro armée depuis le Deck s'y voit armée, sans
+    // qu'aucun champ n'ait à être ajouté ici macro par macro.
+    //
+    // `lastState` est null tant que le bridge n'a rien publié — on n'envoie alors rien plutôt
+    // qu'un état par défaut, qui se lirait comme « tout est au repos ».
+    etat: lastState
+      ? { capturedAt: Date.now(), state: lastState, autoBe: { actif: autoBe.actif, pose: autoBe.pose !== null } }
+      : undefined,
   });
 
   if (bitlearn.paired) {

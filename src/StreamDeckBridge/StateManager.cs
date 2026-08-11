@@ -130,6 +130,13 @@ public sealed class StateManager
                 Position = _state.Position,
                 InstrumentInfo = _state.InstrumentInfo,
                 AvailableAccounts = new List<string>(_state.AvailableAccounts),
+
+                // Le solde DOIT être recopié ici. Il a été omis, et comme ce snapshot est le seul
+                // objet diffusé au client, la valeur lue de NT8 mourait dans `_state` : l'add-on
+                // publiait bien `cashValue`, le bridge la parsait bien, et l'hôte journalisait
+                // `solde=ABSENT` à chaque envoi. Le journal Bitlearn est resté sans capital de
+                // départ, donc sans balance et sans pourcentage exploitable.
+                CashValue = _state.CashValue,
                 CooldownEnabled = _cooldownEnabled,
                 CooldownActive = cooldownActive,
                 CooldownSecondsRemaining = cooldownRemaining,
@@ -323,11 +330,18 @@ public sealed class StateManager
                         _state.AvailableAccounts.Add(name);
                 }
             }
-            // Update account name from NT8 — but not if user recently changed it via setAccount
-            var accountGuarded = (DateTime.UtcNow - _accountSetAt) < OverrideGuard;
-            if (!accountGuarded && statePayload.TryGetProperty("account", out var acctObj) && acctObj.ValueKind == JsonValueKind.Object)
+            // The account object is read on every publish; only the NAME is subject to the override
+            // guard, which exists so NT8 cannot overwrite an account the trader just picked by hand.
+            //
+            // The cash value used to sit inside that guard, and had no business being there: it is
+            // the account BALANCE, not the selection, and nothing about it conflicts with a manual
+            // pick. Every publish landing inside the guard window dropped it. The balance is what
+            // gives the Bitlearn journal its starting capital — without it the journal opens at zero
+            // and every percentage it shows is meaningless.
+            if (statePayload.TryGetProperty("account", out var acctObj) && acctObj.ValueKind == JsonValueKind.Object)
             {
-                if (acctObj.TryGetProperty("name", out var acctName) && acctName.ValueKind == JsonValueKind.String)
+                var accountGuarded = (DateTime.UtcNow - _accountSetAt) < OverrideGuard;
+                if (!accountGuarded && acctObj.TryGetProperty("name", out var acctName) && acctName.ValueKind == JsonValueKind.String)
                 {
                     var name = acctName.GetString();
                     if (!string.IsNullOrEmpty(name))

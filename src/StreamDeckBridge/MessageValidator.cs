@@ -12,6 +12,24 @@ public sealed class MessageValidator
     private readonly BridgeConfig _config;
     private readonly ILogger<MessageValidator> _logger;
 
+    /// <summary>
+    /// Every settings key <c>configureSafety</c> accepts — the exact set MessageRouter feeds into
+    /// <see cref="SafetyConfigUpdate"/>.
+    ///
+    /// One list, one place. The emptiness check below used to repeat these names inline and had
+    /// silently fallen four behind: the mandatory-break and auto-flatten fields, added when the
+    /// break became a macro of its own. A payload carrying only break settings — which is exactly
+    /// what the host sends — read as empty and was refused on every start.
+    /// </summary>
+    private static readonly string[] SettingsKeys =
+    {
+        "maxTradesWhenLosing", "dailyLossLimit", "lockDurationHours", "maxContracts",
+        "antiTiltEnabled", "tiltAveragingAllowed", "tiltAdvanced",
+        "tiltHoldSeconds", "tiltEpisodeMinutes",
+        "pauseAfterMinutes", "pauseDurationMinutes",
+        "autoFlattenOnDailyLoss", "autoFlattenGraceSeconds",
+    };
+
     private static readonly HashSet<string> KnownActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "buyMarket", "sellMarket", "buyLimit", "sellLimit",
@@ -159,8 +177,17 @@ public sealed class MessageValidator
                          || HasProperty(message, "tiltAveragingAllowed")
                          || HasProperty(message, "tiltAdvanced");
 
-        if (maxTrades == null && dailyLoss == null && lockHours == null && !hasTiltToggle &&
-            maxContracts == null && tiltHold == null && tiltEpisode == null)
+        // « Au moins un réglage » se mesure sur la liste des clés que le routeur sait lire, et non
+        // sur une énumération recopiée à la main.
+        //
+        // Elle l'a été, et il y manquait les quatre champs de la pause obligatoire et de la
+        // liquidation automatique. `syncPauseConfig` côté hôte n'envoie QUE des champs de pause :
+        // le payload était donc jugé vide et refusé en INVALID_PAYLOAD à chaque démarrage. La macro
+        // Pause était réglable dans l'éditeur et n'atteignait jamais le bridge — une protection
+        // entière inopérante, sans que rien d'autre qu'un avertissement dans le journal ne le dise.
+        //
+        // Toute clé ajoutée à `SafetyConfigUpdate` doit être ajoutée ici, et nulle part ailleurs.
+        if (!SettingsKeys.Any(k => HasProperty(message, k)))
         {
             return (false, "INVALID_PAYLOAD",
                 "configureSafety requires at least one settings field.");

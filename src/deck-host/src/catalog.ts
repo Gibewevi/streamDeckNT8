@@ -259,14 +259,11 @@ export const CATALOG: ActionDef[] = [
         default: 15, showIf: { key: 'tiltAdvanced', equals: true },
         help: 'Temps pendant lequel les entrées restent ralenties après un déclenchement.',
       },
-      {
-        key: 'devMode',
-        label: 'Mode développement',
-        type: 'toggle',
-        showIf: { key: 'tiltAdvanced', equals: true },
-        help: 'Désarme la macro sans attendre la fin du verrou, pour la mettre au point. '
-            + 'La touche affiche DEV. À laisser désactivé en séance.',
-      },
+      // Il n'existe volontairement AUCUN réglage de contournement du verrou. Un « mode
+      // développement » a existé ici, désarmant la macro sans attendre son expiration ; il est
+      // retiré. Une protection dont l'utilisateur détient l'interrupteur ne protège que tant qu'il
+      // n'en a pas besoin — et c'est précisément au moment où elle sert que l'on cherche
+      // l'interrupteur. Le verrou n'est donc levé que par son échéance.
     ],
   },
 
@@ -313,11 +310,17 @@ export const CATALOG: ActionDef[] = [
             + 'sens de la position : 60 se déclenche 60 ticks au-dessus de votre entrée en long, '
             + '60 ticks en dessous en short.',
       },
+      // Le décalage doit rester SOUS le déclenchement. Égal ou supérieur, le break-even se poserait
+      // au-delà du marché à l'instant même du déclenchement : NinjaTrader refuse, l'automatisme
+      // retente cinq fois puis abandonne, et la position reste sans protection alors que la touche
+      // annonce le contraire. L'hôte refuse désormais ce réglage ; le dire ici évite de le
+      // découvrir en séance.
       {
         key: 'offsetTicks', label: 'Décalage du BE (ticks)', type: 'number', min: -100, max: 100, step: 1,
         help: 'Où placer le stop par rapport au prix moyen, compté dans le sens de la position. '
             + 'Positif = sécurise un gain, dans les deux sens : 4 place le stop 4 ticks AU-DESSUS '
             + 'de l\'entrée en long, et 4 ticks EN DESSOUS en short. 0 = point mort exact. '
+            + 'Doit rester INFÉRIEUR au déclenchement, sinon le break-even est refusé à chaque fois. '
             + 'ATTENTION, négatif place le stop EN PERTE — ce n\'est plus un break-even.',
       },
     ],

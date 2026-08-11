@@ -17,6 +17,7 @@ import { createServer } from 'http';
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { AddressInfo } from 'net';
+import { DeckStateReport } from './messages.js';
 import { DEFAULT_DATA_DIR, Layout, LayoutStore, validateLayout } from './layout.js';
 import * as log from './logger.js';
 
@@ -128,6 +129,14 @@ export interface SyncContext {
     nt: boolean;
     appVersion: string;
   };
+  /**
+   * L'état vivant, pour que l'éditeur montre ce que montre le boîtier — macro armée, compte et
+   * instrument courants, temporisation, pause, Auto BE.
+   *
+   * Absent tant que le bridge n'a rien publié : mieux vaut un éditeur qui n'affiche pas d'état
+   * qu'un éditeur qui affiche un état inventé.
+   */
+  etat?: DeckStateReport;
 }
 
 /**
@@ -386,6 +395,7 @@ export class BitlearnClient {
             columns: context.columns,
             rows: context.rows,
             status: context.status,
+            etat: context.etat,
           }),
         },
         true

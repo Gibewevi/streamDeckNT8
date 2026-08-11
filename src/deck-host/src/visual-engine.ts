@@ -69,6 +69,23 @@ function formatLockRemaining(seconds: number): string {
 }
 
 /**
+ * Décompte qui s'égrène, en `m:ss` — pour une attente que l'on subit et dont on veut voir la fin
+ * approcher.
+ *
+ * `formatLockRemaining` arrondit à la minute au-dessus de 60 s : une pause de dix minutes affichait
+ * « 10m » pendant soixante secondes, puis « 9m ». Rien ne bougeait à l'écran neuf minutes durant,
+ * et la touche paraissait figée alors que la valeur, elle, était bien rafraîchie cinq fois par
+ * seconde. On ne pouvait pas savoir s'il restait neuf minutes ou neuf minutes cinquante-neuf.
+ *
+ * Les minutes ne sont pas bornées à 59 : une pause va jusqu'à 120 min, et « 119:59 » se lit mieux
+ * que « 1h59:59 » sur une touche de 72 pixels.
+ */
+function formatDecompte(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/**
  * Préavis avant la pause obligatoire. Un quart d'heure : de quoi terminer la position en cours et
  * ne pas en ouvrir une nouvelle, sans occuper la touche pendant toute la séance.
  */
@@ -474,10 +491,14 @@ export function computeVisual(
       }
 
       // La pause s'applique : rouge, comme tout ce qui refuse une entrée.
+      //
+      // Décompte à la seconde, et non arrondi à la minute : c'est le seul moment où l'on regarde
+      // cette touche en attendant qu'elle libère, et une durée qui ne bouge pas ne dit pas si la
+      // règle tourne encore. Même raison que le compte à rebours de la Temporisation.
       if (safety.pauseActive) {
         return {
           title: 'PAUSE',
-          subtitle: formatLockRemaining(safety.pauseSecondsRemaining),
+          subtitle: formatDecompte(safety.pauseSecondsRemaining),
           detail: 'REPOS',
           bgColor: Colors.refuse, textColor: Colors.textWhite,
         };
@@ -508,16 +529,13 @@ export function computeVisual(
 
     case 'com.trader.ninjatrader.safety': {
       const safety = state.safety ?? DEFAULT_SAFETY_STATUS;
-      // Le mode développement lève la seule garantie de cette macro : il doit se voir sur la
-      // touche elle-même, pas uniquement dans un formulaire de réglages qu'on n'ouvre jamais.
-      const dev = settings.devMode === true;
-      const marque = dev ? { badge: 'DEV', badgeColor: Colors.orange } : {};
+      // Aucun badge de mode ici : il n'existe plus de réglage qui affaiblisse cette macro, donc
+      // plus rien à signaler d'un coup d'œil. Ce que la touche montre est ce qui s'applique.
 
       // Un ordre passé à la main dans NinjaTrader vient d'être annulé. Prime sur tout le reste :
       // c'est la seule chose qui, à cet instant, mérite le regard du trader.
       if (ctx.lastViolationAt && Date.now() - ctx.lastViolationAt < VIOLATION_BANNER_MS) {
         return {
-          ...marque,
           title: 'SAFETY:STOP', subtitle: 'MANUEL',
           detail: 'ORDRE ANNULE',
           bgColor: Colors.refuse, textColor: Colors.textWhite,
@@ -528,7 +546,6 @@ export function computeVisual(
         // Pas de rappel des limites configurées ici : la touche sert à savoir si la protection
         // est active, pas à relire des réglages qu'on consulte dans l'interface.
         return {
-          ...marque,
           title: 'SAFETY:GUARD', subtitle: 'OFF',
           bgColor: Colors.black, textColor: Colors.textWhite,
         };
@@ -539,7 +556,6 @@ export function computeVisual(
       // c'est le seul état où le trader doit agir immédiatement à la main.
       if (safety.autoFlattenFailed) {
         return {
-          ...marque,
           title: 'SAFETY:ERR', subtitle: 'LIQUID.',
           detail: 'VERIFIER NT',
           bgColor: Colors.refuse, textColor: Colors.textWhite,
@@ -551,7 +567,6 @@ export function computeVisual(
       // et la règle n'y perd rien puisque le délai s'écoule de toute façon.
       if (safety.autoFlattenPending) {
         return {
-          ...marque,
           title: 'SAFETY:LIQUID',
           subtitle: `${safety.autoFlattenSecondsRemaining}s`,
           detail: formatSafetyDetail(safety),
@@ -563,11 +578,12 @@ export function computeVisual(
       // avec SON décompte et non celui du verrou : ici le trader attend la fin de la pause, pas la
       // fin du verrou, et afficher les heures du verrou lui ferait croire sa séance terminée.
       // Placée avant le cas général, qui n'a aucune minuterie propre à montrer.
+      // Même décompte à la seconde que la touche Pause : c'est la même attente, et deux touches
+      // voisines qui annoncent « 9m » et « 9:58 » pour la même chose se contrediraient.
       if (safety.entriesBlocked && safety.blockReason === 'mandatoryPause') {
         return {
-          ...marque,
           title: 'SAFETY:PAUSE',
-          subtitle: formatLockRemaining(safety.pauseSecondsRemaining),
+          subtitle: formatDecompte(safety.pauseSecondsRemaining),
           detail: 'REPOS',
           bgColor: Colors.refuse, textColor: Colors.textWhite,
         };
@@ -576,7 +592,6 @@ export function computeVisual(
       // Armée et une limite atteinte — les entrées sont refusées jusqu'à la fin du verrou.
       if (safety.entriesBlocked) {
         return {
-          ...marque,
           title: safety.blockReason === 'dailyLoss' ? 'SAFETY:LOSS' : 'SAFETY:MAX',
           subtitle: formatLockRemaining(safety.lockSecondsRemaining),
           detail: formatSafetyDetail(safety),
@@ -590,7 +605,6 @@ export function computeVisual(
       // la macro simplement armée. Placée après le blocage réel, qui prime : aucun appui ne le lève.
       if (safety.tiltActive) {
         return {
-          ...marque,
           title: 'SAFETY:TILT',
           // Un épisode a un minuteur ; une condition contextuelle n'en a pas — elle dure autant que
           // la position qui l'a produite. Afficher « 0s » laisserait croire qu'elle vient de finir.
@@ -602,11 +616,8 @@ export function computeVisual(
 
       // Armée et rien à signaler. Le fond orange dit déjà que la protection est active : la place
       // de la deuxième ligne sert donc à ce qui change, le temps de verrou restant, plutôt qu'à
-      // un « ON » qui répète la couleur.
-      //
-      // Le compte à rebours s'affiche aussi en mode développement. Il y a bien une nuance — le
-      // verrou peut alors être levé d'un appui, la durée n'engage donc à rien — mais c'est le
-      // badge DEV qui porte cet avertissement, l'écrire une seconde fois ne l'ajoutait pas.
+      // un « ON » qui répète la couleur. Ce compte à rebours engage : rien ne permet plus de
+      // l'abréger.
       //
       // La pause qui approche prend la troisième ligne le temps de son dernier quart d'heure. Une
       // coupure qui tombe sans prévenir se subit — on la découvre au moment où l'on voulait entrer,
@@ -615,7 +626,6 @@ export function computeVisual(
       const pauseImminente = safety.pauseDueInSeconds > 0 && safety.pauseDueInSeconds <= PAUSE_PREAVIS_S;
 
       return {
-        ...marque,
         title: 'SAFETY:GUARD',
         subtitle: formatLockRemaining(safety.lockSecondsRemaining),
         detail: pauseImminente

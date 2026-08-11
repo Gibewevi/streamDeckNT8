@@ -199,12 +199,19 @@ export class DeckDevice {
     const button = this.#buttons.find((b) => b.index === slot);
     if (!button) return;
 
-    // `progress` fait partie de la signature : sans lui, la jauge d'appui long était calculée à
-    // chaque tic mais jamais réécrite, le rendu différentiel la jugeant identique. Elle
-    // s'affichait une fois puis restait figée.
-    const signature = visual
-      ? `${visual.title}|${visual.subtitle ?? ''}|${visual.detail ?? ''}|${visual.bgColor}|${visual.textColor}|${visual.badge ?? ''}|${visual.progress ?? ''}`
-      : 'VIDE';
+    // La signature porte sur le visuel ENTIER, et surtout pas sur une liste de champs tenue à la
+    // main. Cette liste a existé, et elle a produit deux fois le même défaut : un champ absent de
+    // l'énumération change à l'écran sans changer la signature, la touche est jugée identique et
+    // n'est jamais réécrite. `progress` a été ajouté après coup pour la jauge d'appui long restée
+    // figée ; `subtitleAccent` manquait encore, et c'est lui qui porte la quantité des touches
+    // d'entrée — « Buy ×1 » restait donc à ×1 quelle que soit la quantité, puisque `subtitle`
+    // vaut « Buy » et ne bouge pas. Tout champ ajouté à `ButtonVisual` est désormais couvert
+    // d'office.
+    //
+    // Les clés sont triées pour que deux objets équivalents produisent la même chaîne : les
+    // visuels sont construits par des littéraux dont l'ordre varie d'une branche à l'autre, et
+    // sans tri on réécrirait la touche pour un simple changement d'ordre.
+    const signature = visual ? JSON.stringify(visual, Object.keys(visual).sort()) : 'VIDE';
     if (this.#painted.get(slot) === signature) return;
 
     // Le rastérisage est isolé de l'écriture USB : un SVG que resvg refuse est un défaut de

@@ -7,7 +7,9 @@
       "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/**)",
       "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/Plugins/**)",
       "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/**)",
-      "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/logs/**)"
+      "Read(//c/Users/pixel/Desktop/stream deck/src/streamdeck-ninjatrader/$APPDATA/Elgato/StreamDeck/Plugins/com.trader.ninjatrader.sdPlugin/logs/**)",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 50000 debian@vps-a7e6d37c.vps.ovh.ca *)",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 50000 debian@vps-a7e6d37c.vps.ovh.ca:*)"
     ]
   }
 }

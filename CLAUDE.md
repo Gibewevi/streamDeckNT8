@@ -68,6 +68,9 @@ dotnet publish "src/StreamDeckBridge/StreamDeckBridge.csproj" -c Release -o src/
 # Add-On NT8 (compile uniquement pour vérifier — voir « Déploiement »)
 dotnet build "src/NinjaTrader.AddOn.StreamDeck/NinjaTrader.AddOn.StreamDeck.csproj" -c Release
 
+# Indicateurs et stratégies NinjaScript (vérification de compilation — voir docs/strategie-structure-marche.md)
+dotnet build "src/NinjaTrader.Scripts/NinjaTrader.Scripts.csproj" -c Release
+
 # Hôte TradeDeck — c'est celui-ci qu'il faut construire
 cd src/deck-host && npm run build       # tsc → dist/
 cd src/deck-host && npx tsc --noEmit    # vérification de types seule

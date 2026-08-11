@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using NinjaTrader.Cbi;
@@ -413,24 +414,82 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// </summary>
         private static DateTime _lastBalanceWarning = DateTime.MinValue;
 
+        /// <summary>
+        /// Sources du solde, dans l'ordre de préférence.
+        ///
+        /// Une seule ne suffit pas : `CashValue` revient NaN sur un compte de simulation dont le
+        /// solde est pourtant affiché par la plateforme, et les fournisseurs ne remplissent pas
+        /// tous les mêmes champs. On prend le premier utilisable plutôt que d'exiger le bon.
+        ///
+        /// `NetLiquidation` vient juste après : c'est la valeur liquidative, celle que le trader
+        /// lit comme « son solde ». Les deux valeurs de début de séance ferment la marche — mieux
+        /// vaut un capital de ce matin qu'aucun capital.
+        /// </summary>
+        private static readonly AccountItem[] BalanceItems =
+        {
+            AccountItem.CashValue,
+            AccountItem.NetLiquidation,
+            AccountItem.TotalCashBalance,
+            AccountItem.SodCashValue,
+            AccountItem.SodLiquidatingValue,
+        };
+
+        /// <summary>Dernière source retenue, pour ne journaliser qu'au changement.</summary>
+        private static string _balanceSource;
+
         private static void AddAccountBalance(Dictionary<string, object> accountDict, Account account)
         {
             if (account == null) return;
 
-            try
+            var tentatives = new List<string>();
+
+            foreach (var item in BalanceItems)
             {
-                accountDict["cashValue"] = account.Get(AccountItem.CashValue, account.Denomination);
-            }
-            catch (Exception ex)
-            {
-                // Throttled like the P&L warning: this runs on every publish tick.
-                if ((DateTime.UtcNow - _lastBalanceWarning).TotalMinutes >= 1)
+                double valeur;
+                try
                 {
-                    _lastBalanceWarning = DateTime.UtcNow;
-                    SdLogger.EventWarn("Account",
-                        "Cash value unavailable for {0}: {1} — the Bitlearn journal will keep its current starting capital",
-                        account.Name, ex.Message);
+                    valeur = account.Get(item, account.Denomination);
                 }
+                catch (Exception ex)
+                {
+                    tentatives.Add(item + "=" + ex.GetType().Name);
+                    continue;
+                }
+
+                // NOT every unavailable balance throws. Several providers return NaN instead — no
+                // exception, so a lone try/catch never fired. SimpleJson then wrote `null`
+                // (correctly: NaN is not valid JSON), the journal kept opening at zero, and nothing
+                // said why. Asking a single item was the mistake: `CashValue` comes back NaN on a
+                // simulation account whose balance is plainly visible in the platform.
+                if (double.IsNaN(valeur) || double.IsInfinity(valeur))
+                {
+                    tentatives.Add(item + "=NaN");
+                    continue;
+                }
+
+                accountDict["cashValue"] = valeur;
+
+                // Journalisé au CHANGEMENT de source, pas à chaque tic : savoir quel champ porte
+                // réellement le solde est la première question qu'on se pose quand un journal
+                // s'ouvre au mauvais capital.
+                if (_balanceSource != item.ToString())
+                {
+                    _balanceSource = item.ToString();
+                    SdLogger.Event("Account", "Cash value read from {0} for {1}: {2}",
+                        item, account.Name, valeur.ToString("0.00", CultureInfo.InvariantCulture));
+                }
+                return;
+            }
+
+            _balanceSource = null;
+            // Toutes les sources ont échoué : on dit lesquelles et pourquoi, sinon le diagnostic
+            // repart de zéro à chaque fois.
+            if ((DateTime.UtcNow - _lastBalanceWarning).TotalMinutes >= 1)
+            {
+                _lastBalanceWarning = DateTime.UtcNow;
+                SdLogger.EventWarn("Account",
+                    "No usable cash value for {0} ({1}) — the Bitlearn journal will keep its current starting capital",
+                    account.Name, string.Join(", ", tentatives));
             }
         }
 

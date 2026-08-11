@@ -383,16 +383,16 @@ public sealed class MessageRouter
     /// </summary>
     private BridgeMessage HandleSafetyAction(BridgeMessage message)
     {
-        // `force` n'est envoyé que si le mode développement est activé sur la touche Sécurité.
-        // Absent ou mal formé, il vaut false : un contournement ne doit jamais être accordé
-        // par accident.
-        var force = GetPayloadBool(message, "force");
-
+        // Aucun champ du payload ne peut lever le verrou : `disarmSafety` et `toggleSafety` ne
+        // prennent aucun argument. Un drapeau `force` a existé ici — il est retiré, et rien ne le
+        // lit plus. Le refuser au routeur plutôt qu'à l'appelant est délibéré : c'est le seul
+        // endroit par lequel toute commande passe, donc le seul où l'absence de contournement
+        // se vérifie d'un coup d'œil.
         var outcome = message.Action switch
         {
             "armSafety" => _safety.Arm(),
-            "disarmSafety" => _safety.Disarm(force),
-            "toggleSafety" => _safety.Toggle(force),
+            "disarmSafety" => _safety.Disarm(),
+            "toggleSafety" => _safety.Toggle(),
             _ => _safety.Configure(new SafetyConfigUpdate
             {
                 MaxTradesWhenLosing = GetPayloadInt(message, "maxTradesWhenLosing"),
@@ -476,17 +476,13 @@ public sealed class MessageRouter
         return null;
     }
 
-    /// <summary>Absent or malformed reads as false: a bypass must never be granted by accident.</summary>
-    private static bool GetPayloadBool(BridgeMessage msg, string key)
-    {
-        if (msg.Payload is not JsonElement el) return false;
-        return el.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.True;
-    }
-
     /// <summary>
     /// Three-state read for settings: null means "not supplied, leave it alone", which a plain
-    /// bool cannot express. Only for configureSafety — a bypass flag must keep using the
-    /// two-state reader above.
+    /// bool cannot express.
+    ///
+    /// Only reader for booleans, and it must stay that way: a two-state reader existed alongside
+    /// it for the safety-macro bypass flag, and it went out with the flag. Reintroducing one
+    /// would mean some payload boolean can decide something other than a setting.
     /// </summary>
     private static bool? GetPayloadBoolOrNull(BridgeMessage msg, string key)
     {

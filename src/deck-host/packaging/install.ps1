@@ -63,44 +63,23 @@ foreach ($d in @('dist', 'ui', 'node_modules', 'bridge')) {
 Copy-Item (Join-Path $Source 'package.json') $InstallDir -Force
 # Le moteur Node est embarqué : l'installation ne doit pas dépendre du PATH de la session.
 Copy-Item $node (Join-Path $InstallDir 'node.exe') -Force
+# Le lanceur silencieux doit être en place AVANT l'enregistrement de la tâche, qui refuse de
+# s'enregistrer sans lui.
+Copy-Item (Join-Path $PSScriptRoot 'run-host.vbs') $InstallDir -Force
 Info "Copié ($([math]::Round((Get-ChildItem $InstallDir -Recurse -File | Measure-Object Length -Sum).Sum/1MB,1)) Mo)"
 
 Step "3/6  Tâche planifiée (démarrage + relance automatique)"
-# Réinstallation : une tâche déjà enregistrée refuse d'être supprimée sans élévation
-# (« Accès refusé »), et Register-ScheduledTask échoue alors sur « fichier déjà existant ».
-# Comme l'action ne dépend que de $InstallDir, une tâche existante qui pointe déjà au bon endroit
-# n'a rien à se faire réécrire : on la conserve au lieu de faire échouer toute l'installation.
-$wantExec = Join-Path $InstallDir 'node.exe'
-$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-$upToDate = $existing -and
-            $existing.Actions.Execute -eq $wantExec -and
-            $existing.Actions.Arguments -eq 'dist\host.js'
-
-if ($upToDate) {
-  Info "Tâche '$TaskName' déjà enregistrée et pointant au bon endroit — conservée"
-} else {
-  if ($existing) {
-    try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop }
-    catch {
-      throw ("La tâche '$TaskName' existe déjà, pointe ailleurs, et ne peut pas être remplacée " +
-             "sans droits administrateur. Supprimez-la depuis le Planificateur de tâches " +
-             "(ou : Unregister-ScheduledTask -TaskName $TaskName) puis relancez ce script.")
-    }
-  }
-  $action = New-ScheduledTaskAction -Execute $wantExec `
-                                    -Argument 'dist\host.js' -WorkingDirectory $InstallDir
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-  # RestartCount/RestartInterval : filet contre les PLANTAGES (sortie non nulle). Un arrêt propre
-  # — port occupé, SIGTERM — sort en 0 et n'est volontairement pas relancé.
-  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-                -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-                -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew
-  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -Principal $principal `
-    -Description "TradeDeck — cockpit de trading NinjaTrader — pilote le Stream Deck sans l'application Elgato." | Out-Null
-  Info "Tâche '$TaskName' enregistrée (au logon, relance toutes les minutes si plantage)"
-}
+# Délégué à `register-task.ps1`, qui est aussi ce qu'appelle l'installateur Inno. Ce script
+# enregistrait auparavant SA propre tâche, lançant `node.exe` directement : Node est une
+# application console, une tâche interactive lui alloue donc une fenêtre — noire, ou reprise par
+# Windows Terminal — qui restait ouverte tant que TradeDeck tournait. Pire, sa vérification
+# « déjà à jour » reconnaissait cette forme fautive comme la bonne et la conservait, si bien
+# qu'aucune réinstallation ne la corrigeait.
+#
+# Deux enregistreurs pour une même tâche, c'est un seul de trop : celui qui n'est pas utilisé en
+# production dérive sans que personne ne s'en aperçoive. Il n'en reste qu'un.
+& (Join-Path $PSScriptRoot 'register-task.ps1') -Action install -InstallDir $InstallDir -TaskName $TaskName
+Info "Tâche '$TaskName' enregistrée via register-task.ps1 (au logon, sans fenêtre)"
 
 Step "4/6  Démarrage automatique de Stream Deck"
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'

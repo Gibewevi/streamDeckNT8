@@ -256,7 +256,10 @@ ne prolonge jamais un verrou en cours).
 
 #### `disarmSafety`
 Désarme la macro. **Refusé avec `SAFETY_MACRO_LOCKED` tant que le verrou court** —
-il n'existe volontairement aucun paramètre de contournement.
+il n'existe volontairement aucun paramètre de contournement. Un drapeau `force` a existé
+jusqu'en 0.4.0, activé par un « mode développement » sur la touche ; il est retiré depuis
+0.5.0 et tout champ supplémentaire du payload est ignoré. Le verrou ne se lève qu'à son
+échéance.
 ```json
 {
   "type": "command",
@@ -267,7 +270,7 @@ il n'existe volontairement aucun paramètre de contournement.
 
 #### `toggleSafety`
 Arme si désarmée, tente de désarmer si armée. C'est l'action derrière la touche
-Stream Deck « Safety Macro ».
+Stream Deck « Safety Macro ». Même règle que `disarmSafety` : aucun contournement du verrou.
 ```json
 {
   "type": "command",

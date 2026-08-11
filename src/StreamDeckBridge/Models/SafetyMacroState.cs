@@ -78,8 +78,13 @@ public sealed class SafetyMacroSettings
     public double PauseAfterMinutes { get; set; }
 
     /// <summary>
-    /// How long the mandatory break lasts. Time already spent away from the market counts towards
-    /// it — see <see cref="SafetyMacroPersistedState.LastTradeAtUtc"/>.
+    /// How long the mandatory break lasts, in full, counted from the moment it falls due.
+    ///
+    /// It used to be counted from the last trade, so the time spent trading right up to the due
+    /// moment was deducted from the break itself and the trader served a fraction of what he had
+    /// configured. Time away from the market still counts — but BEFORE the break falls due, where
+    /// it cancels the break outright rather than shortening it
+    /// (see <see cref="SafetyMacroPersistedState.LastTradeAtUtc"/>).
     /// </summary>
     public double PauseDurationMinutes { get; set; } = 10;
 
@@ -196,9 +201,12 @@ public sealed class SafetyMacroPersistedState
     public DateTime? WorkStartedAtUtc { get; set; }
 
     /// <summary>
-    /// Last trade opened. The break is measured from it rather than from the moment it falls due,
-    /// so time already spent away from the market counts towards it. Without this, a trader who
-    /// had stopped on his own would be made to serve the break a second time.
+    /// Last trade opened. Measures the VOLUNTARY break: a gap of a full break duration before the
+    /// break falls due clears the work stretch, so a trader who stopped on his own is never made to
+    /// serve a break he has already taken.
+    ///
+    /// It does NOT measure the enforced break — that one runs from the due moment. Using this field
+    /// for both is what made a configured break expire almost as soon as it started.
     /// </summary>
     public DateTime? LastTradeAtUtc { get; set; }
 

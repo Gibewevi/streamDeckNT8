@@ -161,8 +161,13 @@ export class JournalUploader {
       }
       this.#sauverCurseurs();
 
+      // Le solde est journalisé avec le lot, et son ABSENCE aussi. Sans cette mention, un journal
+      // ouvert à zéro chez Bitlearn ne se distinguait pas d'un journal correct : rien, nulle part,
+      // ne disait que le capital de départ n'était jamais parti. Le défaut a vécu une version
+      // entière sans laisser la moindre trace.
       log.event('Journal', 'Lot envoyé à Bitlearn', {
         executions: executions.lignes.length, evenements: events.lignes.length, raison,
+        solde: soldes ? Object.entries(soldes).map(([c, s]) => `${c}=${s}`).join(',') : 'ABSENT',
       });
     } catch (err) {
       log.fail('Journal', err, 'Envoi du journal impossible');

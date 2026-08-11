@@ -22,7 +22,12 @@ Une modification qui ne touche que Bitlearn (pages, journal, statistiques) n'a b
 - **CORRECTIF** — correction sans changement de comportement observable
 
 Historique : `0.1.0` premier installateur · `0.2.0` journalisation, pause obligatoire, liquidation
-automatique, partage du code avec Bitlearn · `0.3.0` la pause devient une macro autonome.
+automatique, partage du code avec Bitlearn · `0.3.0` la pause devient une macro autonome ·
+`0.4.0` publication de la cash value du compte · `0.5.0` retrait du mode développement — le verrou
+de la macro de sécurité ne peut plus être levé avant son échéance, par aucun chemin ·
+`0.5.1` la tâche planifiée s'enregistre enfin (collision `$action`/`$Action` dans
+`register-task.ps1`), plus de fenêtre console au démarrage · `0.6.0` la pause obligatoire égrène
+ses secondes (`9:58`) au lieu d'un arrondi à la minute qui paraissait figé · `0.7.0` le poste remonte son état vivant : l'éditeur Bitlearn dessine les touches telles que le boîtier les montre · `0.7.1` la quantité suit enfin sur les touches d'entrée, l'armement Auto BE survit aux poussées de disposition · `0.8.0` l'Auto BE refuse un décalage supérieur au seuil, et la cash value cesse d'être perdue par le garde de sélection de compte · `0.9.0` la pause obligatoire impose enfin toute sa durée — elle était ancrée sur le dernier trade et expirait donc quelques secondes après s'être ouverte — et la cash value cesse d'être perdue une seconde fois, omise cette fois du snapshot diffusé au client, ce qui laissait le journal Bitlearn sans capital de départ.
 
 ## Où vit le numéro
 
@@ -41,9 +46,9 @@ Quatre endroits, et **`npm run build` refuse de construire s'ils divergent** (vo
 ```bash
 # 1. Le numéro, partout
 cd "src/deck-host"
-sed -i 's/"version": "0.2.0"/"version": "0.3.0"/' package.json package-lock.json
-sed -i "s/^const VERSION = '0.2.0';/const VERSION = '0.3.0';/" src/host.ts
-sed -i 's/#define AppVersion "0.2.0"/#define AppVersion "0.3.0"/' packaging/TradeDeck.iss
+sed -i 's/"version": "0.7.1"/"version": "0.8.0"/' package.json package-lock.json
+sed -i "s/^const VERSION = '0.7.1';/const VERSION = '0.8.0';/" src/host.ts
+sed -i 's/#define AppVersion "0.7.1"/#define AppVersion "0.8.0"/' packaging/TradeDeck.iss
 
 # 2. Arrêter l'hôte et le bridge — sinon les fichiers sont verrouillés
 #    (PowerShell : Stop-Process sur node.exe / StreamDeckBridge.exe / wscript.exe
@@ -61,7 +66,7 @@ powershell -ExecutionPolicy Bypass -File packaging/build-installer.ps1
 # 6. Publier — l'ancien est SUPPRIMÉ, la route sert le plus récent et
 #    laisser les deux serait un piège
 rm -f ../../../Bitlearn/private/tradedeck/BitlearnTradeDeck-Setup-*.exe
-cp ../../build/BitlearnTradeDeck-Setup-0.3.0.exe ../../../Bitlearn/private/tradedeck/
+cp ../../build/BitlearnTradeDeck-Setup-0.8.0.exe ../../../Bitlearn/private/tradedeck/
 ```
 
 ## Le piège : Release contre Debug
@@ -95,7 +100,7 @@ d'où la recherche de `Buffer.from(s, "utf16le")` à n'importe quelle position.
 
 Rien à déployer. `tradeDeckReleaseService` lit le dossier à chaque affichage :
 
-- le bouton de `/tradedeck` passe à `Télécharger [v0.3.0]`
+- le bouton de `/tradedeck` passe à `Télécharger [v0.8.0]`
 - la ligne sous le bouton donne la taille et la date
 - `GET /api/tradedeck/download` sert le nouveau fichier, sous habilitation
 

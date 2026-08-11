@@ -211,17 +211,18 @@ public sealed class SafetyMacro
     /// <summary>
     /// Disarms the macro. Refused while the lock is still running — that refusal is the whole
     /// point of the feature.
-    /// </summary>
-    /// <param name="force">
-    /// Development escape hatch, opt-in per key in the host ("mode développement" on the Safety
-    /// key). It exists only because the macro is untestable otherwise: every trial locks the
-    /// trader out for the whole lock duration, six hours by default.
     ///
-    /// It does NOT weaken the macro while armed — entries stay blocked exactly as before. It
-    /// only lifts the refusal to disarm, and the trader still has to press the key deliberately.
-    /// Every use is logged at warning level so a forced unlock is always visible afterwards.
-    /// </param>
-    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Disarm(bool force = false)
+    /// There is NO bypass parameter, by design. A "force" flag used to exist, set from a
+    /// development toggle on the Safety key, because the macro is tedious to try out otherwise:
+    /// every trial locks the trader out for the whole lock duration. It has been removed. A lock
+    /// whose holder keeps the key is not a lock, and the moment it starts refusing is exactly the
+    /// moment one goes looking for the way around it. The only thing that lifts it is its
+    /// deadline.
+    ///
+    /// To exercise the macro during development, arm it with a short LockDurationHours
+    /// (MinLockHours = 0.05, i.e. three minutes) rather than reaching for an escape hatch.
+    /// </summary>
+    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Disarm()
     {
         lock (_lock)
         {
@@ -233,34 +234,27 @@ public sealed class SafetyMacro
             var remaining = RemainingLock();
             if (remaining > TimeSpan.Zero)
             {
-                if (!force)
-                {
-                    _logger.LogWarning("Safety macro disarm REFUSED — locked for another {Remaining}", FormatDuration(remaining));
-                    return (false, "SAFETY_MACRO_LOCKED",
-                        $"Safety macro is locked for another {FormatDuration(remaining)}. It cannot be disabled before the lock expires.",
-                        BuildStatus());
-                }
-
-                _logger.LogWarning(
-                    "Safety macro FORCE-DISARMED with {Remaining} of lock left — development mode is enabled on the Safety key",
-                    FormatDuration(remaining));
+                _logger.LogWarning("Safety macro disarm REFUSED — locked for another {Remaining}", FormatDuration(remaining));
+                return (false, "SAFETY_MACRO_LOCKED",
+                    $"Safety macro is locked for another {FormatDuration(remaining)}. It cannot be disabled before the lock expires.",
+                    BuildStatus());
             }
 
-            DisarmInternal(force && remaining > TimeSpan.Zero ? "forced (dev mode)" : "manual");
+            DisarmInternal("manual");
             Persist();
             return (true, null, null, BuildStatus());
         }
     }
 
     /// <summary>Arms when disarmed, attempts to disarm when armed. Backs the single Stream Deck key.</summary>
-    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Toggle(bool force = false)
+    public (bool Ok, string? ErrorCode, string? ErrorMessage, SafetyStatus Status) Toggle()
     {
         // Monitor is reentrant, so delegating under the same lock is safe and keeps
         // the arm/disarm decision atomic with respect to the lock deadline.
         lock (_lock)
         {
             Refresh();
-            return _state.Armed ? Disarm(force) : Arm();
+            return _state.Armed ? Disarm() : Arm();
         }
     }
 
@@ -761,8 +755,39 @@ public sealed class SafetyMacro
         }
     }
 
-    /// <summary>Moment the current break ends: one break duration after the last trade opened.</summary>
-    private DateTime? PauseEndsAt() =>
+    /// <summary>
+    /// Moment the ENFORCED break ends: one full break duration after it fell due.
+    ///
+    /// Anchored on the due moment and NOT on the last trade, which is what it used to do. That was
+    /// wrong in a way no one could see from the deck: to reach the due moment at all the trader has
+    /// to have kept trading with gaps shorter than a break, so the last trade always sat a few
+    /// seconds to a couple of minutes BEFORE it. The break therefore ended almost as soon as it
+    /// started — a 2 min break configured after 30 min of trading actually blocked for whatever
+    /// happened to be left of those 2 min, sometimes a few seconds. The trader served a fraction of
+    /// the break he asked for, which is the one thing a mandatory break may not do.
+    ///
+    /// The `max` keeps it honest the other way round too: a trade that lands after the due moment
+    /// (an exit that flips, a fill from an order sent just before) restarts the full duration, since
+    /// the point is a break from the market, not a timer that runs while you trade.
+    /// </summary>
+    private DateTime? EnforcedPauseEndsAt()
+    {
+        if (PauseDueAt() is not { } echeance || _state.LastTradeAtUtc is not { } dernierTrade)
+            return null;
+
+        var depart = dernierTrade > echeance ? dernierTrade : echeance;
+        return depart.AddMinutes(_state.Settings.PauseDurationMinutes);
+    }
+
+    /// <summary>
+    /// Moment a VOLUNTARY break counts as served: one break duration away from the market.
+    ///
+    /// Deliberately separate from <see cref="EnforcedPauseEndsAt"/>, which the two used to share.
+    /// They answer different questions — "has he already taken his break on his own?" before the
+    /// due moment, "has he served the one he owes?" after it — and a single formula could only ever
+    /// get one of them right.
+    /// </summary>
+    private DateTime? VoluntaryBreakServedAt() =>
         _state.LastTradeAtUtc?.AddMinutes(_state.Settings.PauseDurationMinutes);
 
     /// <summary>Moment the break falls due: one work stretch after the first trade of the stretch.</summary>
@@ -804,7 +829,7 @@ public sealed class SafetyMacro
     {
         var settings = _state.Settings;
         if (settings.PauseAfterMinutes <= 0) return null;
-        if (PauseDueAt() is not { } dueAt || PauseEndsAt() is not { } endsAt) return null;
+        if (PauseDueAt() is not { } dueAt || EnforcedPauseEndsAt() is not { } endsAt) return null;
 
         var now = DateTime.UtcNow;
         if (now < dueAt) return null;
@@ -847,7 +872,17 @@ public sealed class SafetyMacro
     {
         if (_state.Settings.PauseAfterMinutes <= 0) return;
         if (_state.WorkStartedAtUtc == null) return;
-        if (PauseEndsAt() is not { } finPause || DateTime.UtcNow < finPause) return;
+        if (PauseDueAt() is not { } echeance) return;
+
+        var maintenant = DateTime.UtcNow;
+
+        // Deux régimes, et les confondre était la seconde moitié du bug de durée. Avant l'échéance,
+        // une pause prise spontanément compte et remet le compteur à zéro. Après, c'est la pause
+        // imposée qui doit courir en entier : mesurer « servie » depuis le dernier trade effaçait
+        // l'ancre avant la fin du blocage, `PauseDueAt()` retombait à null, et le refus s'arrêtait
+        // net au milieu de la pause que le trader était en train de servir.
+        var servieA = maintenant < echeance ? VoluntaryBreakServedAt() : EnforcedPauseEndsAt();
+        if (servieA is not { } finPause || maintenant < finPause) return;
 
         _state.WorkStartedAtUtc = null;
         Persist();
@@ -1071,7 +1106,7 @@ public sealed class SafetyMacro
     {
         // No Armed check: the break has its own macro and applies on its own.
         if (_state.Settings.PauseAfterMinutes <= 0) return (0, 0);
-        if (PauseDueAt() is not { } echeance || PauseEndsAt() is not { } finPause) return (0, 0);
+        if (PauseDueAt() is not { } echeance || EnforcedPauseEndsAt() is not { } finPause) return (0, 0);
 
         var now = DateTime.UtcNow;
         var due = echeance - now;
