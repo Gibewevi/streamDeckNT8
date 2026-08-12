@@ -30,7 +30,9 @@ de la macro de sécurité ne peut plus être levé avant son échéance, par auc
 ses secondes (`9:58`) au lieu d'un arrondi à la minute qui paraissait figé · `0.7.0` le poste remonte son état vivant : l'éditeur Bitlearn dessine les touches telles que le boîtier les montre · `0.7.1` la quantité suit enfin sur les touches d'entrée, l'armement Auto BE survit aux poussées de disposition · `0.8.0` l'Auto BE refuse un décalage supérieur au seuil, et la cash value cesse d'être perdue par le garde de sélection de compte · `0.9.0` la pause obligatoire impose enfin toute sa durée — elle était ancrée sur le dernier trade et expirait donc quelques secondes après s'être ouverte — et la cash value cesse d'être perdue une seconde fois, omise cette fois du snapshot diffusé au client, ce qui laissait le journal Bitlearn sans capital de départ. · `0.10.0` macro Tendance : la première
 qui regarde le marché et non plus la comptabilité de la séance. Elle n'en refuse encore aucun ordre
 — elle affiche le sens et journalise ce qu'elle aurait refusé, le temps de calibrer le seuil sur une
-vraie séance.
+vraie séance. · `0.11.0` la Tendance perd son mode Heikin Ashi : une seule méthode, la structure de
+marché. La couleur d'une bougie HA est une statistique à une barre, elle bascule à chaque pullback
+et n'offre rien à régler — deux méthodes à expliquer pour une qui répond.
 
 ## Où vit le numéro
 

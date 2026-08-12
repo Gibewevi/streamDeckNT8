@@ -60,7 +60,6 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private Series _higher;
 
         private Instrument _instrument;
-        private string _method = TrendMethods.Structure;
         private int _referenceMinutes = 1;
         private int _higherMinutes = 5;
         private bool _higherEnabled = true;
@@ -122,24 +121,21 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// layout edit and every reconnection, so an unconditional rebuild would drop the loaded
         /// history several times a session for nothing.
         /// </summary>
-        public void Configure(string method, int referenceMinutes, bool higherEnabled, int higherMinutes, double thresholdAtr)
+        public void Configure(int referenceMinutes, bool higherEnabled, int higherMinutes, double thresholdAtr)
         {
             lock (_lock)
             {
                 // Anything out of range keeps the current value. A field the host omitted arrives
                 // here as 0, and 0 must mean "leave it alone" — never "reset the rule".
-                var normalizedMethod = TrendMethods.Normalize(method);
                 var reference = Clamp(referenceMinutes, 1, 240, _referenceMinutes);
                 var higher = Clamp(higherMinutes, 1, 1440, _higherMinutes);
                 var threshold = thresholdAtr > 0 && thresholdAtr <= 10 ? thresholdAtr : _thresholdAtr;
 
-                var changed = normalizedMethod != _method
-                              || reference != _referenceMinutes
+                var changed = reference != _referenceMinutes
                               || higher != _higherMinutes
                               || higherEnabled != _higherEnabled
                               || Math.Abs(threshold - _thresholdAtr) > 0.0001;
 
-                _method = normalizedMethod;
                 _referenceMinutes = reference;
                 _higherMinutes = higher;
                 _higherEnabled = higherEnabled;
@@ -147,8 +143,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                 if (!changed) return;
 
-                SdLogger.Event("Trend", "Configured — method={0} reference={1}min higher={2} thresholdAtr={3}",
-                    _method, _referenceMinutes,
+                SdLogger.Event("Trend", "Configured — reference={0}min higher={1} thresholdAtr={2}",
+                    _referenceMinutes,
                     _higherEnabled ? _higherMinutes + "min" : "off", _thresholdAtr);
 
                 Rebuild();
@@ -207,7 +203,6 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             // NO DATA readable — the trader can see WHICH series is missing rather than guess.
             state["reference"] = TrendEngine.ToWire(verdict.Reference);
             state["higher"] = verdict.HigherEnabled ? TrendEngine.ToWire(verdict.Higher) : "";
-            state["method"] = _method;
             state["referenceMinutes"] = verdict.ReferenceMinutes;
             state["higherMinutes"] = verdict.HigherEnabled ? verdict.HigherMinutes : 0;
             state["staleSeconds"] = Math.Max(referenceStale, higherStale);
@@ -304,7 +299,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         {
             var tickSize = 0.0;
             try { tickSize = _instrument.MasterInstrument.TickSize; } catch { }
-            return new TrendEngine(tickSize, _method, _thresholdAtr);
+            return new TrendEngine(tickSize, _thresholdAtr);
         }
 
         private void Teardown()
@@ -432,7 +427,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
             for (var i = series.FedThrough; i < closed; i++)
             {
-                series.Engine.AddBar(bars.GetOpen(i), bars.GetHigh(i), bars.GetLow(i), bars.GetClose(i));
+                series.Engine.AddBar(bars.GetHigh(i), bars.GetLow(i), bars.GetClose(i));
             }
 
             series.FedThrough = closed;

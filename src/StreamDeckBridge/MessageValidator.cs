@@ -47,7 +47,7 @@ public sealed class MessageValidator
     /// </summary>
     private static readonly string[] TrendKeys =
     {
-        "method", "referenceMinutes", "higherEnabled", "higherMinutes", "thresholdAtr",
+        "referenceMinutes", "higherEnabled", "higherMinutes", "thresholdAtr",
     };
 
     private static readonly HashSet<string> PositionRequiredActions = new(StringComparer.OrdinalIgnoreCase)
@@ -265,10 +265,6 @@ public sealed class MessageValidator
 
         if (!TrendKeys.Any(k => HasProperty(message, k)))
             return (false, "INVALID_PAYLOAD", "configureTrend requires at least one settings field.");
-
-        var method = GetPayloadString(message, "method");
-        if (method != null && method != "structure" && method != "heikinAshi")
-            return (false, "INVALID_PAYLOAD", "method must be 'structure' or 'heikinAshi'.");
 
         var reference = GetPayloadInt(message, "referenceMinutes");
         if (reference is < 1 or > 240)

@@ -11,20 +11,6 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         Down = -1
     }
 
-    /// <summary>How the direction is derived. Wire value, so the names must stay stable.</summary>
-    public static class TrendMethods
-    {
-        public const string Structure = "structure";
-        public const string HeikinAshi = "heikinAshi";
-
-        public static string Normalize(string value)
-        {
-            return string.Equals(value, HeikinAshi, StringComparison.OrdinalIgnoreCase)
-                ? HeikinAshi
-                : Structure;
-        }
-    }
-
     /// <summary>
     /// Trend direction for ONE timeframe, from closed bars only.
     ///
@@ -35,55 +21,42 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
     /// "Stratégies" study can reuse it without a copy.
     ///
     /// The caller feeds bars in order and only ever feeds CLOSED ones. That is not a detail: the
-    /// forming bar's close is the live price, so its Heikin Ashi body flips several times a
-    /// minute. A gate built on it would refuse an entry that was allowed five seconds earlier,
-    /// with nothing on screen to explain why.
+    /// forming bar's close is the live price, so a gate reading it would allow an entry and refuse
+    /// the same one seconds later, with nothing on the deck to explain the difference.
+    ///
+    /// A Heikin Ashi mode lived here and was removed. It answered the same question far less well —
+    /// the colour of one HA candle is a single-bar statistic that flips on every pullback, and
+    /// being a fixed formula it had nothing to tune — while costing a second code path, a doji
+    /// threshold of its own, a setting on the key, and a field in the protocol. One method that
+    /// works beats two that must both be explained.
     /// </summary>
     public class TrendEngine
     {
         /// <summary>
-        /// Wilder's ATR period. 20 matches the default the market-structure study settled on, so
-        /// a threshold calibrated on the chart means the same thing here.
+        /// Wilder's ATR period. 20 matches the default the market-structure study settled on, so a
+        /// threshold calibrated on the chart means the same thing here.
         /// </summary>
         private const int AtrPeriod = 20;
 
         /// <summary>
-        /// Bars needed before any answer is given. The Heikin Ashi recursion converges
-        /// geometrically — HAOpen[n] = (HAOpen[n-1] + HAClose[n-1]) / 2 halves the error left by
-        /// whatever bar the series happened to start on — so 40 bars puts it a millionth of a
-        /// point below the seed difference, far under a tick. The ATR needs its own window on top.
+        /// Bars needed before any answer is given: the ATR window, plus enough beyond it for the
+        /// alternating swing machine to have confirmed a high AND a low. Below that there is no
+        /// structure to break out of, and answering would mean answering from one extreme.
         /// </summary>
         public const int MinBarsForVerdict = AtrPeriod + 40;
 
         /// <summary>
-        /// Share of ATR a Heikin Ashi body must reach to be allowed to flip the direction.
-        ///
-        /// A doji marks a pause INSIDE a trend, not a reversal, so a body under the threshold
-        /// carries the previous direction forward rather than resetting to neutral. Reading a
-        /// hesitation as "no trend" is how a filter ends up grey most of the day.
+        /// Floor under the swing threshold, in ticks. Same guard TdSwingStructure applies: on a
+        /// flat series the ATR collapses towards zero and every one-tick wiggle would confirm a
+        /// pivot, turning the direction into noise at exactly the times it matters least.
         /// </summary>
-        private const double DojiBodyAtrShare = 0.1;
-
-        /// <summary>
-        /// Absolute floor for that threshold, in ticks. Same guard as TdSwingEngine's: on a flat
-        /// series the ATR collapses and every one-tick body would qualify.
-        /// </summary>
-        private const int DojiBodyFloorTicks = 2;
+        private const int MinThresholdTicks = 2;
 
         private readonly double _tickSize;
-        private readonly string _method;
         private readonly double _thresholdAtr;
-
-        // The swing detector is only built for the structure method. Instantiating it anyway
-        // would be harmless but misleading: nothing should suggest Heikin Ashi consults pivots.
-        private readonly TdSwingEngine _swings;
+        private readonly TdSwingEngine _swings = new TdSwingEngine(64);
 
         private int _barCount;
-
-        // --- Heikin Ashi recursion state ---
-        private bool _haSeeded;
-        private double _haOpen;
-        private double _haClose;
 
         // --- Wilder ATR state ---
         private double _atr;
@@ -95,21 +68,19 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private TrendDirection _direction = TrendDirection.Neutral;
 
         /// <param name="tickSize">
-        /// Instrument tick size, for the doji floor. A zero or negative value simply disables that
-        /// floor rather than throwing — an unresolved instrument must not take the engine down.
+        /// Instrument tick size, for the threshold floor. A zero or negative value simply disables
+        /// that floor rather than throwing — an unresolved instrument must not take the engine down.
         /// </param>
         /// <param name="thresholdAtr">
-        /// Swing threshold in ATR multiples, structure method only. The study's INTERMEDIATE level
-        /// (1.0) is the right default here, not the structural one (2.5): the structural tier
-        /// exists to find liquidity pockets, the intermediate tier exists to catch trend pullbacks
-        /// — which is exactly the question a direction asks.
+        /// Swing amplitude in ATR multiples. The study's INTERMEDIATE level (1.0) is the right
+        /// default here, not the structural one (2.5): the structural tier exists to find liquidity
+        /// pockets, the intermediate tier exists to catch trend pullbacks — which is exactly the
+        /// question a direction asks.
         /// </param>
-        public TrendEngine(double tickSize, string method, double thresholdAtr)
+        public TrendEngine(double tickSize, double thresholdAtr)
         {
             _tickSize = tickSize > 0 ? tickSize : 0;
-            _method = TrendMethods.Normalize(method);
             _thresholdAtr = thresholdAtr > 0 ? thresholdAtr : 1.0;
-            _swings = _method == TrendMethods.Structure ? new TdSwingEngine(64) : null;
         }
 
         /// <summary>Bars consumed so far. The caller uses it to decide whether to publish.</summary>
@@ -128,19 +99,13 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         /// <summary>
         /// Feeds one CLOSED bar. Bars must arrive in order and exactly once each; the caller
-        /// rebuilds the engine from scratch rather than replaying, because both recursions here
-        /// (Heikin Ashi and Wilder) would otherwise be silently corrupted by a repeat.
+        /// rebuilds the engine from scratch rather than replaying, because both the ATR smoothing
+        /// and the swing machine are order-dependent and a repeat would corrupt them in silence.
         /// </summary>
-        public void AddBar(double open, double high, double low, double close)
+        public void AddBar(double high, double low, double close)
         {
             UpdateAtr(high, low, close);
-            UpdateHeikinAshi(open, high, low, close);
-
-            if (_method == TrendMethods.HeikinAshi)
-                UpdateFromHeikinAshi();
-            else
-                UpdateFromStructure(high, low, close);
-
+            UpdateFromStructure(high, low, close);
             _barCount++;
         }
 
@@ -170,44 +135,6 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         }
 
         /// <summary>
-        /// The four lines of the Heikin Ashi technique, identical to the HeikenAshi8 indicator the
-        /// trader has on the chart. Recomputed here rather than requested as
-        /// BarsPeriodType.HeikenAshi bars: that would be a SECOND series to load, and it would tie
-        /// this engine to Heikin Ashi forever. One raw Minute series feeds every method.
-        /// </summary>
-        private void UpdateHeikinAshi(double open, double high, double low, double close)
-        {
-            if (!_haSeeded)
-            {
-                _haSeeded = true;
-                _haOpen = open;
-                _haClose = close;
-                return;
-            }
-
-            var previousOpen = _haOpen;
-            var previousClose = _haClose;
-
-            _haClose = (open + high + low + close) * 0.25;
-            _haOpen = (previousOpen + previousClose) * 0.5;
-        }
-
-        private void UpdateFromHeikinAshi()
-        {
-            var body = _haClose - _haOpen;
-            if (Math.Abs(body) < DojiThreshold()) return;
-
-            _direction = body > 0 ? TrendDirection.Up : TrendDirection.Down;
-        }
-
-        private double DojiThreshold()
-        {
-            var fromAtr = _atr * DojiBodyAtrShare;
-            var floor = _tickSize * DojiBodyFloorTicks;
-            return fromAtr > floor ? fromAtr : floor;
-        }
-
-        /// <summary>
         /// Market structure, and the direction flips on the BREAK rather than on the pivot.
         ///
         /// This is what sidesteps the limitation stated in docs/strategie-structure-marche.md — a
@@ -221,7 +148,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// </summary>
         private void UpdateFromStructure(double high, double low, double close)
         {
-            var threshold = _atr * _thresholdAtr;
+            var threshold = Math.Max(_atr * _thresholdAtr, _tickSize * MinThresholdTicks);
             if (threshold <= 0) return;
 
             // double.MaxValue on the structural tier so it never confirms. TdSwingEngine runs two

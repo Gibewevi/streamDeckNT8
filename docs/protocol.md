@@ -384,15 +384,14 @@ Tous les champs sont facultatifs, mais il en faut **au moins un**. Un champ abse
 courante en place : l'hôte rejoue toute sa configuration à chaque édition du layout et à chaque
 reconnexion, et une omission ne doit jamais valoir remise à zéro.
 
-Changer `method`, `referenceMinutes` ou `higherMinutes` est **structurel** : l'add-on recharge ses
-séries, donc repasse par `available: false` pendant quelques secondes.
+Changer `referenceMinutes` ou `higherMinutes` est **structurel** : l'add-on recharge ses séries,
+donc repasse par `available: false` pendant quelques secondes.
 
 ```json
 {
   "type": "command",
   "action": "configureTrend",
   "payload": {
-    "method": "structure",
     "referenceMinutes": 1,
     "higherEnabled": true,
     "higherMinutes": 5,
@@ -403,11 +402,10 @@ séries, donc repasse par `available: false` pendant quelques secondes.
 
 | Champ | Plage | Description |
 |-------|-------|-------------|
-| `method` | `structure` \| `heikinAshi` | Défaut `structure` |
 | `referenceMinutes` | 1–240, entier | Unité principale. Défaut `1` |
 | `higherEnabled` | booléen | Exiger l'accord d'une unité supérieure. Défaut `true` |
 | `higherMinutes` | 1–1440, entier | Doit être **strictement supérieur** à `referenceMinutes`, sinon `INVALID_PAYLOAD` |
-| `thresholdAtr` | > 0 et ≤ 10 | Amplitude minimale d'une vague, méthode `structure` seulement. Défaut `1.0` |
+| `thresholdAtr` | > 0 et ≤ 10 | Amplitude minimale d'une vague, en multiples d'ATR. Défaut `1.0` |
 
 > **Cette version ne refuse aucun ordre.** Le bridge journalise en `INFO` ce qu'un filtre aurait
 > refusé, et rien de plus. Le code `TREND_AGAINST` n'existe pas encore. Voir
@@ -508,7 +506,6 @@ Envoyé périodiquement (toutes les 500ms) et à chaque changement significatif.
       "direction": "up",
       "reference": "up",
       "higher": "up",
-      "method": "structure",
       "referenceMinutes": 1,
       "higherMinutes": 5,
       "staleSeconds": 12
@@ -528,7 +525,6 @@ barre.
 | `direction` | Verdict combiné : `"up"`, `"down"` ou `"neutral"`. Accord **strict** des deux unités quand `higherMinutes > 0`, sinon `reference` |
 | `reference` | Unité principale seule. Affichage et diagnostic |
 | `higher` | Unité supérieure seule. `""` quand la confirmation est coupée |
-| `method` | `"structure"` ou `"heikinAshi"` |
 | `referenceMinutes` / `higherMinutes` | Unités en vigueur. `higherMinutes: 0` = confirmation coupée |
 | `staleSeconds` | Secondes depuis la dernière barre clôturée de la série la plus lente |
 

@@ -65,9 +65,6 @@ public sealed class TrendState
     /// <summary>Higher timeframe on its own, empty when that confirmation is switched off.</summary>
     public string Higher { get; set; } = string.Empty;
 
-    /// <summary><c>structure</c> or <c>heikinAshi</c>.</summary>
-    public string Method { get; set; } = "structure";
-
     /// <summary>
     /// Defaults mirror the catalog's, so the block published before NinjaTrader has ever spoken
     /// describes the macro as configured rather than as "0 minutes", which is not a timeframe.

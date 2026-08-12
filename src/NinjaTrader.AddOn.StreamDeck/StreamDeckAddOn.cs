@@ -225,7 +225,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (_trendMonitor == null)
                 return BridgeMessage.CreateError(message.RequestId, message.Action, "CONTEXT_MISSING", "Trend monitor is not initialized.");
 
-            var method = message.GetPayloadString("method");
             var referenceMinutes = message.GetPayloadInt("referenceMinutes");
             var higherMinutes = message.GetPayloadInt("higherMinutes");
             var thresholdAtr = message.GetPayloadDouble("thresholdAtr");
@@ -234,7 +233,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             // 0 and null both mean "not supplied": TrendMonitor.Configure keeps its current value
             // for anything out of range, so passing them straight through is safe.
             _trendMonitor.Configure(
-                method,
                 referenceMinutes.HasValue ? referenceMinutes.Value : 0,
                 higherEnabled,
                 higherMinutes.HasValue ? higherMinutes.Value : 0,
@@ -242,7 +240,6 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             return BridgeMessage.CreateResponse(message.RequestId, message.Action, true, new
             {
-                method = TrendMethods.Normalize(method),
                 higherEnabled = higherEnabled
             });
         }

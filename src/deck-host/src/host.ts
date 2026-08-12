@@ -28,7 +28,7 @@ import { JournalUploader, comptesJournalises } from './uploader.js';
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.10.0';
+const VERSION = '0.11.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -723,10 +723,10 @@ async function syncConfig(): Promise<void> {
  * Pousse les réglages de la macro Tendance jusqu'à l'add-on, seul à pouvoir en faire quelque chose :
  * c'est lui qui détient les barres.
  *
- * Deux réglages sont STRUCTURELS — l'unité de temps et la méthode : les modifier fait recharger les
- * séries, donc repartir d'un état « NO DATA » de quelques secondes. L'add-on ne recharge que si la
- * valeur a réellement changé, ce qui compte ici : cette fonction est rejouée à chaque édition du
- * layout ET à chaque reconnexion.
+ * Les unités de temps sont des réglages STRUCTURELS : les modifier fait recharger les séries, donc
+ * repartir d'un état « NO DATA » de quelques secondes. L'add-on ne recharge que si la valeur a
+ * réellement changé, ce qui compte ici : cette fonction est rejouée à chaque édition du layout ET à
+ * chaque reconnexion.
  *
  * Un réglage masqué par `showIf` doit être NEUTRALISÉ et pas seulement caché — d'où le
  * `higherMinutes` omis quand la confirmation est coupée. Une règle invisible restée active est le
@@ -740,7 +740,6 @@ async function syncTrendConfig(): Promise<void> {
   const higherEnabled = s.higherEnabled !== false;
   const payload: Record<string, unknown> = { higherEnabled };
 
-  if (s.trendMethod === 'structure' || s.trendMethod === 'heikinAshi') payload.method = s.trendMethod;
   if (typeof s.referenceMinutes === 'number' && Number.isFinite(s.referenceMinutes)) {
     payload.referenceMinutes = Math.round(s.referenceMinutes);
   }

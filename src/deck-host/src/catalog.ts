@@ -303,21 +303,17 @@ export const CATALOG: ActionDef[] = [
   // chiffres lus sur une vraie séance.
   //
   // Rien ne dépend du graphique du trader : l'add-on charge ses propres barres. La macro fonctionne
-  // graphique fermé, workspace changé, et chez quelqu'un qui n'a jamais installé Heikin Ashi.
+  // graphique fermé, workspace changé, et quel que soit le type de bougies affiché.
+  //
+  // Le sens vient de la STRUCTURE — cassure du dernier sommet ou creux — et il n'y a pas d'autre
+  // méthode à choisir. Un mode Heikin Ashi a existé ici : il répondait moins bien à la même
+  // question (la couleur d'une bougie bascule à chaque pullback, et la formule n'a rien à régler)
+  // pour le prix d'un réglage de plus sur la touche et d'un champ de plus dans le protocole.
   {
     id: 'com.trader.ninjatrader.trend', name: 'Tendance', group: 'Affichage',
     description: 'Affiche le sens du marché sur deux unités de temps. N\'influence pas encore les '
                + 'ordres : cette version mesure, elle ne refuse rien.',
     settings: [
-      {
-        key: 'trendMethod', label: 'Méthode', type: 'select', default: 'structure',
-        options: [
-          { value: 'structure', label: 'Structure de marché' },
-          { value: 'heikinAshi', label: 'Heikin Ashi' },
-        ],
-        help: 'Structure : le sens change à la cassure du dernier sommet ou creux — un pullback ne '
-            + 'le retourne pas. Heikin Ashi : couleur de la dernière bougie clôturée.',
-      },
       {
         key: 'referenceMinutes', label: 'Unité de temps (min)', type: 'number',
         min: 1, max: 240, step: 1, default: 1,
@@ -338,7 +334,6 @@ export const CATALOG: ActionDef[] = [
       {
         key: 'thresholdAtr', label: 'Seuil de vague (× ATR)', type: 'number',
         min: 0.1, max: 10, default: 1,
-        showIf: { key: 'trendMethod', equals: 'structure' },
         help: 'Amplitude minimale d\'une vague, en multiples d\'ATR. Exprimé ainsi, le même réglage '
             + 'tient sur toutes les unités de temps et tous les instruments. Plus haut = moins de '
             + 'changements de sens.',

@@ -209,11 +209,11 @@ public sealed class MessageRouter
 
         _logger.LogInformation(
             "[REQ:{RequestId}] TREND observation — {Action} WOULD HAVE BEEN REFUSED: trend is {Direction} "
-            + "({RefMin}min={Reference}, {HigherLabel}) on {Instrument}, method={Method}",
+            + "({RefMin}min={Reference}, {HigherLabel}) on {Instrument}",
             message.RequestId, message.Action, trend.Direction,
             trend.ReferenceMinutes, trend.Reference,
             trend.HigherMinutes > 0 ? $"{trend.HigherMinutes}min={trend.Higher}" : "higher timeframe off",
-            state.Instrument, trend.Method);
+            state.Instrument);
     }
 
     /// <summary>

@@ -64,7 +64,6 @@ export interface TrendState {
   reference: TrendDirection;
   /** Unité supérieure seule, vide quand cette confirmation est coupée. */
   higher: TrendDirection | '';
-  method: 'structure' | 'heikinAshi';
   referenceMinutes: number;
   /** 0 quand la confirmation par unité supérieure est coupée. */
   higherMinutes: number;
@@ -77,7 +76,6 @@ export const DEFAULT_TREND_STATE: TrendState = {
   direction: 'neutral',
   reference: 'neutral',
   higher: '',
-  method: 'structure',
   referenceMinutes: 1,
   higherMinutes: 5,
   staleSeconds: 0,
