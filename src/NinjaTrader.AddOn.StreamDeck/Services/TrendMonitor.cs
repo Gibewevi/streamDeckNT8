@@ -42,17 +42,26 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         ///
         /// Without it the worst failure mode of the whole feature is available: a frozen feed would
         /// leave the last known direction standing for hours, and — once the gate is armed in the
-        /// next lot — it would keep refusing orders on it. Two periods tolerates one missed bar,
-        /// which happens, and catches a dead feed, which must not pass silently. Outside market
-        /// hours this reports stale, and that is correct: no data, no verdict, nothing refused.
+        /// next lot — it would keep refusing orders on it.
         ///
-        /// Measured against OUR clock since the bar arrived, deliberately, and never against the
-        /// bar's own timestamp: NinjaTrader stamps bars in the user's configured display time zone,
-        /// which is not necessarily this machine's. Subtracting one from the other would read hours
-        /// of staleness on a perfectly healthy feed and switch the trend off for good. Time since
-        /// arrival needs no time zone and answers the question actually being asked.
+        /// Three periods and not two, with the floor below. NinjaTrader only creates a Minute bar
+        /// when a trade prints in that minute, so a quiet overnight session leaves real gaps on a
+        /// 1-minute series: a two-period tolerance would flap between a direction and NO DATA all
+        /// night, on a feed that is perfectly alive.
+        ///
+        /// Measured against OUR clock since the bar arrived, deliberately, and never as the gap
+        /// between now and the bar's own timestamp: NinjaTrader stamps bars in the user's
+        /// configured display time zone, which is not necessarily this machine's. Subtracting one
+        /// from the other would read hours of staleness on a healthy feed and switch the trend off
+        /// for good.
         /// </summary>
-        private const int StalePeriods = 2;
+        private const int StalePeriods = 3;
+
+        /// <summary>
+        /// Absolute floor under the staleness tolerance. Below this, a 1-minute series would be
+        /// declared dead over an ordinary lull.
+        /// </summary>
+        private const int MinStaleMinutes = 5;
 
         private readonly object _lock = new object();
 
@@ -66,6 +75,14 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private double _thresholdAtr = 1.0;
 
         private bool _disposed;
+
+        /// <summary>
+        /// Last time the series were (re)loaded, for the self-heal throttle below. Set by
+        /// <see cref="Rebuild"/>, so the initial load counts as one and startup cannot thrash.
+        /// </summary>
+        private DateTime _lastLoadUtc = DateTime.MinValue;
+
+        private static readonly TimeSpan SelfHealInterval = TimeSpan.FromMinutes(2);
 
         // Direction transitions are the trading narrative of this feature, so they are logged at
         // INFO — but only when they CHANGE. The publish loop runs twice a second.
@@ -93,13 +110,19 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             public bool HigherEnabled;
         }
 
-        /// <summary>One timeframe: its request, its engine, and how far it has been fed.</summary>
+        /// <summary>One timeframe: its request, its engine, and the last bar it consumed.</summary>
         private class Series
         {
             public BarsRequest Request;
             public TrendEngine Engine;
             public int Minutes;
-            public int FedThrough;
+
+            /// <summary>
+            /// Timestamp of the newest CLOSED bar already folded into the engine, as the series
+            /// itself stamps it. Identity, not a cursor — see <see cref="Consume"/>.
+            /// </summary>
+            public DateTime LastClosedBarTime;
+
             public DateTime LastAdvanceUtc;
             public bool Failed;
         }
@@ -208,7 +231,36 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             state["staleSeconds"] = Math.Max(referenceStale, higherStale);
 
             LogVerdictChange(available, direction, verdict);
+            if (!available) TrySelfHeal();
             return state;
+        }
+
+        /// <summary>
+        /// Reloads the series once the verdict has become unusable, and keeps trying.
+        ///
+        /// A watchdog that detects a dead series but cannot act on it only converts a silent
+        /// failure into a permanent NO DATA. That is exactly what happened: nothing rebuilt a stuck
+        /// series except a settings change or an instrument switch, so the key stayed dark until
+        /// the trader happened to touch something — which is not a recovery path, it is a
+        /// coincidence.
+        ///
+        /// Throttled, and the throttle is anchored on the last LOAD rather than on the last
+        /// attempt: the first load therefore counts as one, so a series still warming up is left
+        /// alone instead of being restarted under itself.
+        /// </summary>
+        private void TrySelfHeal()
+        {
+            if (DateTime.UtcNow - _lastLoadUtc < SelfHealInterval) return;
+
+            lock (_lock)
+            {
+                if (_disposed || _instrument == null) return;
+                if (DateTime.UtcNow - _lastLoadUtc < SelfHealInterval) return;
+
+                SdLogger.EventWarn("Trend", "Trend unusable for {0:0}s — reloading the bars series",
+                    (DateTime.UtcNow - _lastLoadUtc).TotalSeconds);
+                Rebuild();
+            }
         }
 
         /// <summary>
@@ -225,7 +277,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             var age = DateTime.UtcNow - lastAdvanceUtc;
             staleSeconds = age.TotalSeconds > 0 ? (int)age.TotalSeconds : 0;
 
-            return age.TotalMinutes <= Math.Max(1, minutes) * StalePeriods;
+            return age.TotalMinutes <= Math.Max(Math.Max(1, minutes) * StalePeriods, MinStaleMinutes);
         }
 
         private void LogVerdictChange(bool available, TrendDirection direction, Verdict verdict)
@@ -257,6 +309,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         {
             Teardown();
             _lastLoggedVerdict = null;
+            _lastLoadUtc = DateTime.UtcNow;
 
             if (!_disposed && _instrument != null)
             {
@@ -396,41 +449,49 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         }
 
         /// <summary>
-        /// Feeds the engine every bar that has CLOSED since the last call.
+        /// Rebuilds the engine from the loaded window whenever a new bar has CLOSED.
         ///
         /// Index Count-1 is the bar currently being built and is deliberately never fed: its close
-        /// is the live price, so its Heikin Ashi body flips several times within the period. A gate
-        /// reading it would allow an entry and refuse the same one five seconds later, with nothing
-        /// on the deck to explain the difference. The price of this choice is a lag of at most one
-        /// bar at a turn, and that is the right trade.
+        /// is the live price, so a gate reading it would allow an entry and refuse the same one
+        /// seconds later, with nothing on the deck to explain the difference. The price of this
+        /// choice is a lag of at most one bar at a turn, and that is the right trade.
+        ///
+        /// WHY THE WHOLE WINDOW, AND WHY A TIMESTAMP. <see cref="BarsBack"/> makes NinjaTrader keep
+        /// a ROLLING window: when a bar closes, the oldest one drops out and <c>Bars.Count</c> stays
+        /// at 300 forever. Two consequences, and the first one cost a release.
+        ///
+        /// Detecting "a bar closed" by watching Count therefore never fires — the trend loaded
+        /// correctly, then went stale exactly two minutes later and stayed there, on every single
+        /// cycle. Only a settings change or an instrument switch brought it back, because those
+        /// rebuild the series. Identity now comes from the bar's OWN timestamp, compared against
+        /// the previous one; that comparison is between two values from the same series, so the
+        /// display-timezone hazard noted on StalePeriods does not apply here.
+        ///
+        /// And because the window rolls, an index does not name the same bar twice. Rather than
+        /// track a cursor through shifting indices, the engine is simply rebuilt from the whole
+        /// window — three hundred bars of a few flops, once a minute, is free, and it removes an
+        /// entire class of off-by-one and missed-bar bugs. It also makes the verdict independent
+        /// of when the add-on happened to start.
         /// </summary>
         private void Consume(Series series)
         {
             var bars = series.Request != null ? series.Request.Bars : null;
             if (bars == null) return;
 
-            var closed = bars.Count - 1;
-            if (closed <= 0) return;
+            var newest = bars.Count - 2;
+            if (newest < 0) return;
 
-            // The series was reloaded underneath us (session reset, provider refresh). Both
-            // recursions in TrendEngine are order-dependent, so there is no way to resynchronise by
-            // replaying part of it — start the engine over.
-            if (closed < series.FedThrough)
+            var newestTime = bars.GetTime(newest);
+            if (newestTime == series.LastClosedBarTime) return;
+
+            var engine = NewEngine();
+            for (var i = 0; i <= newest; i++)
             {
-                SdLogger.Event("Trend", "{0}min series shrank ({1} → {2} closed bars) — engine restarted",
-                    series.Minutes, series.FedThrough, closed);
-                series.Engine = NewEngine();
-                series.FedThrough = 0;
+                engine.AddBar(bars.GetHigh(i), bars.GetLow(i), bars.GetClose(i));
             }
 
-            if (closed == series.FedThrough) return;
-
-            for (var i = series.FedThrough; i < closed; i++)
-            {
-                series.Engine.AddBar(bars.GetHigh(i), bars.GetLow(i), bars.GetClose(i));
-            }
-
-            series.FedThrough = closed;
+            series.Engine = engine;
+            series.LastClosedBarTime = newestTime;
             series.LastAdvanceUtc = DateTime.UtcNow;
         }
 
