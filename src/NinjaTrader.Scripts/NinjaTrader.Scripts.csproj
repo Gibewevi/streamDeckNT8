@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Projet de VÉRIFICATION uniquement. Le DLL produit ne sert à rien : NinjaScript recompile les
+    sources .cs lui-même. Il existe parce qu'une erreur de compilation dans un de ces fichiers ne
+    casse pas seulement notre code — elle casse la compilation NinjaScript ENTIÈRE, donc aussi les
+    indicateurs et stratégies personnels du trader. Compiler ici avant de déployer est le seul
+    moyen de ne pas découvrir l'erreur dans NinjaTrader.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <RootNamespace>NinjaTrader.NinjaScript</RootNamespace>
+    <AssemblyName>NinjaTrader.Scripts.Verification</AssemblyName>
+    <!-- Les CS0436 sont attendus : ces types existent déjà dans NinjaTrader.Custom.dll. -->
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    Les stratégies sont exclues par défaut. Elles appellent `TdSwingStructure(...)`, la méthode que
+    NinjaScript GÉNÈRE à partir de l'indicateur : elle n'existe donc pas tant que NinjaTrader n'a
+    pas compilé l'indicateur au moins une fois. Après un premier F5 dans NinjaTrader :
+      dotnet build src/NinjaTrader.Scripts/NinjaTrader.Scripts.csproj -p:IncludeStrategies=true
+  -->
+  <ItemGroup Condition="'$(IncludeStrategies)' != 'true'">
+    <Compile Remove="Strategies\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="NinjaTrader.Core">
+      <HintPath>$(ProgramFiles)\NinjaTrader 8\bin\NinjaTrader.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NinjaTrader.Gui">
+      <HintPath>$(ProgramFiles)\NinjaTrader 8\bin\NinjaTrader.Gui.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NinjaTrader.Custom">
+      <HintPath>$(USERPROFILE)\Documents\NinjaTrader 8\bin\Custom\NinjaTrader.Custom.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.ComponentModel.DataAnnotations" />
+    <Reference Include="System.Xml" />
+    <!-- Brushes / Stroke : WPF, référencé à la main faute d'UseWPF sur net48. -->
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Xaml" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,10 @@
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\bin\Release\net48\NinjaTrader.Scripts.Verification.dll
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\bin\Release\net48\NinjaTrader.Scripts.Verification.pdb
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.csproj.AssemblyReference.cache
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.AssemblyInfoInputs.cache
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.AssemblyInfo.cs
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.csproj.CoreCompileInputs.cache
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.sourcelink.json
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.Verification.dll
+C:\Users\pixel\Desktop\stream deck\src\NinjaTrader.Scripts\obj\Release\net48\NinjaTrader.Scripts.Verification.pdb
