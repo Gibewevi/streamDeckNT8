@@ -21,9 +21,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
     ///      no exception escapes, no network call, no blocking wait. Append a line, nothing else.
     ///   2. No external dependency — SimpleJson only, like the rest of the add-on. NinjaScript
     ///      compiles these sources as they are.
-    ///   3. Point value and tick size are captured at fill time. The server can then compute P&amp;L
-    ///      without an instrument table of its own, and contracts Bitlearn has never heard of
-    ///      still produce correct numbers.
+    ///   3. Point value and tick size are captured at fill time — and so is the trend. The server
+    ///      can then compute P&amp;L without an instrument table of its own, and answer "was this
+    ///      trade taken against the trend" without ever having seen a bar. Both are facts that
+    ///      only exist at the instant of the fill: no amount of later work reconstructs them.
     ///
     /// Recording is local and unconditional; *uploading* is what the user opts into, per account,
     /// and the host filters on that. Writing a line to the trader's own disk is not transmission,
@@ -44,13 +45,21 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private readonly object _sync = new object();
         private readonly string _directory;
 
+        /// <summary>
+        /// Source of the trend verdict stamped on each fill. Optional: null simply omits the field,
+        /// which the server reads as "unknown" — the journal must keep recording fills whatever
+        /// happens to the market-data side.
+        /// </summary>
+        private readonly TrendMonitor _trend;
+
         private StreamWriter _writer;
         private DateTime _openDate = DateTime.MinValue;
         private bool _disposed;
         private bool _sinkFailed;
 
-        public ExecutionRecorder(string directory = null)
+        public ExecutionRecorder(TrendMonitor trend = null, string directory = null)
         {
+            _trend = trend;
             _directory = directory ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "StreamDeckTrader", FolderName);
@@ -67,7 +76,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             try
             {
                 if (_disposed || e == null || e.Execution == null) return;
-                Write(Describe(e.Execution));
+                Write(Describe(e.Execution, TrendAt(e.Execution)));
                 WarnIfNoCommission(e.Execution);
             }
             catch (Exception ex)
@@ -107,13 +116,41 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         }
 
         /// <summary>
+        /// Trend direction for the instrument being filled, or null when nothing can be said.
+        ///
+        /// **This is what makes the counter-trend statistic native.** It is read from the monitor
+        /// the add-on always runs, not from the Trend key: the trader neither has to arm the macro
+        /// nor to place it on the deck for a fill to carry its verdict. A behavioural measurement
+        /// that only exists once the trader opts into the feature would describe the sessions that
+        /// least need describing.
+        ///
+        /// Swallows everything for the reason the whole class exists: a fill is recorded with an
+        /// unknown trend rather than not recorded at all.
+        /// </summary>
+        private string TrendAt(Execution exec)
+        {
+            try
+            {
+                if (_trend == null) return null;
+                var instrument = exec.Instrument;
+                if (instrument == null) return null;
+                return _trend.DirectionFor(instrument.FullName);
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Warn("Trend not stamped on a fill: {0}", ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Flattens an execution into the record the server expects.
         ///
         /// Every member is read defensively: a partially populated Execution is rare but real
         /// during a disconnect, and a null reference here would be indistinguishable from a
         /// trading fault in the logs.
         /// </summary>
-        private static Dictionary<string, object> Describe(Execution exec)
+        private static Dictionary<string, object> Describe(Execution exec, string trend)
         {
             var record = new Dictionary<string, object>();
 
@@ -131,6 +168,12 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             // an order that never went through the deck is exactly what the guard rules cannot
             // prevent, only report.
             record["orderName"] = exec.Name ?? string.Empty;
+
+            // Written only when known — the key is ABSENT rather than empty or "neutral" when the
+            // trend could not be read. "neutral" is a verdict ("the market is going nowhere"), and
+            // conflating it with "we could not tell" would quietly count every fill recorded during
+            // a data outage as a trade taken with the trend.
+            if (trend != null) record["trend"] = trend;
 
             var instrument = exec.Instrument;
             if (instrument != null)

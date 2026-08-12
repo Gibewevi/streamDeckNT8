@@ -27,6 +27,7 @@ maintien ne fait rien.
 | `src/StreamDeckBridge/StateManager.cs` | L'armement et **le refus** — `IsTrendBlocked` |
 | `src/StreamDeckBridge/MessageRouter.cs` | `configureTrend`, `toggleTrend`, et le journal d'observation |
 | `src/deck-host/src/catalog.ts`, `visual-engine.ts`, `visuals.ts` | La touche et ses réglages |
+| `src/NinjaTrader.AddOn.StreamDeck/Services/ExecutionRecorder.cs` | Le champ `trend` de chaque fill — voir « La mesure contre-tendance » |
 
 ## La macro ne lit pas votre graphique
 
@@ -275,6 +276,47 @@ du nombre total d'entrées veut dire que la règle, une fois armée, sera désar
 
 Fichiers : `%APPDATA%\StreamDeckTrader\` (`bridge-` et `addon-AAAA-MM-JJ.log`), corrélés par
 `requestId`.
+
+## La mesure contre-tendance — native, sans rien armer
+
+Le journal enregistre le sens de la tendance **sur chaque exécution**, et Bitlearn en tire un
+pourcentage de trades pris à contre-sens ainsi qu'une étiquette dans l'historique.
+
+**Aucun réglage ne la commande.** Ni l'armement, ni même la présence de la touche Tendance sur le
+boîtier : `TrendMonitor` tourne depuis le démarrage de l'add-on, `StatePublisher` lui passe
+l'instrument suivi à chaque tick, et l'armement ne gouverne que le refus d'un ordre — jamais le
+calcul. Sans touche Tendance dans la disposition, `configureTrend` n'est jamais envoyé et le
+moniteur travaille sur ses valeurs par défaut (1 min confirmée par 5 min, seuil 1,0 ATR).
+
+C'est **l'exécution** qui porte le verdict, et non un événement comportemental. La raison tient au
+profil visé : plusieurs trades par minute. Les événements `position.opened` naissent d'une
+comparaison entre deux états diffusés à 5 Hz, donc un aller-retour de deux secondes peut n'en
+produire aucun ; un fill n'est jamais manqué.
+
+```json
+{"kind":"exec","execId":"…","marketPosition":"Long","trend":"down", …}
+```
+
+Trois valeurs, et **le champ peut être absent** :
+
+| Valeur | Sens | Compté ? |
+|---|---|---|
+| `up` / `down` | Le marché a un sens | Oui — contre-tendance si l'entrée l'affronte |
+| `neutral` | Le marché ne va nulle part | Oui, au dénominateur : le trade n'allait contre rien |
+| *(absent)* | Le poste ne savait pas — série absente, périmée, ou fill sur un autre contrat que celui suivi | Non, ni au numérateur ni au dénominateur |
+
+La dernière ligne est celle qui compte : traiter « on ne sait pas » comme « dans le sens » ferait
+d'une panne de flux une séance sans faute. `TrendMonitor.DirectionFor` rend `null` pour ces trois
+situations indistinctement, et `ExecutionRecorder` omet alors la clé.
+
+Le fill d'un contrat que le moniteur ne suit pas n'est jamais estampillé : le moniteur suit
+l'instrument sélectionné sur le deck, et lui coller sa direction produirait un fait fabriqué que
+rien, en aval, ne distinguerait d'une mesure.
+
+Côté Bitlearn : colonne `tradedeck_executions.trend`, `estContreTendance` dans
+`lib/tradeDeck/psychology.js`, jauge « Contre-tendance » et étiquette du même nom dans l'historique.
+L'entrée d'un aller-retour est sa première exécution dans le temps — un retournement ayant été
+découpé en deux allers-retours par le rollup, chacun retrouve la sienne.
 
 ## Protocole
 

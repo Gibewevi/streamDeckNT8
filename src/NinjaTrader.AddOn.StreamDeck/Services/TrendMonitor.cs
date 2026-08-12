@@ -108,6 +108,15 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             public int ReferenceMinutes;
             public int HigherMinutes;
             public bool HigherEnabled;
+
+            /// <summary>
+            /// Full name of the instrument these series were loaded for. Carried inside the verdict
+            /// rather than read from <c>_instrument</c> at question time: the two would otherwise
+            /// disagree for the moment between an instrument switch and the first bar of the new
+            /// series, and that is exactly the moment a fill would be stamped with the wrong
+            /// contract's direction.
+            /// </summary>
+            public string InstrumentName;
         }
 
         /// <summary>One timeframe: its request, its engine, and the last bar it consumed.</summary>
@@ -208,16 +217,9 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         {
             var verdict = _verdict;
 
-            var referenceStale = 0;
-            var higherStale = 0;
-            var referenceOk = IsUsable(verdict.ReferenceReady, verdict.ReferenceAdvanceUtc, verdict.ReferenceMinutes, out referenceStale);
-            var higherOk = !verdict.HigherEnabled
-                           || IsUsable(verdict.HigherReady, verdict.HigherAdvanceUtc, verdict.HigherMinutes, out higherStale);
-
-            var available = referenceOk && higherOk;
-            var direction = available
-                ? TrendEngine.Combine(verdict.Reference, verdict.Higher, verdict.HigherEnabled)
-                : TrendDirection.Neutral;
+            var staleSeconds = 0;
+            var direction = TrendDirection.Neutral;
+            var available = Evaluate(verdict, out direction, out staleSeconds);
 
             var state = new Dictionary<string, object>();
             state["available"] = available;
@@ -228,11 +230,67 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             state["higher"] = verdict.HigherEnabled ? TrendEngine.ToWire(verdict.Higher) : "";
             state["referenceMinutes"] = verdict.ReferenceMinutes;
             state["higherMinutes"] = verdict.HigherEnabled ? verdict.HigherMinutes : 0;
-            state["staleSeconds"] = Math.Max(referenceStale, higherStale);
+            state["staleSeconds"] = staleSeconds;
 
             LogVerdictChange(available, direction, verdict);
             if (!available) TrySelfHeal();
             return state;
+        }
+
+        /// <summary>
+        /// The verdict for ONE instrument, as a wire value, or null when nothing can be said about
+        /// it. Written on every fill so the journal can tell, months later, which way the market
+        /// was pointing when the trader committed — a fact nobody can reconstruct afterwards, least
+        /// of all a server that has never seen a bar.
+        ///
+        /// Null for three distinct situations, and they must stay indistinguishable to the caller
+        /// because they all mean the same thing: WE DO NOT KNOW. No verdict yet, a stale series,
+        /// or — the one this overload exists for — a fill on an instrument the monitor is not
+        /// watching. The monitor follows the instrument selected on the deck; a trader who fills an
+        /// order on another contract would otherwise get that contract's fill stamped with MNQ's
+        /// direction, and nothing downstream could tell that fabricated fact from a measured one.
+        ///
+        /// Reads one volatile reference and a clock, like <see cref="BuildState"/>: it is called
+        /// from NinjaTrader's execution pipeline, where blocking is not an option. Deliberately
+        /// free of the self-heal and the transition log — a fill must not be able to trigger a
+        /// series reload.
+        /// </summary>
+        public string DirectionFor(string instrumentFullName)
+        {
+            if (string.IsNullOrEmpty(instrumentFullName)) return null;
+
+            var verdict = _verdict;
+            if (!string.Equals(verdict.InstrumentName, instrumentFullName, StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var staleSeconds = 0;
+            var direction = TrendDirection.Neutral;
+            if (!Evaluate(verdict, out direction, out staleSeconds)) return null;
+
+            return TrendEngine.ToWire(direction);
+        }
+
+        /// <summary>
+        /// Turns a verdict into "is it usable, and what does it say". One implementation for the
+        /// two readers: the state block and the journal must never be able to disagree about what
+        /// the trend was at a given instant.
+        /// </summary>
+        private static bool Evaluate(Verdict verdict, out TrendDirection direction, out int staleSeconds)
+        {
+            var referenceStale = 0;
+            var higherStale = 0;
+            var referenceOk = IsUsable(verdict.ReferenceReady, verdict.ReferenceAdvanceUtc, verdict.ReferenceMinutes, out referenceStale);
+            var higherOk = !verdict.HigherEnabled
+                           || IsUsable(verdict.HigherReady, verdict.HigherAdvanceUtc, verdict.HigherMinutes, out higherStale);
+
+            staleSeconds = Math.Max(referenceStale, higherStale);
+
+            var available = referenceOk && higherOk;
+            direction = available
+                ? TrendEngine.Combine(verdict.Reference, verdict.Higher, verdict.HigherEnabled)
+                : TrendDirection.Neutral;
+
+            return available;
         }
 
         /// <summary>
@@ -526,6 +584,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             verdict.ReferenceMinutes = _referenceMinutes;
             verdict.HigherMinutes = _higherMinutes;
             verdict.HigherEnabled = _higherEnabled;
+            verdict.InstrumentName = _instrument != null ? _instrument.FullName : null;
             return verdict;
         }
 

@@ -71,14 +71,16 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // never cross it, so the safety macro has to be applied from inside the platform.
                 _guardEnforcer = new GuardEnforcer(_resolver, _bridgeClient);
 
+                // The add-on's only market-data subscription. Created before the publisher, which
+                // hands it the tracked instrument on every tick and reads its verdict — and before
+                // the recorder, which stamps that verdict on every fill.
+                _trendMonitor = new TrendMonitor();
+
                 // Records every fill to a local spool. Passed to the monitor, which owns the
                 // account subscription and is therefore the only place that can attach it.
-                _executionRecorder = new ExecutionRecorder();
+                _executionRecorder = new ExecutionRecorder(_trendMonitor);
                 _orderMonitor = new OrderMonitor(_bridgeClient, _guardEnforcer, _executionRecorder);
 
-                // The add-on's only market-data subscription. Created before the publisher, which
-                // hands it the tracked instrument on every tick and reads its verdict.
-                _trendMonitor = new TrendMonitor();
                 _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor, _trendMonitor);
 
                 // Fills and cancellations refresh the deck on the spot instead of waiting for the
