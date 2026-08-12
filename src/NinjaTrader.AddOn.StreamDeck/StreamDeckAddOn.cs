@@ -25,6 +25,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private OrderMonitor _orderMonitor;
         private GuardEnforcer _guardEnforcer;
         private ExecutionRecorder _executionRecorder;
+        private TrendMonitor _trendMonitor;
         private AddOnConfig _config;
 
         protected override void OnStateChange()
@@ -74,7 +75,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // account subscription and is therefore the only place that can attach it.
                 _executionRecorder = new ExecutionRecorder();
                 _orderMonitor = new OrderMonitor(_bridgeClient, _guardEnforcer, _executionRecorder);
-                _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor);
+
+                // The add-on's only market-data subscription. Created before the publisher, which
+                // hands it the tracked instrument on every tick and reads its verdict.
+                _trendMonitor = new TrendMonitor();
+                _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor, _trendMonitor);
 
                 // Fills and cancellations refresh the deck on the spot instead of waiting for the
                 // next publish tick. Set here rather than injected so the monitor keeps no
@@ -102,6 +107,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 SdLogger.Event("Session", "Add-On shutting down (NinjaTrader closing or NinjaScript reload)");
                 if (_statePublisher != null) _statePublisher.Dispose();
+                // After the publisher, which is the only reader of its verdict: releasing the bars
+                // requests while a publish is in flight would pull the series out from under it.
+                if (_trendMonitor != null) _trendMonitor.Dispose();
                 // After the monitor, which detaches the subscription that feeds it: closing the
                 // spool first would leave fills arriving at a disposed writer.
                 if (_orderMonitor != null) _orderMonitor.Dispose();
@@ -133,6 +141,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             if (message.Action == "setGuardPolicy")
                 response = HandleGuardPolicy(message);
+            else if (message.Action == "configureTrend")
+                response = HandleTrendConfig(message);
             else if (message.Action == "setInstrument" || message.Action == "setAccount")
                 response = HandleTrackingCommand(message);
             else
@@ -198,6 +208,42 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 blocked = blocked,
                 maxContracts = maxContracts
+            });
+        }
+
+        /// <summary>
+        /// Adopts the trend settings the deck publishes. Handled here rather than in the
+        /// dispatcher for the same reason as the guard policy: it sends no order and touches no
+        /// position, it only tells a monitor what to watch.
+        ///
+        /// Every field is optional and falls back to what the monitor already holds. The host
+        /// replays its whole configuration on each layout edit and each reconnection, and a
+        /// missing field must mean "leave it alone", never "reset it to zero".
+        /// </summary>
+        private BridgeMessage HandleTrendConfig(BridgeMessage message)
+        {
+            if (_trendMonitor == null)
+                return BridgeMessage.CreateError(message.RequestId, message.Action, "CONTEXT_MISSING", "Trend monitor is not initialized.");
+
+            var method = message.GetPayloadString("method");
+            var referenceMinutes = message.GetPayloadInt("referenceMinutes");
+            var higherMinutes = message.GetPayloadInt("higherMinutes");
+            var thresholdAtr = message.GetPayloadDouble("thresholdAtr");
+            var higherEnabled = message.GetPayloadBool("higherEnabled");
+
+            // 0 and null both mean "not supplied": TrendMonitor.Configure keeps its current value
+            // for anything out of range, so passing them straight through is safe.
+            _trendMonitor.Configure(
+                method,
+                referenceMinutes.HasValue ? referenceMinutes.Value : 0,
+                higherEnabled,
+                higherMinutes.HasValue ? higherMinutes.Value : 0,
+                thresholdAtr.HasValue ? thresholdAtr.Value : 0);
+
+            return BridgeMessage.CreateResponse(message.RequestId, message.Action, true, new
+            {
+                method = TrendMethods.Normalize(method),
+                higherEnabled = higherEnabled
             });
         }
 

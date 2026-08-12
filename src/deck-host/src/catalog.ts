@@ -296,6 +296,56 @@ export const CATALOG: ActionDef[] = [
     ],
   },
 
+  // --- Tendance ---
+  // Touche d'AFFICHAGE, dans cette version. Elle ne s'arme pas et ne refuse rien : elle montre le
+  // sens du marché en permanence, et le bridge journalise ce qu'un filtre aurait refusé. Un
+  // interrupteur qui ne fait rien serait un piège — l'armement arrivera avec le refus, une fois ces
+  // chiffres lus sur une vraie séance.
+  //
+  // Rien ne dépend du graphique du trader : l'add-on charge ses propres barres. La macro fonctionne
+  // graphique fermé, workspace changé, et chez quelqu'un qui n'a jamais installé Heikin Ashi.
+  {
+    id: 'com.trader.ninjatrader.trend', name: 'Tendance', group: 'Affichage',
+    description: 'Affiche le sens du marché sur deux unités de temps. N\'influence pas encore les '
+               + 'ordres : cette version mesure, elle ne refuse rien.',
+    settings: [
+      {
+        key: 'trendMethod', label: 'Méthode', type: 'select', default: 'structure',
+        options: [
+          { value: 'structure', label: 'Structure de marché' },
+          { value: 'heikinAshi', label: 'Heikin Ashi' },
+        ],
+        help: 'Structure : le sens change à la cassure du dernier sommet ou creux — un pullback ne '
+            + 'le retourne pas. Heikin Ashi : couleur de la dernière bougie clôturée.',
+      },
+      {
+        key: 'referenceMinutes', label: 'Unité de temps (min)', type: 'number',
+        min: 1, max: 240, step: 1, default: 1,
+        help: 'Unité principale, celle qui donne le sens.',
+      },
+      {
+        key: 'higherEnabled', label: 'Confirmer par une unité supérieure', type: 'toggle', default: true,
+        help: 'Les deux unités doivent pointer dans le même sens. En désaccord, la touche affiche FLAT.',
+      },
+      {
+        key: 'higherMinutes', label: 'Unité supérieure (min)', type: 'number',
+        min: 1, max: 1440, step: 1, default: 5,
+        showIf: { key: 'higherEnabled', equals: true },
+        help: 'Doit être STRICTEMENT supérieure à l\'unité de référence, sinon elle ne confirme rien.',
+      },
+      // Le seul réglage qui demande à être calibré, et c'est exactement ce que cette version sert à
+      // faire : lire dans le journal combien de fois le sens bascule par heure.
+      {
+        key: 'thresholdAtr', label: 'Seuil de vague (× ATR)', type: 'number',
+        min: 0.1, max: 10, default: 1,
+        showIf: { key: 'trendMethod', equals: 'structure' },
+        help: 'Amplitude minimale d\'une vague, en multiples d\'ATR. Exprimé ainsi, le même réglage '
+            + 'tient sur toutes les unités de temps et tous les instruments. Plus haut = moins de '
+            + 'changements de sens.',
+      },
+    ],
+  },
+
   // --- Automatisme ---
   {
     id: 'host.autobe', name: 'Auto BE', group: 'Position',

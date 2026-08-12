@@ -141,6 +141,11 @@ public sealed class StateManager
                 CooldownActive = cooldownActive,
                 CooldownSecondsRemaining = cooldownRemaining,
                 CooldownSeconds = _cooldownSeconds,
+
+                // Recopié ici comme tout le reste, et pour la raison écrite plus haut : ce snapshot
+                // est le SEUL objet diffusé au client. Un champ lu de NT8, parsé correctement, mais
+                // absent d'ici n'atteint jamais l'écran et rien ne le signale.
+                Trend = _state.Trend,
                 Safety = _safety.GetStatus()
             };
         }
@@ -211,6 +216,10 @@ public sealed class StateManager
                 _state.AvailableAccounts.Clear();
                 _state.Position = null;
                 _state.InstrumentInfo = null;
+
+                // Sans NinjaTrader il n'y a plus de barres, donc plus de tendance. La garder
+                // afficherait un sens figé au moment précis où plus rien ne le met à jour.
+                _state.Trend = new TrendState();
             }
 
             _logger.LogInformation("NT8 connection: {Status}", connected ? "CONNECTED" : "DISCONNECTED");
@@ -353,6 +362,16 @@ public sealed class StateManager
                     _state.CashValue = cash.GetDouble();
                 }
             }
+            // La tendance est calculée par l'add-on : le bridge ne fait que la transporter. Un bloc
+            // absent laisse la valeur précédente en place plutôt que de la remettre à zéro — une
+            // publication sans `trend` (add-on plus ancien, monitor non initialisé) ne doit pas
+            // faire clignoter la touche entre un sens connu et NO DATA à chaque tic.
+            if (statePayload.TryGetProperty("trend", out var trend) && trend.ValueKind == JsonValueKind.Object)
+            {
+                var parsed = JsonSerializer.Deserialize<TrendState>(trend.GetRawText(), CamelCase);
+                if (parsed != null) _state.Trend = parsed;
+            }
+
             // Update NT connected status from addon heartbeat
             if (statePayload.TryGetProperty("connected", out var conn) && conn.ValueKind == JsonValueKind.True)
             {

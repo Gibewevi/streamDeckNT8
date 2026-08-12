@@ -35,6 +35,21 @@
     <Reference Include="System.Net.WebSockets.Client" />
   </ItemGroup>
 
+  <!--
+    Swing detection, shared with the NinjaScript indicators. Compiled in here for LOCAL
+    VERIFICATION ONLY — it is never deployed from this project.
+
+    On the trading machine, this file lives at bin\Custom\Indicators\TdSwingEngine.cs and
+    NinjaScript compiles it into the same NinjaTrader.Custom.dll as the add-on, which is why
+    TrendEngine can reference it across folders. It must exist there in EXACTLY ONE copy: a
+    second one under AddOns\StreamDeck\ produces a CS0101 duplicate type, and a NinjaScript
+    compile is all-or-nothing — that failure would take down the trader's own indicators and
+    strategies with ours. See docs/macro-trend.md.
+  -->
+  <ItemGroup>
+    <Compile Include="..\NinjaTrader.Scripts\Indicators\TdSwingEngine.cs" Link="TdSwingEngine.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>

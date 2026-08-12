@@ -37,7 +37,17 @@ public sealed class MessageValidator
         "breakeven", "moveStop", "moveTarget",
         "qtySet", "qtyAdjust", "qtyReset",
         "setInstrument", "setAccount", "getState", "toggleCooldown", "configureCooldown",
-        "armSafety", "disarmSafety", "toggleSafety", "configureSafety"
+        "armSafety", "disarmSafety", "toggleSafety", "configureSafety",
+        "configureTrend"
+    };
+
+    /// <summary>
+    /// Champs acceptés par <c>configureTrend</c>. Même discipline que <see cref="SettingsKeys"/> :
+    /// une clé ajoutée au routeur s'ajoute ici, et nulle part ailleurs.
+    /// </summary>
+    private static readonly string[] TrendKeys =
+    {
+        "method", "referenceMinutes", "higherEnabled", "higherMinutes", "thresholdAtr",
     };
 
     private static readonly HashSet<string> PositionRequiredActions = new(StringComparer.OrdinalIgnoreCase)
@@ -94,6 +104,12 @@ public sealed class MessageValidator
 
         if (message.Action == "configureCooldown")
             return ValidateCooldownConfig(message);
+
+        // Branche dédiée, et elle est indispensable : sans elle `configureTrend` tomberait dans
+        // `ValidateTradingAction`, qui exige `account` ET `instrument`, et serait refusé à chaque
+        // démarrage. C'est exactement ce qui est arrivé à la macro Pause.
+        if (message.Action == "configureTrend")
+            return ValidateTrendConfig(message);
 
         // All trading actions need instrument context at minimum
         return ValidateTradingAction(message);
@@ -228,6 +244,48 @@ public sealed class MessageValidator
             return (false, "INVALID_PAYLOAD",
                 $"lockDurationHours must be between {SafetyMacro.MinLockHours} and {SafetyMacro.MaxLockHours}.");
         }
+
+        return (true, null, null);
+    }
+
+    /// <summary>
+    /// Bornes de la macro Trend. Elles doublent celles de <c>TrendMonitor.Configure</c> côté add-on
+    /// — délibérément : refuser ici donne un message que l'éditeur affiche, alors qu'un rabotage
+    /// silencieux là-bas laisserait l'écran annoncer un réglage que la macro n'applique pas.
+    /// </summary>
+    private static (bool, string?, string?) ValidateTrendConfig(BridgeMessage message)
+    {
+        // Même distinction qu'ailleurs : après le garde `TryGetInt32`, une décimale se lit comme
+        // absente. La signaler comme « champ manquant » enverrait chercher le mauvais problème.
+        foreach (var key in new[] { "referenceMinutes", "higherMinutes" })
+        {
+            if (GetPayloadInt(message, key) == null && HasNumericProperty(message, key))
+                return (false, "INVALID_PAYLOAD", $"{key} must be a whole number of minutes.");
+        }
+
+        if (!TrendKeys.Any(k => HasProperty(message, k)))
+            return (false, "INVALID_PAYLOAD", "configureTrend requires at least one settings field.");
+
+        var method = GetPayloadString(message, "method");
+        if (method != null && method != "structure" && method != "heikinAshi")
+            return (false, "INVALID_PAYLOAD", "method must be 'structure' or 'heikinAshi'.");
+
+        var reference = GetPayloadInt(message, "referenceMinutes");
+        if (reference is < 1 or > 240)
+            return (false, "INVALID_PAYLOAD", "referenceMinutes must be between 1 and 240.");
+
+        var higher = GetPayloadInt(message, "higherMinutes");
+        if (higher is < 1 or > 1440)
+            return (false, "INVALID_PAYLOAD", "higherMinutes must be between 1 and 1440.");
+
+        // Une unité « supérieure » plus courte que la référence ne confirme rien : elle produirait
+        // un verdict qui n'a pas de sens, et un FLAT permanent que rien n'expliquerait.
+        if (reference.HasValue && higher.HasValue && higher.Value <= reference.Value)
+            return (false, "INVALID_PAYLOAD", "higherMinutes must be greater than referenceMinutes.");
+
+        var threshold = GetPayloadDouble(message, "thresholdAtr");
+        if (threshold is <= 0 or > 10)
+            return (false, "INVALID_PAYLOAD", "thresholdAtr must be between 0 (exclusive) and 10.");
 
         return (true, null, null);
     }

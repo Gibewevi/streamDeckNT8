@@ -373,6 +373,46 @@ limites de sécurité. Sans envoi, le bridge applique `DefaultCooldownSeconds` (
 L'état publié distingue les deux notions : `cooldownSeconds` est la durée **configurée**,
 `cooldownSecondsRemaining` le **décompte** de la temporisation en cours.
 
+### Tendance
+
+#### `configureTrend`
+Règle la macro Tendance. **Chemin double** : le bridge valide et accuse réception, puis transmet à
+l'add-on — seul à pouvoir agir, puisque c'est lui qui détient les barres. Même mécanique que
+`setInstrument` / `setAccount`.
+
+Tous les champs sont facultatifs, mais il en faut **au moins un**. Un champ absent laisse la valeur
+courante en place : l'hôte rejoue toute sa configuration à chaque édition du layout et à chaque
+reconnexion, et une omission ne doit jamais valoir remise à zéro.
+
+Changer `method`, `referenceMinutes` ou `higherMinutes` est **structurel** : l'add-on recharge ses
+séries, donc repasse par `available: false` pendant quelques secondes.
+
+```json
+{
+  "type": "command",
+  "action": "configureTrend",
+  "payload": {
+    "method": "structure",
+    "referenceMinutes": 1,
+    "higherEnabled": true,
+    "higherMinutes": 5,
+    "thresholdAtr": 1.0
+  }
+}
+```
+
+| Champ | Plage | Description |
+|-------|-------|-------------|
+| `method` | `structure` \| `heikinAshi` | Défaut `structure` |
+| `referenceMinutes` | 1–240, entier | Unité principale. Défaut `1` |
+| `higherEnabled` | booléen | Exiger l'accord d'une unité supérieure. Défaut `true` |
+| `higherMinutes` | 1–1440, entier | Doit être **strictement supérieur** à `referenceMinutes`, sinon `INVALID_PAYLOAD` |
+| `thresholdAtr` | > 0 et ≤ 10 | Amplitude minimale d'une vague, méthode `structure` seulement. Défaut `1.0` |
+
+> **Cette version ne refuse aucun ordre.** Le bridge journalise en `INFO` ce qu'un filtre aurait
+> refusé, et rien de plus. Le code `TREND_AGAINST` n'existe pas encore. Voir
+> [macro-trend.md](macro-trend.md).
+
 ### État
 
 #### `getState`
@@ -463,10 +503,42 @@ Envoyé périodiquement (toutes les 500ms) et à chaque changement significatif.
       "targetPrice": 5435.00,
       "targetOrderCount": 1
     },
+    "trend": {
+      "available": true,
+      "direction": "up",
+      "reference": "up",
+      "higher": "up",
+      "method": "structure",
+      "referenceMinutes": 1,
+      "higherMinutes": 5,
+      "staleSeconds": 12
+    },
     "quantity": 5
   }
 }
 ```
+
+Le bloc `trend` est calculé par l'add-on, seul à disposer de barres — le bridge le transporte sans
+l'interpréter. **Aucune donnée de marché ne traverse le pont** : on transmet un verdict, jamais une
+barre.
+
+| Champ | Description |
+|-------|-------------|
+| `available` | `false` tant qu'une série manque, charge, ou est périmée. Signifie **« on ne sait pas »**, et ne refuse donc rien — même posture que `pnlAvailable` |
+| `direction` | Verdict combiné : `"up"`, `"down"` ou `"neutral"`. Accord **strict** des deux unités quand `higherMinutes > 0`, sinon `reference` |
+| `reference` | Unité principale seule. Affichage et diagnostic |
+| `higher` | Unité supérieure seule. `""` quand la confirmation est coupée |
+| `method` | `"structure"` ou `"heikinAshi"` |
+| `referenceMinutes` / `higherMinutes` | Unités en vigueur. `higherMinutes: 0` = confirmation coupée |
+| `staleSeconds` | Secondes depuis la dernière barre clôturée de la série la plus lente |
+
+`reference` et `higher` restent renseignés même quand `available` vaut `false` : c'est ce qui rend
+un `NO DATA` lisible — on voit **quelle** série manque plutôt que de le deviner.
+
+Le bloc est absent tant que l'add-on n'a pas initialisé son monitor ; le bridge conserve alors la
+dernière valeur reçue plutôt que de la remettre à zéro, sinon la touche clignoterait entre un sens
+connu et `NO DATA` à chaque publication. Il est en revanche **effacé quand NinjaTrader se
+déconnecte** : plus de barres, donc plus de tendance.
 
 Le bridge enrichit cet événement avant de le relayer au plugin et y ajoute l'état de la
 macro de sécurité :

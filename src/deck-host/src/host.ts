@@ -28,7 +28,7 @@ import { JournalUploader, comptesJournalises } from './uploader.js';
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.9.0';
+const VERSION = '0.10.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -434,7 +434,12 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
     }
 
     // Affichage seul : l'appui ne fait que redemander l'état.
+    //
+    // La Tendance en fait partie dans cette version. Elle ne s'arme PAS, et volontairement : la
+    // macro ne refuse encore rien, donc un interrupteur y serait un piège — on croirait avoir armé
+    // une protection qui n'existe pas. L'armement arrivera avec le refus.
     case 'com.trader.ninjatrader.status':
+    case 'com.trader.ninjatrader.trend':
       bridge.send(createCommand('getState', {}));
       return;
 
@@ -711,6 +716,61 @@ async function syncConfig(): Promise<void> {
   await syncSafetyConfig();
   await syncPauseConfig();
   await pushCooldownConfig();
+  await syncTrendConfig();
+}
+
+/**
+ * Pousse les réglages de la macro Tendance jusqu'à l'add-on, seul à pouvoir en faire quelque chose :
+ * c'est lui qui détient les barres.
+ *
+ * Deux réglages sont STRUCTURELS — l'unité de temps et la méthode : les modifier fait recharger les
+ * séries, donc repartir d'un état « NO DATA » de quelques secondes. L'add-on ne recharge que si la
+ * valeur a réellement changé, ce qui compte ici : cette fonction est rejouée à chaque édition du
+ * layout ET à chaque reconnexion.
+ *
+ * Un réglage masqué par `showIf` doit être NEUTRALISÉ et pas seulement caché — d'où le
+ * `higherMinutes` omis quand la confirmation est coupée. Une règle invisible restée active est le
+ * pire des deux mondes.
+ */
+async function syncTrendConfig(): Promise<void> {
+  const cfg = trouverTouche('com.trader.ninjatrader.trend');
+  if (!cfg || !bridge.isConnected) return;
+
+  const s = cfg.settings ?? {};
+  const higherEnabled = s.higherEnabled !== false;
+  const payload: Record<string, unknown> = { higherEnabled };
+
+  if (s.trendMethod === 'structure' || s.trendMethod === 'heikinAshi') payload.method = s.trendMethod;
+  if (typeof s.referenceMinutes === 'number' && Number.isFinite(s.referenceMinutes)) {
+    payload.referenceMinutes = Math.round(s.referenceMinutes);
+  }
+  if (higherEnabled && typeof s.higherMinutes === 'number' && Number.isFinite(s.higherMinutes)) {
+    payload.higherMinutes = Math.round(s.higherMinutes);
+  }
+  if (typeof s.thresholdAtr === 'number' && Number.isFinite(s.thresholdAtr) && s.thresholdAtr > 0) {
+    payload.thresholdAtr = s.thresholdAtr;
+  }
+
+  // Le bridge refuse une unité supérieure qui ne dépasse pas la référence : elle ne confirmerait
+  // rien et produirait un FLAT permanent que rien n'expliquerait. Le dire ICI plutôt que de laisser
+  // partir un INVALID_PAYLOAD, dont le message n'atteint pas la page de configuration.
+  const ref = payload.referenceMinutes as number | undefined;
+  const haut = payload.higherMinutes as number | undefined;
+  if (ref !== undefined && haut !== undefined && haut <= ref) {
+    log.eventWarn('Trend', 'Réglages ignorés : l\'unité supérieure doit dépasser l\'unité de référence', {
+      referenceMinutes: ref, higherMinutes: haut,
+    });
+    return;
+  }
+
+  const resp = await bridge.sendCommand(createCommand('configureTrend', payload));
+  if (resp.error) {
+    log.eventWarn('Trend', 'configureTrend refusé par le bridge', {
+      code: resp.error.code, raison: resp.error.message, requested: payload,
+    });
+  } else {
+    log.event('Trend', 'Réglages de tendance poussés vers le bridge', payload);
+  }
 }
 
 /**

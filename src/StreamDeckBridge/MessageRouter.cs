@@ -21,7 +21,26 @@ public sealed class MessageRouter
     {
         "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState",
         "toggleCooldown", "configureCooldown",
-        "armSafety", "disarmSafety", "toggleSafety", "configureSafety"
+        "armSafety", "disarmSafety", "toggleSafety", "configureSafety",
+        "configureTrend"
+    };
+
+    /// <summary>
+    /// Actions locales qui doivent AUSSI descendre dans NT8, parce que l'add-on a quelque chose à
+    /// en faire : suivre un instrument, suivre un compte, recharger ses séries de barres.
+    /// </summary>
+    private static readonly HashSet<string> ForwardedLocalActions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "setInstrument", "setAccount", "configureTrend"
+    };
+
+    /// <summary>
+    /// Les cinq actions qui ouvrent ou retournent une position. Miroir de
+    /// <c>SafetyMacro.EntryActions</c> et de <c>ACTIONS_ENTREE</c> côté hôte.
+    /// </summary>
+    private static readonly HashSet<string> EntryActions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "buyMarket", "sellMarket", "buyLimit", "sellLimit", "reverse"
     };
 
     public MessageRouter(
@@ -88,8 +107,9 @@ public sealed class MessageRouter
             }
 
             // setInstrument/setAccount must ALSO be forwarded to NT8 so the add-on
-            // updates its tracked instrument/account and starts publishing data for it
-            if (message.Action is "setInstrument" or "setAccount")
+            // updates its tracked instrument/account and starts publishing data for it.
+            // configureTrend joins them: only the add-on can act on it — it owns the bars.
+            if (ForwardedLocalActions.Contains(message.Action))
             {
                 var fwdPayload = _stateManager.EnrichPayload(message);
                 var fwdMsg = new BridgeMessage
@@ -114,7 +134,8 @@ public sealed class MessageRouter
         // The quantity is resolved here rather than after EnrichPayload, which runs later: the
         // contract cap has to judge the order that would actually be sent, and the host usually
         // omits the quantity precisely because the bridge owns it.
-        var quantity = GetPayloadInt(message, "quantity") ?? _stateManager.GetSnapshot().Quantity;
+        var snapshot = _stateManager.GetSnapshot();
+        var quantity = GetPayloadInt(message, "quantity") ?? snapshot.Quantity;
         var (safetyBlocked, safetyCode, safetyMessage) = _safety.Evaluate(message.Action, quantity);
         if (safetyBlocked)
         {
@@ -129,6 +150,17 @@ public sealed class MessageRouter
             _logger.LogWarning("[REQ:{RequestId}] Cooldown active, blocking {Action}", message.RequestId, message.Action);
             return (BridgeMessage.CreateError(message.RequestId, message.Action, "COOLDOWN_ACTIVE", "Cooldown is active after a losing trade. Entry orders are blocked."), false, null);
         }
+
+        // Trend — OBSERVATION ONLY in this version. Nothing is refused; what a gate WOULD have
+        // refused is written down, and those lines are the whole point of the release. Two numbers
+        // come out of a session's log and they are the two that decide everything after it: how
+        // often the direction flips, and how many presses it would have cost. Arming a filter
+        // before knowing them is how you end up with a macro that gets switched off for good.
+        //
+        // Placed here, after the safety macro and the cooldown, because that is where the refusal
+        // will go: Guard's message must win. Reading TREND on a key while the daily loss limit is
+        // reached would send the trader looking for the wrong problem.
+        LogTrendObservation(message, snapshot);
 
         // Enrich and forward to NT8
         var enrichedPayload = _stateManager.EnrichPayload(message);
@@ -145,6 +177,64 @@ public sealed class MessageRouter
 
         _logger.LogInformation("[REQ:{RequestId}] Forwarding {Action} to NT8", message.RequestId, message.Action);
         return (null, true, enriched);
+    }
+
+    /// <summary>
+    /// Écrit ce que la macro Trend AURAIT refusé, sans rien refuser.
+    ///
+    /// Journalisé en INFO et non en TRACE : ce n'est pas une boucle périodique mais un appui de
+    /// touche, donc quelques dizaines de lignes par séance — et c'est la mesure que la version
+    /// suivante attend pour décider du seuil.
+    /// </summary>
+    private void LogTrendObservation(BridgeMessage message, TradingState state)
+    {
+        if (!EntryActions.Contains(message.Action)) return;
+
+        var trend = state.Trend;
+        if (!trend.Available) return;
+        if (trend.Direction is not ("up" or "down")) return;
+
+        // Un ordre qui RÉDUIT l'exposition n'est jamais concerné, même en observation : il ne sera
+        // jamais refusé, donc le compter fausserait le seul chiffre que ce journal produit.
+        // Enfermer le trader dans une position est le résultat qu'aucune règle ne peut produire.
+        if (!CreatesExposure(message.Action, state)) return;
+
+        var buying = message.Action.StartsWith("buy", StringComparison.OrdinalIgnoreCase);
+        // `reverse` s'évalue sur le sens qu'il OUVRE, pas sur celui qu'il ferme.
+        if (message.Action.Equals("reverse", StringComparison.OrdinalIgnoreCase))
+            buying = state.Position?.Direction == "Short";
+
+        var against = buying ? trend.Direction == "down" : trend.Direction == "up";
+        if (!against) return;
+
+        _logger.LogInformation(
+            "[REQ:{RequestId}] TREND observation — {Action} WOULD HAVE BEEN REFUSED: trend is {Direction} "
+            + "({RefMin}min={Reference}, {HigherLabel}) on {Instrument}, method={Method}",
+            message.RequestId, message.Action, trend.Direction,
+            trend.ReferenceMinutes, trend.Reference,
+            trend.HigherMinutes > 0 ? $"{trend.HigherMinutes}min={trend.Higher}" : "higher timeframe off",
+            state.Instrument, trend.Method);
+    }
+
+    /// <summary>
+    /// Cet ordre créerait-il de l'exposition — ouvrir depuis flat, renforcer, ou retourner ?
+    ///
+    /// Reprend mot pour mot la logique de <c>SafetyMacro.CreatesExposure</c>, à laquelle Trend est
+    /// soumis exactement comme les autres règles. Direction seule, jamais la taille : une vente en
+    /// position longue passe quelle que soit sa quantité.
+    /// </summary>
+    private static bool CreatesExposure(string action, TradingState state)
+    {
+        if (action.Equals("reverse", StringComparison.OrdinalIgnoreCase)) return true;
+
+        var buying = action.StartsWith("buy", StringComparison.OrdinalIgnoreCase);
+        var selling = action.StartsWith("sell", StringComparison.OrdinalIgnoreCase);
+        if (!buying && !selling) return false;
+
+        var position = state.Position;
+        if (position is not { Exists: true } || position.Quantity <= 0) return true;
+
+        return (position.Direction == "Long" && buying) || (position.Direction == "Short" && selling);
     }
 
     /// <summary>
@@ -311,6 +401,19 @@ public sealed class MessageRouter
             case "toggleSafety":
             case "configureSafety":
                 return HandleSafetyAction(message);
+            case "configureTrend":
+                // Le bridge ne détient aucun réglage de tendance : ils vivent dans l'add-on, seul
+                // capable d'en faire quelque chose. On accuse réception, la validation a déjà
+                // borné le payload, et le message part vers NT8 par le chemin de transmission.
+                return new BridgeMessage
+                {
+                    Type = "response",
+                    RequestId = message.RequestId,
+                    Source = "bridge",
+                    Action = message.Action,
+                    Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                    Result = JsonSerializer.SerializeToElement(new { success = true })
+                };
             case "getState":
                 {
                     var state = _stateManager.GetSnapshot();

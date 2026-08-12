@@ -36,7 +36,52 @@ export interface TradingState {
   /** Durée configurée, appliquée au prochain trade perdant — à ne pas confondre avec le décompte. */
   cooldownSeconds: number;
   safety: SafetyStatus;
+  /** Sens du marché, calculé par l'add-on. Jamais absent : l'hôte affiche sans test de nullité. */
+  trend: TrendState;
 }
+
+/** Sens d'une unité de temps. `neutral` est une réponse, pas une absence de réponse. */
+export type TrendDirection = 'up' | 'down' | 'neutral';
+
+/**
+ * Ce que la macro Trend voit en ce moment, tel que le bridge le diffuse.
+ *
+ * **Observation seule dans cette version** : rien ici ne refuse un ordre. Le bridge journalise ce
+ * qu'un filtre AURAIT refusé, pour que le seuil se calibre sur une vraie séance avant qu'on lui
+ * donne la moindre autorité sur le deck.
+ */
+export interface TrendState {
+  /**
+   * Faux tant qu'une série manque, charge encore, ou est périmée. Cela veut dire « on ne sait
+   * pas », et la touche doit le lire ainsi — même posture que `pnlAvailable` sur les règles de
+   * perte. C'est ce qui garantit qu'un hoquet de données n'enferme jamais le trader hors de ses
+   * propres touches.
+   */
+  available: boolean;
+  /** Verdict combiné. C'est ce champ qui décidera, au lot suivant. */
+  direction: TrendDirection;
+  /** Unité de référence seule. Affichage et diagnostic. */
+  reference: TrendDirection;
+  /** Unité supérieure seule, vide quand cette confirmation est coupée. */
+  higher: TrendDirection | '';
+  method: 'structure' | 'heikinAshi';
+  referenceMinutes: number;
+  /** 0 quand la confirmation par unité supérieure est coupée. */
+  higherMinutes: number;
+  /** Secondes depuis la dernière barre clôturée de la série la plus lente. */
+  staleSeconds: number;
+}
+
+export const DEFAULT_TREND_STATE: TrendState = {
+  available: false,
+  direction: 'neutral',
+  reference: 'neutral',
+  higher: '',
+  method: 'structure',
+  referenceMinutes: 1,
+  higherMinutes: 5,
+  staleSeconds: 0,
+};
 
 /**
  * State of the lockable safety macro, as published by the bridge.
@@ -166,6 +211,7 @@ export const DISCONNECTED_STATE: TradingState = {
   ntConnected: false, pluginConnected: false, position: null, instrumentInfo: null,
   availableAccounts: [], cooldownEnabled: false, cooldownActive: false,
   cooldownSecondsRemaining: 0, cooldownSeconds: 60, safety: { ...DEFAULT_SAFETY_STATUS },
+  trend: { ...DEFAULT_TREND_STATE },
 };
 
 export interface PositionState {

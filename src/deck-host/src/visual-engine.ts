@@ -6,7 +6,9 @@
  * sécurité, pas du style.
  */
 import { Colors, ButtonVisual } from './visuals.js';
-import { TradingState, SafetyStatus, DEFAULT_SAFETY_STATUS } from './messages.js';
+import {
+  TradingState, SafetyStatus, DEFAULT_SAFETY_STATUS, DEFAULT_TREND_STATE, TrendDirection,
+} from './messages.js';
 import { formatAccountLabel, getDisplayText, StatusType } from './status-display.js';
 
 /** Contexte que l'hôte fournit au moteur, en plus de l'état publié par le bridge. */
@@ -134,6 +136,16 @@ function formatSafetyRestant(safety: SafetyStatus): string {
   }
 
   return `${trades}-${perte}`;
+}
+
+/**
+ * Sens d'une unité de temps, en deux caractères — la ligne du bas d'une touche de 144 pixels doit
+ * porter DEUX unités et leurs sens. `--` pour neutre, comme partout ailleurs sur le deck.
+ */
+function abrege(direction: TrendDirection | ''): string {
+  if (direction === 'up') return 'UP';
+  if (direction === 'down') return 'DN';
+  return '--';
 }
 
 /**
@@ -476,6 +488,48 @@ export function computeVisual(
         textColor: Colors.textWhite,
       };
     }
+    // Tendance — AFFICHAGE SEUL dans cette version. Aucune couleur de refus n'apparaît ici, et
+    // c'est délibéré à deux titres : la macro ne refuse rien, et même quand elle le fera, une
+    // tendance baissière n'est pas un refus — les ventes, elles, seront autorisées. Le rouge se
+    // lira sur les touches d'entrée concernées, là où il veut dire quelque chose.
+    //
+    // Hausse et baisse se distinguent par l'INVERSION, exactement comme Achat et Vente : orange
+    // plein contre noir à symbole orange. C'est le même geste de lecture, déjà appris.
+    case 'com.trader.ninjatrader.trend': {
+      const trend = state.trend ?? DEFAULT_TREND_STATE;
+
+      if (!connected || !trend.available) {
+        return {
+          title: 'TREND:FLAT', subtitle: 'NO DATA',
+          bgColor: Colors.black, textColor: Colors.textDim, subtitleColor: Colors.textDim,
+        };
+      }
+
+      // Les deux unités séparément, toujours : c'est ce qui rend un FLAT lisible. Sans elles, une
+      // touche neutre ne dit pas si le marché hésite ou si les deux unités se contredisent, et le
+      // trader n'a aucun moyen de le savoir depuis le boîtier.
+      const detail = trend.higher
+        ? `${trend.referenceMinutes}m ${abrege(trend.reference)} · ${trend.higherMinutes}m ${abrege(trend.higher)}`
+        : `${trend.referenceMinutes}m ${abrege(trend.reference)}`;
+
+      if (trend.direction === 'up') {
+        return {
+          title: 'TREND:UP', subtitle: detail,
+          bgColor: Colors.orange, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
+        };
+      }
+      if (trend.direction === 'down') {
+        return {
+          title: 'TREND:DOWN', subtitle: detail,
+          bgColor: Colors.black, textColor: Colors.orange, subtitleColor: Colors.textWhite,
+        };
+      }
+      return {
+        title: 'TREND:FLAT', subtitle: detail,
+        bgColor: Colors.black, textColor: Colors.textDim, subtitleColor: Colors.textDim,
+      };
+    }
+
     // Pause obligatoire — macro à part, indépendante de l'armement de Guard.
     //
     // Trois états, et le troisième est le plus important : le décompte AVANT la pause. Une coupure

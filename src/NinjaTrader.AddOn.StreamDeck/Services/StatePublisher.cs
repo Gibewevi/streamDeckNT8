@@ -19,6 +19,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private readonly BridgeClient _bridgeClient;
         private readonly AddOnConfig _config;
         private readonly OrderMonitor _orderMonitor;
+        private readonly TrendMonitor _trendMonitor;
         private Timer _stateTimer;
         private string _trackedAccount;
         private string _trackedInstrument;
@@ -47,12 +48,14 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             get { return _trackedInstrument; }
         }
 
-        public StatePublisher(ContextResolver resolver, BridgeClient bridgeClient, AddOnConfig config, OrderMonitor orderMonitor)
+        public StatePublisher(ContextResolver resolver, BridgeClient bridgeClient, AddOnConfig config,
+            OrderMonitor orderMonitor, TrendMonitor trendMonitor)
         {
             _resolver = resolver;
             _bridgeClient = bridgeClient;
             _config = config;
             _orderMonitor = orderMonitor;
+            _trendMonitor = trendMonitor;
         }
 
         public void Start(string accountName, string instrumentName)
@@ -165,6 +168,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                 // Keep order-rejection reporting bound to the account actually being traded
                 if (_orderMonitor != null) _orderMonitor.Track(account);
+
+                // Same idea for the trend: it follows the instrument being traded, and reloads its
+                // bars by itself when that instrument really changes. Cheap and silent otherwise —
+                // this runs twice a second.
+                if (_trendMonitor != null) _trendMonitor.SetInstrument(instrument);
 
                 var state = BuildState(account, instrument, availableAccounts);
                 LogStateTransitions(state as Dictionary<string, object>);
@@ -345,6 +353,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             state["instrument"] = instrumentDict;
             state["position"] = positionDict;
             state["availableAccounts"] = availableAccounts;
+            if (_trendMonitor != null) state["trend"] = _trendMonitor.BuildState();
             return state;
         }
 

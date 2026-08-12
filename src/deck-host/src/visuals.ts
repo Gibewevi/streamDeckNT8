@@ -165,6 +165,26 @@ export function renderButtonSvg(visual: ButtonVisual, opts: RenderOptions = {}):
       <text x="72" y="88" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="bold" fill="${sc}">${sub}</text>
       <text x="72" y="122" text-anchor="middle" font-family="sans-serif" font-size="17" fill="${sc}">${esc(visual.detail || '')}</text>`;
 
+  } else if (t.startsWith('TREND')) {
+    // Tendance — mot, symbole, puis le détail par unité de temps.
+    //
+    // Un POLYGONE et non une flèche typographique, comme les touches Stop/Target au-dessus : le
+    // SVG est rendu par resvg dans les polices du système, et un glyphe géométrique absent se
+    // dessine en tofu — une touche illisible qu'aucun test de compilation ne signale. Un triangle
+    // tracé ne dépend d'aucune police.
+    const word = esc(t.split(':')[1] || 'FLAT');
+    const symbol = word === 'UP'
+      ? `<polygon points="72,48 106,96 38,96" fill="${tc}"/>`
+      : word === 'DOWN'
+        ? `<polygon points="72,96 106,48 38,48" fill="${tc}"/>`
+        // Ni hausse ni baisse : une barre. Volontairement pas un triangle couché ou un point
+        // d'interrogation — l'absence de direction doit se lire sans être déchiffrée.
+        : `<rect x="38" y="65" width="68" height="13" fill="${tc}"/>`;
+    contentSvg = `
+      <text x="72" y="30" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="${tc}">TREND</text>
+      ${symbol}
+      <text x="72" y="128" text-anchor="middle" font-family="sans-serif" font-size="16" fill="${sc}">${sub}</text>`;
+
   } else if (t === 'COUNTDOWN') {
     // Cooldown countdown. Sous Elgato ce SVG restait vide : le gros chiffre venait de setTitle,
     // rendu nativement par l'application. L'hôte propriétaire n'a pas d'équivalent — sans ce
