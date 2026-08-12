@@ -139,6 +139,31 @@ function formatSafetyRestant(safety: SafetyStatus): string {
 }
 
 /**
+ * La Tendance refuse-t-elle cet ordre en ce moment ?
+ *
+ * Miroir exact de `StateManager.IsTrendBlocked` côté bridge. Partagé entre le rendu et rien
+ * d'autre, mais la contrainte est la même que pour `tiltAppliesTo` : une touche qui afficherait
+ * TREND tout en partant — ou l'inverse — serait pire que pas de filtre du tout.
+ */
+export function trendRefuse(actionId: string, state: TradingState): boolean {
+  const trend = state.trend;
+  if (!trend?.armed || !trend.blockingAllowed || !trend.available) return false;
+  if (trend.direction !== 'up' && trend.direction !== 'down') return false;
+  if (!ACTIONS_ENTREE.has(actionId)) return false;
+
+  // Seuls les ordres qui CRÉENT de l'exposition sont concernés : celui qui permet de sortir reste
+  // intact. En tendance haussière avec un short ouvert, l'achat de clôture doit partir.
+  if (!augmenteExposition(actionId, state)) return false;
+
+  // `reverse` s'évalue sur le sens qu'il OUVRE, pas sur celui qu'il ferme.
+  const achete = actionId.includes('reverse')
+    ? state.position?.direction === 'Short'
+    : actionId.includes('buy');
+
+  return achete ? trend.direction === 'down' : trend.direction === 'up';
+}
+
+/**
  * Sens d'une unité de temps, en deux caractères — la ligne du bas d'une touche de 144 pixels doit
  * porter DEUX unités et leurs sens. `--` pour neutre, comme partout ailleurs sur le deck.
  */
@@ -266,6 +291,10 @@ function entryStatus(state: TradingState, ctx: VisualContext, actionId: string):
     return { label: 'MAX QTY', tone: 'muted' };
   }
   if (state.cooldownActive) return { label: 'BLOCKED', tone: 'refuse' };
+  // Tendance armée, entrée à contre-sens : refus franc. Placée APRÈS Guard et la temporisation,
+  // dans le même ordre que le bridge — leurs motifs priment, et lire TREND alors qu'on a atteint
+  // sa perte max enverrait chercher le mauvais problème.
+  if (trendRefuse(actionId, state)) return { label: 'TREND', tone: 'refuse' };
   // Anti-Tilt : la touche fonctionne toujours, elle exige seulement d'être tenue. Jamais grisée
   // donc — le gris est réservé à ce qui ne part pas — et affichée après les deux vrais blocages,
   // qui priment parce qu'aucun maintien ne les lèvera.
@@ -498,9 +527,15 @@ export function computeVisual(
     case 'com.trader.ninjatrader.trend': {
       const trend = state.trend ?? DEFAULT_TREND_STATE;
 
+      // Pastille ARM quand la macro refuse réellement. Blanche : elle doit rester lisible sur le
+      // fond orange d'une tendance haussière comme sur le noir d'une baissière.
+      const badge = trend.armed && trend.blockingAllowed
+        ? { badge: 'ARM', badgeColor: Colors.white }
+        : {};
+
       if (!connected || !trend.available) {
         return {
-          title: 'TREND:FLAT', subtitle: 'NO DATA',
+          title: 'TREND:FLAT', subtitle: 'NO DATA', ...badge,
           bgColor: Colors.black, textColor: Colors.textDim, subtitleColor: Colors.textDim,
         };
       }
@@ -514,18 +549,18 @@ export function computeVisual(
 
       if (trend.direction === 'up') {
         return {
-          title: 'TREND:UP', subtitle: detail,
+          title: 'TREND:UP', subtitle: detail, ...badge,
           bgColor: Colors.orange, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
         };
       }
       if (trend.direction === 'down') {
         return {
-          title: 'TREND:DOWN', subtitle: detail,
+          title: 'TREND:DOWN', subtitle: detail, ...badge,
           bgColor: Colors.black, textColor: Colors.orange, subtitleColor: Colors.textWhite,
         };
       }
       return {
-        title: 'TREND:FLAT', subtitle: detail,
+        title: 'TREND:FLAT', subtitle: detail, ...badge,
         bgColor: Colors.black, textColor: Colors.textDim, subtitleColor: Colors.textDim,
       };
     }

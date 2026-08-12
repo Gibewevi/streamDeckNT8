@@ -311,9 +311,22 @@ export const CATALOG: ActionDef[] = [
   // pour le prix d'un réglage de plus sur la touche et d'un champ de plus dans le protocole.
   {
     id: 'com.trader.ninjatrader.trend', name: 'Tendance', group: 'Affichage',
-    description: 'Affiche le sens du marché sur deux unités de temps. N\'influence pas encore les '
-               + 'ordres : cette version mesure, elle ne refuse rien.',
+    description: 'Affiche le sens du marché sur deux unités de temps. Peut, en option, refuser les '
+               + 'entrées qui vont à son encontre — maintenir la touche pour armer.',
     settings: [
+      // Interrupteur de CAPACITÉ, pas d'armement. Décoché, la touche reste indicative et le
+      // maintien ne fait rien. Coché, elle devient armable — et l'armement, lui, se fait sur le
+      // boîtier, en séance, par un maintien.
+      //
+      // Faux par défaut, et ce n'est pas négociable : une macro capable de refuser des ordres ne
+      // doit jamais s'activer parce qu'une mise à jour est passée. Même règle que la clôture
+      // automatique à la perte max.
+      {
+        key: 'blocageAutorise', label: 'Autoriser le blocage des entrées', type: 'toggle', default: false,
+        help: 'Décoché, la touche est un simple indicateur. Coché, la MAINTENIR l\'arme : les '
+            + 'entrées à contre-tendance sont alors refusées. Clôturer et réduire restent toujours '
+            + 'possibles, et un nouveau maintien désarme.',
+      },
       {
         key: 'referenceMinutes', label: 'Unité de temps (min)', type: 'number',
         min: 1, max: 240, step: 1, default: 1,

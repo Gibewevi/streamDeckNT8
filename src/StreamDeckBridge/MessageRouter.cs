@@ -22,7 +22,7 @@ public sealed class MessageRouter
         "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState",
         "toggleCooldown", "configureCooldown",
         "armSafety", "disarmSafety", "toggleSafety", "configureSafety",
-        "configureTrend"
+        "configureTrend", "toggleTrend"
     };
 
     /// <summary>
@@ -151,15 +151,21 @@ public sealed class MessageRouter
             return (BridgeMessage.CreateError(message.RequestId, message.Action, "COOLDOWN_ACTIVE", "Cooldown is active after a losing trade. Entry orders are blocked."), false, null);
         }
 
-        // Trend — OBSERVATION ONLY in this version. Nothing is refused; what a gate WOULD have
-        // refused is written down, and those lines are the whole point of the release. Two numbers
-        // come out of a session's log and they are the two that decide everything after it: how
-        // often the direction flips, and how many presses it would have cost. Arming a filter
-        // before knowing them is how you end up with a macro that gets switched off for good.
+        // Trend. Placed AFTER the safety macro and the cooldown, and that order is not arbitrary:
+        // Guard's message must win. Reading TREND on a key while the daily loss limit is reached
+        // would send the trader looking for the wrong problem.
         //
-        // Placed here, after the safety macro and the cooldown, because that is where the refusal
-        // will go: Guard's message must win. Reading TREND on a key while the daily loss limit is
-        // reached would send the trader looking for the wrong problem.
+        // Armed, it refuses. Disarmed — or with blocking switched off on the key — it refuses
+        // nothing and only writes down what it WOULD have refused, which is what lets the trader
+        // calibrate the threshold against a real session before handing the macro any authority.
+        var (trendBlocked, trendMessage) = _stateManager.IsTrendBlocked(message.Action);
+        if (trendBlocked)
+        {
+            _logger.LogWarning("[REQ:{RequestId}] TREND blocked {Action}: {Msg}",
+                message.RequestId, message.Action, trendMessage);
+            return (BridgeMessage.CreateError(message.RequestId, message.Action, "TREND_AGAINST", trendMessage!), false, null);
+        }
+
         LogTrendObservation(message, snapshot);
 
         // Enrich and forward to NT8
@@ -402,18 +408,39 @@ public sealed class MessageRouter
             case "configureSafety":
                 return HandleSafetyAction(message);
             case "configureTrend":
-                // Le bridge ne détient aucun réglage de tendance : ils vivent dans l'add-on, seul
-                // capable d'en faire quelque chose. On accuse réception, la validation a déjà
-                // borné le payload, et le message part vers NT8 par le chemin de transmission.
-                return new BridgeMessage
                 {
-                    Type = "response",
-                    RequestId = message.RequestId,
-                    Source = "bridge",
-                    Action = message.Action,
-                    Timestamp = DateTimeOffset.UtcNow.ToString("o"),
-                    Result = JsonSerializer.SerializeToElement(new { success = true })
-                };
+                    // Les réglages de DÉTECTION vivent dans l'add-on, seul à détenir les barres, et
+                    // lui parviennent par le chemin de transmission. Une seule clé est pour le
+                    // bridge : l'autorisation de bloquer, puisque c'est lui qui refuse.
+                    if (GetPayloadBoolOrNull(message, "blockingAllowed") is { } allowed)
+                        _stateManager.SetTrendBlockingAllowed(allowed);
+
+                    return new BridgeMessage
+                    {
+                        Type = "response",
+                        RequestId = message.RequestId,
+                        Source = "bridge",
+                        Action = message.Action,
+                        Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                        Result = JsonSerializer.SerializeToElement(new { success = true })
+                    };
+                }
+            case "toggleTrend":
+                {
+                    var (ok, code, reason, armed) = _stateManager.ToggleTrendArmed();
+                    if (!ok)
+                        return BridgeMessage.CreateError(message.RequestId, message.Action, code!, reason!);
+
+                    return new BridgeMessage
+                    {
+                        Type = "response",
+                        RequestId = message.RequestId,
+                        Source = "bridge",
+                        Action = message.Action,
+                        Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                        Result = JsonSerializer.SerializeToElement(new { success = true, trendArmed = armed })
+                    };
+                }
             case "getState":
                 {
                     var state = _stateManager.GetSnapshot();

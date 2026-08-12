@@ -32,7 +32,7 @@ qui regarde le marché et non plus la comptabilité de la séance. Elle n'en ref
 — elle affiche le sens et journalise ce qu'elle aurait refusé, le temps de calibrer le seuil sur une
 vraie séance. · `0.11.0` la Tendance perd son mode Heikin Ashi : une seule méthode, la structure de
 marché. La couleur d'une bougie HA est une statistique à une barre, elle bascule à chaque pullback
-et n'offre rien à régler — deux méthodes à expliquer pour une qui répond.
+et n'offre rien à régler — deux méthodes à expliquer pour une qui répond. · `0.12.0` la Tendance devient armable : un maintien de 1,5 s sur la touche, et les entrées à contre-sens sont refusées — clôturer et réduire restent toujours possibles. Optionnel, désactivé par défaut. Corrige au passage le défaut qui la faisait se périmer deux minutes après chaque chargement (`BarsBack` maintient une fenêtre glissante, donc `Bars.Count` ne bouge jamais).
 
 ## Où vit le numéro
 

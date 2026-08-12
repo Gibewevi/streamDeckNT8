@@ -69,6 +69,13 @@ export interface TrendState {
   higherMinutes: number;
   /** Secondes depuis la dernière barre clôturée de la série la plus lente. */
   staleSeconds: number;
+  /**
+   * Le blocage est-il autorisé par les réglages de la touche ? Faux = la macro reste purement
+   * indicative, maintien compris. Une macro capable de refuser des ordres ne s'active pas d'elle-même.
+   */
+  blockingAllowed: boolean;
+  /** Armée par un maintien de la touche. Sans verrou : se relâche aussi librement qu'elle s'arme. */
+  armed: boolean;
 }
 
 export const DEFAULT_TREND_STATE: TrendState = {
@@ -79,6 +86,8 @@ export const DEFAULT_TREND_STATE: TrendState = {
   referenceMinutes: 1,
   higherMinutes: 5,
   staleSeconds: 0,
+  blockingAllowed: false,
+  armed: false,
 };
 
 /**

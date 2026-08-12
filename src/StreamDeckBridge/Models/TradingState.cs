@@ -77,6 +77,25 @@ public sealed class TrendState
 
     /// <summary>Seconds since the slowest series last gained a closed bar.</summary>
     public int StaleSeconds { get; set; }
+
+    // --- Champs détenus par le BRIDGE, jamais publiés par l'add-on ---
+    //
+    // Ils sont estampillés sur la copie construite par StateManager.GetSnapshot, si bien qu'une
+    // publication de NinjaTrader ne peut pas les écraser : l'add-on ignore jusqu'à leur existence.
+
+    /// <summary>
+    /// Le blocage est-il AUTORISÉ par la configuration de la touche ? Faux par défaut : une macro
+    /// capable de refuser des ordres ne s'active pas d'elle-même parce qu'une mise à jour est
+    /// passée. Faux ici veut dire que la touche reste purement indicative, maintien compris.
+    /// </summary>
+    public bool BlockingAllowed { get; set; }
+
+    /// <summary>
+    /// La macro est-elle armée ? Bascule par un maintien de la touche. Sans verrou, contrairement
+    /// à Guard : ce n'est pas une limite de risque adossée à un fait comptable mais une aide à la
+    /// discipline, et le trader doit pouvoir la relâcher quand sa lecture du marché change.
+    /// </summary>
+    public bool Armed { get; set; }
 }
 
 public sealed class PositionState

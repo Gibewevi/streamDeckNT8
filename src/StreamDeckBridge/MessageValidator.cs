@@ -38,7 +38,7 @@ public sealed class MessageValidator
         "qtySet", "qtyAdjust", "qtyReset",
         "setInstrument", "setAccount", "getState", "toggleCooldown", "configureCooldown",
         "armSafety", "disarmSafety", "toggleSafety", "configureSafety",
-        "configureTrend"
+        "configureTrend", "toggleTrend"
     };
 
     /// <summary>
@@ -47,7 +47,7 @@ public sealed class MessageValidator
     /// </summary>
     private static readonly string[] TrendKeys =
     {
-        "referenceMinutes", "higherEnabled", "higherMinutes", "thresholdAtr",
+        "referenceMinutes", "higherEnabled", "higherMinutes", "thresholdAtr", "blockingAllowed",
     };
 
     private static readonly HashSet<string> PositionRequiredActions = new(StringComparer.OrdinalIgnoreCase)
@@ -96,7 +96,8 @@ public sealed class MessageValidator
         if (message.Action == "setAccount")
             return ValidateRequiredPayloadString(message, "account", "account is required for setAccount.");
 
-        if (message.Action is "getState" or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety")
+        if (message.Action is "getState" or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety"
+            or "toggleTrend")
             return (true, null, null);
 
         if (message.Action == "configureSafety")

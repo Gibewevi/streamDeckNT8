@@ -28,7 +28,7 @@ import { JournalUploader, comptesJournalises } from './uploader.js';
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.11.0';
+const VERSION = '0.12.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -434,14 +434,32 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
     }
 
     // Affichage seul : l'appui ne fait que redemander l'état.
-    //
-    // La Tendance en fait partie dans cette version. Elle ne s'arme PAS, et volontairement : la
-    // macro ne refuse encore rien, donc un interrupteur y serait un piège — on croirait avoir armé
-    // une protection qui n'existe pas. L'armement arrivera avec le refus.
     case 'com.trader.ninjatrader.status':
-    case 'com.trader.ninjatrader.trend':
       bridge.send(createCommand('getState', {}));
       return;
+
+    // Tendance. On n'arrive ici qu'au bout du maintien : `maintienArmementTendance` a imposé la
+    // durée, et un appui plus court a été annulé sans rien envoyer. Sans autorisation de blocage,
+    // la durée vaut 0 et la touche se contente de redemander l'état — elle reste un indicateur.
+    case 'com.trader.ninjatrader.trend': {
+      if (!lastState?.trend?.blockingAllowed) {
+        bridge.send(createCommand('getState', {}));
+        return;
+      }
+      const resp = await bridge.sendCommand(createCommand('toggleTrend', {}));
+      if (resp.error) {
+        log.eventWarn('Trend', 'toggleTrend refusé par le bridge', {
+          code: resp.error.code, raison: resp.error.message,
+        });
+        throw new Error(`${resp.error.code}: ${resp.error.message}`);
+      }
+      const armed = (resp.result as { trendArmed?: boolean } | undefined)?.trendArmed === true;
+      if (lastState?.trend) lastState.trend.armed = armed;
+      log.event('Trend', armed ? 'Macro Tendance ARMÉE' : 'Macro Tendance désarmée', {
+        direction: lastState?.trend?.direction, disponible: lastState?.trend?.available,
+      });
+      return;
+    }
 
     case 'com.trader.ninjatrader.cooldown': {
       const resp = await bridge.sendCommand(createCommand('toggleCooldown', {}));
@@ -738,7 +756,10 @@ async function syncTrendConfig(): Promise<void> {
 
   const s = cfg.settings ?? {};
   const higherEnabled = s.higherEnabled !== false;
-  const payload: Record<string, unknown> = { higherEnabled };
+  // Explicitement transmis à chaque poussée, jamais omis : c'est ce qui garantit que DÉCOCHER
+  // l'autorisation atteigne le bridge et y désarme la macro. Un champ absent voudrait dire
+  // « laisser tel quel », donc une protection décochée à l'écran mais toujours armée en séance.
+  const payload: Record<string, unknown> = { higherEnabled, blockingAllowed: s.blocageAutorise === true };
 
   if (typeof s.referenceMinutes === 'number' && Number.isFinite(s.referenceMinutes)) {
     payload.referenceMinutes = Math.round(s.referenceMinutes);
@@ -882,6 +903,25 @@ function frictionAntiTilt(actionId: string): number {
   return Math.max(1, lastState.safety.tiltHoldSeconds) * 1000;
 }
 
+/**
+ * Maintien exigé pour armer ou désarmer la macro Tendance, en millisecondes.
+ *
+ * 1,5 s : bien au-delà des 600 ms d'une confirmation, qui ne protègent que d'un frôlement, et très
+ * en deçà des 20 s de l'Anti-Tilt, qui sont une punition volontaire. Armer une protection est un
+ * geste délibéré, pas une épreuve — et la jauge se remplit assez lentement pour qu'on voie ce qu'on
+ * est en train de faire.
+ *
+ * 0 quand le blocage n'est pas autorisé sur la touche : l'appui redevient instantané et ne fait que
+ * redemander l'état. C'est ce qui rend la fonction réellement optionnelle — sans l'autorisation,
+ * il n'existe aucun geste capable d'armer quoi que ce soit.
+ */
+const TREND_ARM_HOLD_MS = 1500;
+
+function maintienArmementTendance(actionId: string): number {
+  if (actionId !== 'com.trader.ninjatrader.trend') return 0;
+  return lastState?.trend?.blockingAllowed ? TREND_ARM_HOLD_MS : 0;
+}
+
 function annulerMaintien(raison: string): void {
   if (!maintien) return;
   clearInterval(maintien.timer);
@@ -926,7 +966,13 @@ device.onPress(async (ev) => {
       motif: lastState?.safety?.tiltReason, requisMs: friction,
     });
   }
-  const duree = Math.max(confirmation, friction);
+  // La Tendance passe outre la règle « instantané » comme l'Anti-Tilt, mais dans l'autre sens :
+  // ici le maintien n'est pas une friction sur un ordre, c'est le geste d'armement lui-même. Un
+  // appui trop court s'annule et ne déclenche rien — ce qui est exactement le comportement voulu,
+  // la touche restant un indicateur qu'on peut regarder sans risque de l'armer par mégarde.
+  const armement = maintienArmementTendance(assignment.actionId);
+
+  const duree = Math.max(confirmation, friction, armement);
 
   if (duree <= 0) {
     await declencher(ev.index, assignment);

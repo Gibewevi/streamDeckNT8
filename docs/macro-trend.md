@@ -1,12 +1,19 @@
-# Macro « Tendance » — version 1 : afficher et mesurer
+# Macro « Tendance »
 
 Première macro du deck qui regarde le **marché**. Les règles existantes refusent des ordres pour des
 raisons comptables (perte max, budget de trades, plafond de contrats) ou comportementales (pause
 obligatoire, Anti-Tilt) ; aucune ne consultait le prix.
 
-> **Cette version ne refuse rien.** Elle affiche le sens du marché sur une touche, et le bridge
-> journalise ce qu'un filtre *aurait* refusé. Le refus est le lot suivant, et il n'a de sens
-> qu'après avoir lu ces chiffres sur une vraie séance.
+Deux régimes, et le second est **optionnel** :
+
+| | |
+|---|---|
+| **Non armée** | Indicateur pur. La touche montre le sens, rien n'est refusé, et le bridge journalise ce qu'un filtre *aurait* refusé — de quoi calibrer avant de donner la moindre autorité à la macro |
+| **Armée** | Les entrées à contre-sens sont **refusées**. Clôturer et réduire restent toujours possibles |
+
+On arme en **maintenant la touche** 1,5 s ; un nouveau maintien désarme. Encore faut-il que le
+blocage ait été autorisé dans les réglages de la touche — décoché, la macro n'est pas armable et le
+maintien ne fait rien.
 
 Étude complète : `.claude/plans/tudier-la-faisabilit-d-une-gleaming-zephyr.md`.
 
@@ -16,8 +23,9 @@ obligatoire, Anti-Tilt) ; aucune ne consultait le prix.
 |---|---|
 | `src/NinjaTrader.AddOn.StreamDeck/Services/TrendEngine.cs` | La détection : ATR et machine à direction. **Classe simple**, aucune dépendance NinjaScript |
 | `src/NinjaTrader.AddOn.StreamDeck/Services/TrendMonitor.cs` | Les données : `BarsRequest` par unité de temps, chien de garde, rechargements |
-| `src/StreamDeckBridge/Models/TradingState.cs` | Type `TrendState`, transporté sans être interprété |
-| `src/StreamDeckBridge/MessageRouter.cs` | `configureTrend`, et le **journal d'observation** |
+| `src/StreamDeckBridge/Models/TradingState.cs` | Type `TrendState` |
+| `src/StreamDeckBridge/StateManager.cs` | L'armement et **le refus** — `IsTrendBlocked` |
+| `src/StreamDeckBridge/MessageRouter.cs` | `configureTrend`, `toggleTrend`, et le journal d'observation |
 | `src/deck-host/src/catalog.ts`, `visual-engine.ts`, `visuals.ts` | La touche et ses réglages |
 
 ## La macro ne lit pas votre graphique
@@ -101,19 +109,52 @@ plus tard, sans que rien à l'écran n'explique la différence.
 
 Le prix de ce choix est un retard d'**au plus une barre** au retournement. C'est le bon échange.
 
+## L'armement
+
+**Trois portes avant qu'un ordre soit refusé**, et chacune tient à une raison :
+
+1. le blocage doit être **autorisé** dans les réglages de la touche. Faux par défaut, et ce n'est
+   pas négociable : une macro capable de refuser des ordres ne s'active pas parce qu'une mise à
+   jour est passée. Même règle que la clôture automatique à la perte max ;
+2. la macro doit être **armée**, par un maintien de 1,5 s sur la touche ;
+3. la tendance doit être **connue**, et l'ordre doit **créer de l'exposition à contre-sens**.
+
+Le maintien vaut 1,5 s : bien au-delà des 600 ms d'une confirmation, qui ne protègent que d'un
+frôlement, et très en deçà des 20 s de l'Anti-Tilt, qui sont une punition volontaire. Armer une
+protection est un geste délibéré, pas une épreuve. Un appui trop court s'annule sans rien envoyer —
+la touche reste un indicateur qu'on peut regarder sans risquer de l'armer par mégarde.
+
+**Décocher l'autorisation désarme.** Masquer une règle sans la neutraliser est le pire des deux
+mondes : le trader qui décoche « Autoriser le blocage » doit obtenir un deck qui ne refuse plus
+rien, pas une macro restée armée dont plus rien à l'écran ne dit qu'elle l'est. Re-cocher ne réarme
+pas — l'armement reste un geste.
+
+**L'armement n'est pas persisté**, et c'est un choix, pas un oubli. Il vit dans `StateManager`, à
+côté de la temporisation, dont il reprend exactement la forme : un interrupteur, pas de verrou, un
+refus qui ne vise que les entrées. Le bridge ne redémarre qu'à une mise à jour ou à un plantage, la
+touche affiche son état en permanence, et une aide à la discipline n'a pas à survivre à un
+redémarrage comme le fait le verrou de Guard — lui protège d'un contournement délibéré.
+
 ## Trois règles non négociables
 
-Elles ne s'appliquent pas encore — rien n'est refusé — mais elles sont déjà respectées par le
-journal d'observation, pour que les chiffres qu'il produit soient ceux de la règle réelle.
-
-1. **Ne jamais refuser une sortie.** Trend ne refusera pas « les achats » mais **les ordres qui
-   créent de l'exposition à contre-sens**. En tendance haussière avec un short ouvert, l'achat de
-   clôture doit passer. `reverse` s'évalue sur le sens qu'il **ouvre**. Même doctrine que
-   `SafetyMacro.CreatesExposure` et `GuardEnforcer.GrowsExposure`.
+1. **Ne jamais refuser une sortie.** Trend ne refuse pas « les achats » mais **les ordres qui créent
+   de l'exposition à contre-sens**. En tendance haussière avec un short ouvert, l'achat de clôture
+   passe ; c'est la vente qui agrandirait le short qui est refusée. `reverse` s'évalue sur le sens
+   qu'il **ouvre**. Même doctrine que `SafetyMacro.CreatesExposure` et
+   `GuardEnforcer.GrowsExposure`. Une sonde de bout en bout couvre ce cas précisément.
 2. **Ne jamais toucher une position ouverte.** Pas de liquidation, pas de sortie forcée si la
    tendance se retourne pendant le trade.
 3. **Pas de verrou.** Ce n'est pas une limite de risque adossée à un fait comptable mais une aide à
    la discipline.
+
+**Ordre d'évaluation** : la Tendance passe **après** la macro de sécurité et **après** la
+temporisation, dans le bridge comme dans le rendu de la touche. Ce n'est pas arbitraire — les motifs
+de Guard priment, et lire `TREND` sur une touche alors qu'on a atteint sa perte max enverrait
+chercher le mauvais problème.
+
+**Une tendance NEUTRE ne refuse rien.** Les deux unités se contredisent : l'indicateur n'a pas
+d'avis, donc il n'a aucun titre à refuser. Refuser sur une absence d'avis est la façon la plus sûre
+de faire désarmer la macro dès le premier jour.
 
 **Tendance inconnue → on laisse passer, et on le dit.** Même posture que `pnlAvailable: false` sur
 les règles de perte : signaler, jamais bloquer ni autoriser en silence. Un roll de contrat ou un
@@ -160,6 +201,7 @@ pas de données, pas de verdict, rien de refusé.
 
 | Champ | Défaut | Effet |
 |---|---|---|
+| `blocageAutorise` | `false` | Rend la macro **armable**. Décoché, elle reste un indicateur |
 | `referenceMinutes` | 1 | Unité principale, celle qui donne le sens |
 | `higherEnabled` | `true` | Exiger l'accord d'une unité supérieure |
 | `higherMinutes` | 5 | Doit être **strictement** supérieure à la référence |
@@ -181,10 +223,16 @@ annoncer un réglage que la macro n'applique pas.
 | Baissier | Noir, triangle orange vers le bas |
 | Divergent / neutre | Éteint, barre horizontale |
 | Sans données | Éteint, `NO DATA` |
+| Armée | Pastille **`ARM`** blanche en haut à droite, par-dessus l'état ci-dessus |
 
 Hausse et baisse se distinguent par l'**inversion**, exactement comme Achat et Vente : c'est un geste
-de lecture déjà appris. **Aucun rouge** : la charte le réserve au refus, et une tendance baissière
-n'est pas un refus — ce sont justement les ventes qui seront autorisées.
+de lecture déjà appris. **Aucun rouge sur la touche Tendance**, même armée : la charte le réserve au
+refus, et une tendance baissière n'est pas un refus — ce sont justement les ventes qui sont
+autorisées. La pastille est blanche pour rester lisible sur les deux fonds.
+
+Le rouge apparaît là où il veut dire quelque chose : **sur les touches d'entrée refusées**, qui
+affichent `TREND` à côté de `LOSS LIMIT` et `PAUSE`. Et seulement sur celles qui créeraient
+l'exposition refusée — celle qui permet de sortir reste intacte, sinon on se croirait enfermé.
 
 Ligne du bas : les deux unités séparément (`1m UP · 5m DN`). Sans elle, un `FLAT` ne dirait pas si
 le marché hésite ou si les deux unités se contredisent.
@@ -193,12 +241,13 @@ le marché hésite ou si les deux unités se contredisent.
 > Stop/Target. Le boîtier épingle **une seule police** (`arialbd.ttf`, `loadSystemFonts: false`) :
 > un glyphe géométrique absent se dessinerait en tofu, et aucune compilation ne le signalerait.
 
-L'appui ne fait que redemander l'état. **La touche ne s'arme pas**, et c'est délibéré : la macro ne
-refuse rien, donc un interrupteur ferait croire à une protection qui n'existe pas.
+Un **maintien** de 1,5 s arme ou désarme, jauge à l'appui. Un appui bref ne fait que redemander
+l'état — et quand le blocage n'est pas autorisé, le maintien lui-même ne fait rien.
 
-## Le journal, qui est le vrai livrable
+## Le journal — à lire AVANT d'armer
 
-Deux chiffres sortent d'une séance, et ce sont eux qui décideront de la suite.
+Deux chiffres sortent d'une séance passée macro désarmée, et ce sont eux qui disent si elle est
+armable sans devenir insupportable.
 
 **Combien de fois le sens bascule.** Journal de l'add-on, catégorie `Trend`, au **changement**
 seulement :
@@ -210,24 +259,27 @@ seulement :
 ```
 
 **Combien d'appuis auraient été refusés.** Journal du bridge, en `INFO` — ce n'est pas une boucle
-périodique mais un appui de touche :
+périodique mais un appui de touche. Écrit uniquement **macro désarmée** : armée, c'est un vrai refus
+qui est journalisé, pas une observation.
 
 ```
 [REQ:…] TREND observation — buyMarket WOULD HAVE BEEN REFUSED: trend is down
         (1min=down, 5min=down) on MNQ 09-26
+[REQ:…] TREND blocked buyMarket: Trend is DOWN (1min=down, 5min=down): buying against it
+        is refused while the Trend macro is armed. Closing and reducing stay available.
 ```
 
-Méthode de calibration : laisser tourner une demi-séance, compter. Un sens qui bascule toutes les
-deux minutes veut dire que `thresholdAtr` est trop bas. Un nombre de refus proche du nombre total
-d'entrées veut dire que la règle, une fois armée, sera désarmée dans la semaine.
+Méthode de calibration : laisser tourner une demi-séance **sans armer**, compter. Un sens qui
+bascule toutes les deux minutes veut dire que `thresholdAtr` est trop bas. Un nombre de refus proche
+du nombre total d'entrées veut dire que la règle, une fois armée, sera désarmée dans la semaine.
 
 Fichiers : `%APPDATA%\StreamDeckTrader\` (`bridge-` et `addon-AAAA-MM-JJ.log`), corrélés par
 `requestId`.
 
 ## Protocole
 
-Bloc `trend` ajouté à `stateUpdate`, et commande `configureTrend` : voir
-[protocol.md](protocol.md).
+Bloc `trend` dans `stateUpdate`, commandes `configureTrend` et `toggleTrend`, codes
+`TREND_AGAINST` et `TREND_BLOCKING_DISABLED` : voir [protocol.md](protocol.md).
 
 ## Déploiement — le piège à ne pas rater
 
@@ -259,29 +311,42 @@ dotnet build "src/StreamDeckBridge/StreamDeckBridge.csproj" -c Release
 cd src/deck-host && npx tsc --noEmit
 ```
 
-**`TrendEngine` se teste réellement**, contrairement au reste du projet : il ne dépend d'aucune API
-NinjaTrader. Un projet console `net48` du scratchpad compilant `TdSwingEngine.cs` + `TrendEngine.cs`
-suffit — c'est ainsi que la tendance, le retournement sur cassure, la conservation du sens en range,
-le plancher de ticks et le préchauffage ont été validés. Même méthode que pour `SdLogger` et
-`SimpleJson`.
+Deux choses se testent réellement ici, contrairement au reste du projet. **Il faut les lancer.**
+
+**Le moteur**, qui ne dépend d'aucune API NinjaTrader : un projet console `net48` du scratchpad
+compilant `TdSwingEngine.cs` + `TrendEngine.cs` suffit. C'est ainsi que la tendance, le retournement
+sur cassure, la conservation du sens en range, le plancher de ticks et le préchauffage ont été
+validés. Même méthode que pour `SdLogger` et `SimpleJson`.
+
+**Le refus**, contre un bridge isolé (`SDBRIDGE_PluginPort=9318`, `SDBRIDGE_AddonPort=9319`, et les
+chemins d'état vers le scratchpad — **ne jamais sonder le port 8218**). Un faux add-on publie un
+`stateUpdate` porteur d'une tendance et d'une position, le côté plugin envoie des ordres, et l'on
+vérifie qui est refusé. C'est le seul moyen d'exercer le chemin de refus sans NinjaTrader, et il
+couvre le cas qui compte : **tendance haussière, short ouvert, l'achat de clôture doit passer**
+pendant que la vente qui agrandirait le short est refusée.
 
 Scénarios à passer en séance :
 
 1. le sens ne bascule qu'à la cassure d'un extrême, pas à chaque pullback ;
 2. changer d'instrument → `NO DATA` quelques secondes, **aucune touche rouge, aucun ordre refusé** ;
-3. couper le flux → `NO DATA` au bout de deux périodes ;
+3. couper le flux → `NO DATA`, puis rechargement automatique par le chien de garde ;
 4. décocher « unité supérieure » → `higherMinutes` **neutralisé**, pas seulement masqué ;
 5. changer l'unité de temps dans l'éditeur → séries rechargées sans redémarrer l'hôte ;
-6. **le test de périmètre** : touche affichant `DOWN`, appuyer sur Achat → **l'ordre part**, et le
-   journal du bridge porte la ligne « WOULD HAVE BEEN REFUSED ».
+6. blocage **non autorisé** : maintenir la touche → rien ne s'arme, aucun ordre n'est refusé ;
+7. blocage autorisé, maintien → pastille `ARM`, puis Achat en tendance baissière → **refusé**, la
+   touche affiche `TREND` en rouge et le journal porte `TREND blocked` ;
+8. **le test qui compte** : armée en tendance haussière avec un short ouvert → Achat de clôture,
+   `Flatten` et `Tout fermer` doivent **tous** passer ;
+9. décocher « Autoriser le blocage » pendant que la macro est armée → elle **désarme**, la pastille
+   disparaît, les ordres repassent.
 
-## Le lot suivant
+## Ce qui reste ouvert
 
-Écrit une fois ces journaux lus, et pas avant : `TrendGate.cs` dans le bridge (classe distincte de
-`SafetyMacro` — pas de verrou, pas de persistance de séance), code d'erreur `TREND_AGAINST`,
-armement par la touche, libellé `TREND` en rouge dans `entryStatus` à côté de `LOSS LIMIT` et
-`PAUSE`, sur les seules touches qui créeraient l'exposition refusée.
+**L'accord strict des deux unités produit beaucoup de `FLAT`.** Sur la séance du 11/08, 5 verdicts
+sur 9 étaient neutres parce que le 1 min et le 5 min se contredisaient. Neutre ne refuse rien, donc
+c'est sans danger — mais une macro armée qui n'a d'avis que la moitié du temps protège aussi moitié
+moins. Deux leviers, à trancher sur les journaux : desserrer `thresholdAtr`, ou passer à une
+hiérarchie « le 5 min décide, le 1 min informe » plutôt qu'un accord strict.
 
-Ordre d'évaluation prévu, et il n'est pas arbitraire : **après** la macro de sécurité et **après**
-le cooldown. Les messages de Guard doivent gagner — lire `TREND` alors qu'on a atteint sa perte max
-enverrait chercher le mauvais problème. Le journal d'observation est déjà placé à cet endroit exact.
+Une troisième méthode de détection (`EMA + bande ATR`) reste branchable sans toucher au protocole :
+le moteur est une classe ordinaire.

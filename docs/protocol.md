@@ -406,10 +406,30 @@ donc repasse par `available: false` pendant quelques secondes.
 | `higherEnabled` | booléen | Exiger l'accord d'une unité supérieure. Défaut `true` |
 | `higherMinutes` | 1–1440, entier | Doit être **strictement supérieur** à `referenceMinutes`, sinon `INVALID_PAYLOAD` |
 | `thresholdAtr` | > 0 et ≤ 10 | Amplitude minimale d'une vague, en multiples d'ATR. Défaut `1.0` |
+| `blockingAllowed` | booléen | Autorise l'armement. Défaut `false`. **Lu par le bridge**, pas par l'add-on |
 
-> **Cette version ne refuse aucun ordre.** Le bridge journalise en `INFO` ce qu'un filtre aurait
-> refusé, et rien de plus. Le code `TREND_AGAINST` n'existe pas encore. Voir
-> [macro-trend.md](macro-trend.md).
+`blockingAllowed` est le seul champ que le bridge consomme lui-même — c'est lui qui refuse. Le
+passer à `false` **désarme** la macro : masquer une règle sans la neutraliser laisserait une
+protection active dont plus rien à l'écran ne dirait qu'elle l'est.
+
+#### `toggleTrend`
+Arme la macro, ou la désarme. Aucun payload. Déclenché par un **maintien** de la touche côté hôte ;
+un appui bref ne l'envoie pas.
+
+```json
+{ "type": "command", "action": "toggleTrend", "payload": {} }
+```
+
+Réponse : `{ "success": true, "trendArmed": true }`.
+
+Refusé par `TREND_BLOCKING_DISABLED` tant que `blockingAllowed` vaut `false` — sinon un maintien
+armerait une protection que le trader n'a jamais demandée, et il la découvrirait au premier ordre
+refusé.
+
+Contrairement à la macro de sécurité, **il n'y a pas de verrou** : la Tendance se désarme aussi
+librement qu'elle s'arme. Ce n'est pas une limite de risque adossée à un fait comptable mais une
+aide à la discipline, et le trader doit pouvoir la relâcher quand sa lecture du marché change.
+L'armement n'est pas persisté (voir [macro-trend.md](macro-trend.md)).
 
 ### État
 
@@ -527,6 +547,11 @@ barre.
 | `higher` | Unité supérieure seule. `""` quand la confirmation est coupée |
 | `referenceMinutes` / `higherMinutes` | Unités en vigueur. `higherMinutes: 0` = confirmation coupée |
 | `staleSeconds` | Secondes depuis la dernière barre clôturée de la série la plus lente |
+| `blockingAllowed` | Le blocage est autorisé par les réglages de la touche. **Ajouté par le bridge** |
+| `armed` | La macro refuse actuellement les entrées à contre-sens. **Ajouté par le bridge** |
+
+Les deux derniers champs n'existent pas dans ce que publie l'add-on : le bridge les estampille sur
+le snapshot qu'il diffuse. Une publication de NinjaTrader ne peut donc pas les écraser.
 
 `reference` et `higher` restent renseignés même quand `available` vaut `false` : c'est ce qui rend
 un `NO DATA` lisible — on voit **quelle** série manque plutôt que de le deviner.
@@ -697,6 +722,8 @@ Le plugin affiche `REJECTED` pendant 5 s sur les touches d'entrée et déclenche
 | `SAFETY_MAX_CONTRACTS` | L'ordre porterait la position au-delà du plafond de contrats. Seuls les ordres qui augmentent l'exposition sont refusés : réduire reste toujours possible. **Seule règle Guard qui s'applique même macro désarmée** — c'est une limite de risque permanente, pas une règle de séance |
 | `SAFETY_MACRO_LOCKED` | Désarmement / reconfiguration impossible avant la fin du verrou |
 | `COOLDOWN_ACTIVE` | Cooldown actif après un trade perdant |
+| `TREND_AGAINST` | La macro Tendance est armée et l'ordre irait à contre-sens. Seuls les ordres qui **créent** de l'exposition sont refusés : clôturer et réduire restent toujours possibles |
+| `TREND_BLOCKING_DISABLED` | Armement refusé : le blocage n'est pas autorisé dans les réglages de la touche |
 | `CONTEXT_MISSING` | Contexte insuffisant pour résoudre l'action |
 | `ORDER_REJECTED` | NT8 a rejeté l'ordre |
 | `INTERNAL_ERROR` | Erreur interne inattendue |

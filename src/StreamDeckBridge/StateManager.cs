@@ -27,6 +27,19 @@ public sealed class StateManager
     private bool _cooldownEnabled;
     private DateTime? _cooldownUntil;
     private int _cooldownSeconds;
+
+    // --- Macro Tendance ---
+    //
+    // Logée ici et non dans une classe à part, sur le modèle exact de la temporisation juste
+    // au-dessus : même forme de règle — un interrupteur, pas de verrou, un refus qui ne vise que
+    // les entrées — et le même besoin de lire la position et l'état publié pour trancher.
+    //
+    // Comme la temporisation, l'armement n'est PAS persisté. C'est un choix, pas un oubli : le
+    // bridge ne redémarre qu'à une mise à jour ou à un plantage, la touche affiche son état en
+    // permanence, et une aide à la discipline n'a pas à survivre à un redémarrage comme le fait le
+    // verrou de Guard, qui lui protège d'un contournement délibéré.
+    private bool _trendArmed;
+    private bool _trendBlockingAllowed;
     private bool _previousPositionExists;
     private double _previousUnrealizedPnl;
     private string _previousPositionInstrument = string.Empty;
@@ -145,7 +158,21 @@ public sealed class StateManager
                 // Recopié ici comme tout le reste, et pour la raison écrite plus haut : ce snapshot
                 // est le SEUL objet diffusé au client. Un champ lu de NT8, parsé correctement, mais
                 // absent d'ici n'atteint jamais l'écran et rien ne le signale.
-                Trend = _state.Trend,
+                // Copié plutôt que partagé : les deux derniers champs appartiennent au bridge et
+                // sont estampillés ici. Renvoyer l'instance de `_state` reviendrait à les écrire
+                // dans l'objet que la prochaine publication de NinjaTrader va remplacer.
+                Trend = new TrendState
+                {
+                    Available = _state.Trend.Available,
+                    Direction = _state.Trend.Direction,
+                    Reference = _state.Trend.Reference,
+                    Higher = _state.Trend.Higher,
+                    ReferenceMinutes = _state.Trend.ReferenceMinutes,
+                    HigherMinutes = _state.Trend.HigherMinutes,
+                    StaleSeconds = _state.Trend.StaleSeconds,
+                    BlockingAllowed = _trendBlockingAllowed,
+                    Armed = _trendArmed,
+                },
                 Safety = _safety.GetStatus()
             };
         }
@@ -438,6 +465,125 @@ public sealed class StateManager
             _logger.LogInformation("Cooldown duration set to {Secs}s", _cooldownSeconds);
             return _cooldownSeconds;
         }
+    }
+
+    /// <summary>
+    /// Arme ou désarme la macro Tendance. Refusé tant que le blocage n'est pas autorisé par la
+    /// configuration de la touche — sinon un maintien armerait une protection que le trader n'a
+    /// jamais demandée, et il la découvrirait au premier ordre refusé.
+    /// </summary>
+    public (bool Ok, string? ErrorCode, string? ErrorMessage, bool Armed) ToggleTrendArmed()
+    {
+        lock (_lock)
+        {
+            if (!_trendBlockingAllowed)
+            {
+                _logger.LogWarning("Trend arming REFUSED — blocking is not enabled on the Trend key");
+                return (false, "TREND_BLOCKING_DISABLED",
+                    "Trend blocking is switched off on this key. Enable it in the key settings before arming.",
+                    false);
+            }
+
+            _trendArmed = !_trendArmed;
+            _logger.LogWarning("Trend macro {State} — direction is {Direction} ({Available})",
+                _trendArmed ? "ARMED" : "DISARMED",
+                _state.Trend.Direction,
+                _state.Trend.Available ? "available" : "no data");
+
+            return (true, null, null, _trendArmed);
+        }
+    }
+
+    /// <summary>
+    /// Adopte l'autorisation de blocage venue des réglages de la touche.
+    ///
+    /// Retirer l'autorisation DÉSARME. Masquer une règle sans la neutraliser est le pire des deux
+    /// mondes — la même exigence que celle qui gouverne les champs `showIf` de l'éditeur : le
+    /// trader qui décoche « Bloquer les trades » doit obtenir un deck qui ne refuse plus rien, pas
+    /// une macro restée armée dont plus rien à l'écran ne dit qu'elle l'est.
+    /// </summary>
+    public void SetTrendBlockingAllowed(bool allowed)
+    {
+        lock (_lock)
+        {
+            if (_trendBlockingAllowed == allowed) return;
+            _trendBlockingAllowed = allowed;
+
+            if (!allowed && _trendArmed)
+            {
+                _trendArmed = false;
+                _logger.LogWarning("Trend macro DISARMED — blocking was switched off in the key settings");
+            }
+
+            _logger.LogInformation("Trend blocking {State}", allowed ? "ENABLED" : "DISABLED");
+        }
+    }
+
+    /// <summary>
+    /// La Tendance refuse-t-elle cet ordre ?
+    ///
+    /// Trois portes avant d'en arriver à la direction, et chacune tient à une raison :
+    ///
+    ///   - non armée, ou blocage non autorisé — la macro est indicative, elle ne refuse rien ;
+    ///   - tendance INCONNUE — « on ne sait pas » n'est pas « on interdit ». Même posture que
+    ///     `pnlAvailable=false` sur les règles de perte : un roll de contrat ou un flux figé ne
+    ///     doivent pas enfermer le trader hors de ses propres touches ;
+    ///   - ordre qui RÉDUIT l'exposition — il passe toujours. En tendance haussière avec un short
+    ///     ouvert, l'achat de clôture doit partir. C'est la règle qu'aucune macro de ce deck n'a le
+    ///     droit d'enfreindre : enfermer le trader dans une position est le seul résultat interdit.
+    /// </summary>
+    public (bool Blocked, string? Message) IsTrendBlocked(string action)
+    {
+        lock (_lock)
+        {
+            if (!_trendArmed || !_trendBlockingAllowed) return (false, null);
+
+            var trend = _state.Trend;
+            if (!trend.Available) return (false, null);
+
+            var sens = trend.Direction;
+            if (sens is not ("up" or "down")) return (false, null);
+
+            if (!CreatesExposure(action, out var buying)) return (false, null);
+
+            var contreSens = buying ? sens == "down" : sens == "up";
+            if (!contreSens) return (false, null);
+
+            var libelle = buying ? "buying" : "selling";
+            return (true,
+                $"Trend is {sens.ToUpperInvariant()} ({trend.ReferenceMinutes}min={trend.Reference}"
+                + (trend.HigherMinutes > 0 ? $", {trend.HigherMinutes}min={trend.Higher}" : string.Empty)
+                + $"): {libelle} against it is refused while the Trend macro is armed. "
+                + "Closing and reducing stay available.");
+        }
+    }
+
+    /// <summary>
+    /// Cet ordre créerait-il de l'exposition, et dans quel sens ?
+    ///
+    /// Reprend la logique de <c>SafetyMacro.CreatesExposure</c>. Direction seule, jamais la taille :
+    /// une vente en position longue passe quelle que soit sa quantité. `reverse` s'évalue sur le
+    /// sens qu'il OUVRE et non sur celui qu'il ferme — retourner ne réduit rien, cela remet la même
+    /// taille en face.
+    /// </summary>
+    private bool CreatesExposure(string action, out bool buying)
+    {
+        var position = _state.Position;
+        var direction = position is { Exists: true } && position.Quantity > 0 ? position.Direction : "Flat";
+
+        if (action.Equals("reverse", StringComparison.OrdinalIgnoreCase))
+        {
+            buying = direction == "Short";
+            return true;
+        }
+
+        buying = action.StartsWith("buy", StringComparison.OrdinalIgnoreCase);
+        var selling = action.StartsWith("sell", StringComparison.OrdinalIgnoreCase);
+        if (!buying && !selling) return false;
+
+        if (direction is not ("Long" or "Short")) return true;
+
+        return (direction == "Long" && buying) || (direction == "Short" && selling);
     }
 
     public bool IsOrderBlocked(string action)
