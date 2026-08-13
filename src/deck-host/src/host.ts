@@ -823,6 +823,14 @@ async function syncPauseConfig(): Promise<void> {
         const attendu = resp.error.code === 'PAUSE_IN_PROGRESS';
         const message = 'Réglages de pause non appliqués';
         if (attendu) log.event('Pause', message, { raison: resp.error.message });
+        // `SAFETY_MACRO_LOCKED` sur une charge qui ne contient que des champs de pause ne peut
+        // vouloir dire qu'une chose : le réglage saisi RELÂCHE la pause alors que Guard est armé.
+        // C'est le contournement que le bridge refuse désormais, et il mérite d'être vu.
+        else if (resp.error.code === 'SAFETY_MACRO_LOCKED') {
+          log.eventWarn('Sécurité', 'Assouplissement de la pause REFUSÉ — Guard est armé', {
+            raison: resp.error.message, demande: payload,
+          });
+        }
         else log.eventWarn('Pause', message, { code: resp.error.code, raison: resp.error.message });
       } else {
         log.event('Pause', 'Réglages de pause poussés vers le bridge', payload);
@@ -1011,8 +1019,46 @@ device.onRelease((ev) => {
   if (maintien && maintien.slot === ev.index) annulerMaintien('relâchée');
 });
 
+/** Le boîtier a-t-il déjà disparu au moins une fois ? Distingue un retour d'un démarrage. */
+let boitierDejaPerdu = false;
+
 device.onConnectionChange((connected) => {
   log.event('Device', connected ? 'Boîtier disponible' : 'Boîtier indisponible');
+
+  // Perdre le boîtier pendant que la macro est armée n'est pas un incident matériel comme un
+  // autre : c'est la seule façon de faire taire la surface de contrôle sans toucher aux
+  // sécurités. Le 12/08/2026 le boîtier a été débranché à 11 h 57 alors que la limite de perte
+  // journalière était franchie depuis 10 h 31, et le trading a continué une heure dans
+  // NinjaTrader. L'add-on appliquait toujours les règles — mais rien, nulle part, ne notait le
+  // moment où le trader avait quitté la table.
+  //
+  // Le bridge tient le cas jumeau (cet hôte s'arrête) ; celui-ci tient le cas que le bridge ne
+  // peut pas voir : le câble arraché alors que le processus vit toujours et que la socket reste
+  // ouverte. Il faut les deux.
+  const s = lastState?.safety;
+
+  // La toute première connexion est le démarrage de l'hôte et non un retour : l'enregistrer
+  // ajouterait une ligne à chaque lancement et noierait le décompte des vraies pertes.
+  if (!connected) boitierDejaPerdu = true;
+  if (boitierDejaPerdu) {
+    if (!connected && s?.armed) {
+      log.eventWarn('Sécurité', 'BOÎTIER PERDU alors que la macro est ARMÉE', {
+        verrouSecondes: s.lockSecondsRemaining, entreesBloquees: s.entriesBlocked,
+        motif: s.blockReason || '-', pnlSession: s.sessionPnl,
+      });
+    }
+    const type = connected ? 'deck.reconnected' : (s?.armed ? 'deck.lostWhileArmed' : 'deck.disconnected');
+    journal.record(type, {
+      account: lastState?.account ?? '', instrument: lastState?.instrument ?? '',
+    }, {
+      armed: s?.armed === true,
+      lockSecondsRemaining: s?.lockSecondsRemaining ?? 0,
+      entriesBlocked: s?.entriesBlocked === true,
+      blockReason: s?.blockReason ?? '',
+      sessionPnl: s?.sessionPnl ?? 0,
+    });
+  }
+
   if (connected) {
     device.setBrightness(store.layout.brightness);
     void paintAll();
@@ -1071,6 +1117,12 @@ bridge.onMessage((msg) => {
   // Un ordre passé directement dans NinjaTrader pendant que la macro refuse les entrées.
   // L'add-on l'a annulé ; le deck doit le dire, sans quoi le seul témoin serait un fichier de log
   // que personne ne relit sur le moment.
+  //
+  // L'enregistrement au journal, lui, est passé côté bridge : c'est justement quand cet hôte-ci
+  // n'est plus là que la violation compte le plus. Le 12/08/2026, le boîtier a été débranché et
+  // ce processus s'est arrêté ; les dix-neuf ordres manuels qui ont suivi, tous au-delà de la
+  // limite de perte journalière, n'ont atterri dans aucun journal. Un seul écrivain, celui qui
+  // survit — sans quoi deux `eid` différents auraient compté chaque contournement deux fois.
   if (msg.action === 'guardViolation' && msg.payload) {
     const v = msg.payload as unknown as GuardViolation;
     lastViolationAt = Date.now();
@@ -1080,7 +1132,6 @@ bridge.onMessage((msg) => {
       motif: v.violation, action: v.orderAction, type: v.orderType,
       quantite: v.quantity, instrument: v.instrument, erreur: v.error,
     });
-    journal.recordViolation(v, lastState?.account ?? '');
     void paintAll();
     setTimeout(() => void paintAll(), VIOLATION_BANNER_MS + 200);
   }

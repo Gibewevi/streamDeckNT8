@@ -35,6 +35,13 @@ public sealed class BridgeConfig
     /// <summary>Override for the session file (selected instrument). Empty = %APPDATA%\StreamDeckTrader\session.json.</summary>
     public string SessionStatePath { get; set; } = "";
 
+    /// <summary>
+    /// Override for the behavioural journal spool. Empty = %APPDATA%\StreamDeckTrader\journal.
+    /// Must match the host's, which is where the uploader reads from — the bridge writes its own
+    /// files in that directory rather than the host's.
+    /// </summary>
+    public string JournalDirectory { get; set; } = "";
+
     // --- Logging (one file per day in the directory below) ---
 
     /// <summary>Override for the log directory. Empty = %APPDATA%\StreamDeckTrader\logs.</summary>

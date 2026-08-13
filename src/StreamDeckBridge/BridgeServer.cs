@@ -18,6 +18,7 @@ public sealed class BridgeServer : BackgroundService
     private readonly BridgeConfig _config;
     private readonly MessageRouter _router;
     private readonly StateManager _stateManager;
+    private readonly SecurityJournal _journal;
     private readonly ILogger<BridgeServer> _logger;
 
     private WebSocket? _pluginSocket;
@@ -38,11 +39,13 @@ public sealed class BridgeServer : BackgroundService
         BridgeConfig config,
         MessageRouter router,
         StateManager stateManager,
+        SecurityJournal journal,
         ILogger<BridgeServer> logger)
     {
         _config = config;
         _router = router;
         _stateManager = stateManager;
+        _journal = journal;
         _logger = logger;
     }
 
@@ -272,7 +275,48 @@ public sealed class BridgeServer : BackgroundService
         {
             _stateManager.SetPluginConnected(false);
             _logger.LogInformation("Stream Deck plugin disconnected");
+            NoteDeckLost();
         }
+    }
+
+    /// <summary>
+    /// The deck went away. Ordinary when the trader shuts down; a SECURITY EVENT while the macro
+    /// is armed, which is why it is not left as one line among the connection noise.
+    ///
+    /// On 2026-08-12 the deck was unplugged at 11:57 past a breached daily-loss limit, the host
+    /// process ended a minute later, and trading carried on inside NinjaTrader for another hour.
+    /// Nothing in the journal marked the moment: the only process able to record it was the one
+    /// that had just died. The bridge outlives all of it, so it records it here.
+    ///
+    /// Note what this does NOT catch: a deck unplugged while the host stays alive keeps this socket
+    /// open. That case is the host's to report, and it does — see `deck.lost` in host.ts. Both are
+    /// needed; neither sees the other's case.
+    /// </summary>
+    private void NoteDeckLost()
+    {
+        var state = _stateManager.GetSnapshot();
+        if (!state.Safety.Armed)
+        {
+            _journal.Record("deck.disconnected", state.Account, state.Instrument, new { armed = false });
+            return;
+        }
+
+        _logger.LogWarning(
+            "SECURITY: deck link lost while the safety macro is ARMED — locked for another {Lock}s, "
+            + "entries blocked={Blocked} ({Reason}), session P&L {Pnl:0.##}. Enforcement continues inside NinjaTrader.",
+            state.Safety.LockSecondsRemaining, state.Safety.EntriesBlocked,
+            string.IsNullOrEmpty(state.Safety.BlockReason) ? "-" : state.Safety.BlockReason,
+            state.Safety.SessionPnl);
+
+        _journal.Record("deck.lostWhileArmed", state.Account, state.Instrument, new
+        {
+            armed = true,
+            lockSecondsRemaining = state.Safety.LockSecondsRemaining,
+            entriesBlocked = state.Safety.EntriesBlocked,
+            blockReason = state.Safety.BlockReason ?? string.Empty,
+            sessionPnl = state.Safety.SessionPnl,
+            tradeCount = state.Safety.TradeCount
+        });
     }
 
     private async Task HandleAddonSession(WebSocket ws, CancellationToken ct)

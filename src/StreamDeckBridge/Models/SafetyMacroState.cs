@@ -213,16 +213,31 @@ public sealed class SafetyMacroPersistedState
     // --- Automatic liquidation ---
 
     /// <summary>
-    /// Trading day on which the account was liquidated. Empty while it has not happened.
+    /// Trading day on which the account was last liquidated. Empty while it has not happened.
     ///
-    /// This is the once-per-day latch, and it is persisted for the opposite reason to the lock:
-    /// not to stop the trader escaping, but to stop the software firing twice. A bridge restart
-    /// during a liquidated session must not send a second wave of market orders.
+    /// No longer a latch that spends the rule for the day — see the comment block above
+    /// <c>PendingAutoFlatten</c> for why that was wrong. It now says only "this has already
+    /// happened today", which is what the deck shows and what the day's reading needs.
     ///
     /// The grace countdown is deliberately NOT persisted — a restart should observe the breach
     /// afresh rather than act on a timer it did not watch elapse.
     /// </summary>
     public string AutoFlattenDay { get; set; } = string.Empty;
+
+    /// <summary>
+    /// When the last liquidation was sent. Persisted, unlike the grace countdown, and for the
+    /// original reason the day latch existed: a bridge restarting in the middle of a liquidation
+    /// must not fire a second wave of market orders before NinjaTrader has reported flat.
+    /// </summary>
+    public DateTime? LastAutoFlattenUtc { get; set; }
+
+    /// <summary>
+    /// Liquidations during <see cref="TradingDay"/>. Reset with the other daily counters.
+    ///
+    /// Worth its own field rather than being derived: "the account was liquidated four times
+    /// today" is a different session from "once", and nothing else in the state distinguishes them.
+    /// </summary>
+    public int AutoFlattenCount { get; set; }
 
     /// <summary>
     /// Set when the liquidation was sent but did not go through. The trader has to be told: he was

@@ -102,6 +102,14 @@ public sealed class SafetyMacro
     public const double MinAutoFlattenGraceSeconds = 1;
     public const double MaxAutoFlattenGraceSeconds = 60;
 
+    /// <summary>
+    /// Shortest gap between two liquidations. Not a rate limit on the rule — the open-position
+    /// condition already keeps it quiet — but the time NinjaTrader needs to fill the closing orders
+    /// and report flat. Sending again inside that window would flatten a position that is already
+    /// on its way out, and the surplus market orders would open the other side.
+    /// </summary>
+    private static readonly TimeSpan AutoFlattenRepeatInterval = TimeSpan.FromSeconds(10);
+
     /// <summary>Actions that open or flip a position. Everything else stays available while blocked.</summary>
     private static readonly HashSet<string> EntryActions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -287,6 +295,21 @@ public sealed class SafetyMacro
                     BuildStatus());
             }
 
+            // The break settings pass through the lock because the break is not a Guard rule — see
+            // the summary above. What they may NOT do is pass through it in the loosening
+            // direction: the exception was written so that someone who armed Guard could still set
+            // his rhythm, and it was being read as "the break can be switched off while armed",
+            // which is the same escape hatch by another door. Tighten freely, never relax.
+            if (_state.Armed && toucheLaPause
+                && AffaiblitLaPause(update, _state.Settings) is { } affaiblissement)
+            {
+                _logger.LogWarning("Safety macro: break setting REFUSED while armed — {Detail}", affaiblissement);
+                return (false, "SAFETY_MACRO_LOCKED",
+                    $"The mandatory break cannot be relaxed while the macro is armed ({affaiblissement}). "
+                    + "It can still be made stricter.",
+                    BuildStatus());
+            }
+
             if (toucheLaPause && FindPauseBreach(null) != null)
             {
                 return (false, "PAUSE_IN_PROGRESS",
@@ -362,6 +385,40 @@ public sealed class SafetyMacro
 
             return (true, null, null, BuildStatus());
         }
+    }
+
+    /// <summary>
+    /// Does this update make the mandatory break easier to live with? Returns the reason when it
+    /// does, null when the change is neutral or stricter.
+    ///
+    /// Two directions, and they are opposite: a SHORTER interval before the break falls due is
+    /// stricter, a LONGER break is stricter. Switching the rule off — interval 0 — is the weakest
+    /// state of all and is what the request of 2026-08-12 amounted to.
+    ///
+    /// Values are compared after the same clamping <see cref="Configure"/> applies, so a request
+    /// that only differs by being out of bounds is not treated as a change.
+    /// </summary>
+    private static string? AffaiblitLaPause(SafetyConfigUpdate update, SafetyMacroSettings settings)
+    {
+        if (update.PauseAfterMinutes is { } apres)
+        {
+            var demande = apres <= 0 ? 0 : Math.Clamp(apres, MinPauseAfterMinutes, MaxPauseAfterMinutes);
+
+            if (settings.PauseAfterMinutes > 0 && demande <= 0)
+                return "switching the break off";
+
+            if (demande > settings.PauseAfterMinutes && settings.PauseAfterMinutes > 0)
+                return $"pushing the break from every {settings.PauseAfterMinutes:0.##}min to every {demande:0.##}min of trading";
+        }
+
+        if (update.PauseDurationMinutes is { } duree)
+        {
+            var demande = Math.Clamp(duree, MinPauseDurationMinutes, MaxPauseDurationMinutes);
+            if (demande < settings.PauseDurationMinutes)
+                return $"shortening the break from {settings.PauseDurationMinutes:0.##}min to {demande:0.##}min";
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -667,13 +724,25 @@ public sealed class SafetyMacro
     //   1. A grace delay, because session P&L includes unrealized. A wick that crosses the limit
     //      and comes back costs nothing when the rule merely refuses an entry; liquidating on it
     //      realises a loss that was still recoverable, at the worst price of the move.
-    //   2. Once per trading day, persisted. A liquidated session must not be liquidated twice by a
-    //      bridge restart.
+    //   2. It only ever fires on an OPEN POSITION — see PendingAutoFlatten. Nothing to flatten,
+    //      nothing to send.
     //   3. The latch closes only once the order has actually LEFT the machine. A send that failed
     //      because the add-on was disconnected sent nothing, so there is nothing to protect
     //      against repeating — it is retried. A send that left and was then rejected by
     //      NinjaTrader is NOT retried: firing market orders again after an unexplained refusal
     //      turns one problem into two. It surfaces as a failure instead, in red.
+    //
+    // WHY IT IS NO LONGER ONCE PER DAY. It used to latch on the trading day, so the first
+    // liquidation spent the rule for the session. On 2026-08-12 that limit was reached at 10:31,
+    // the account was flattened — and the trader then re-entered thirteen times and reached −349
+    // against a −300 limit without the rule ever firing again. Its one shot had been used at the
+    // exact moment the day started to go wrong, which is backwards: past the limit, EVERY new
+    // position is the one that should not exist.
+    //
+    // What replaces the day latch is a repeat interval plus the open-position condition. Together
+    // they mean: while session P&L stays under the limit, any position that appears is flattened
+    // once the grace delay has run, and a flat account costs nothing. The interval exists only so
+    // that a liquidation in flight is not sent twice before NinjaTrader has reported flat.
 
     /// <summary>The order the bridge must send. Null while nothing is due.</summary>
     public sealed record AutoFlattenRequest(double SessionPnl, double Limit);
@@ -716,9 +785,23 @@ public sealed class SafetyMacro
             if (!_state.Armed) return null;
             var settings = _state.Settings;
             if (!settings.AutoFlattenOnDailyLoss) return null;
-            if (_state.AutoFlattenDay == _state.TradingDay) return null;
+
+            // Safeguard 3: a send that left and was refused is never repeated. The flag is raised
+            // in red on the deck and cleared only by a successful send or a new trading day.
+            if (_state.AutoFlattenFailed) return null;
+
             if (_lossBreachSince is not { } since) return null;
             if (DateTime.UtcNow - since < TimeSpan.FromSeconds(settings.AutoFlattenGraceSeconds)) return null;
+
+            // Nothing open, nothing to flatten. This is what makes repeating safe: between two
+            // positions the rule is silent, however long the session stays under its limit.
+            if (_positionQuantity <= 0) return null;
+
+            // Spacing, not rationing. NinjaTrader takes a moment to fill the closing orders and to
+            // report flat; without this the same position would be flattened several times over
+            // and the extra market orders would open the opposite side.
+            if (_state.LastAutoFlattenUtc is { } last && DateTime.UtcNow - last < AutoFlattenRepeatInterval)
+                return null;
 
             return new AutoFlattenRequest(SessionPnl(), settings.DailyLossLimit);
         }
@@ -730,29 +813,40 @@ public sealed class SafetyMacro
         lock (_lock)
         {
             _state.AutoFlattenDay = _state.TradingDay;
+            _state.LastAutoFlattenUtc = DateTime.UtcNow;
+            _state.AutoFlattenCount++;
             _state.AutoFlattenFailed = false;
             Persist();
             _logger.LogWarning(
-                "Safety macro: ACCOUNT LIQUIDATION sent — daily loss limit {Limit:0.##} breached for {Grace:0.##}s (session P&L {Pnl:0.##})",
-                _state.Settings.DailyLossLimit, _state.Settings.AutoFlattenGraceSeconds, SessionPnl());
+                "Safety macro: ACCOUNT LIQUIDATION #{Count} sent — daily loss limit {Limit:0.##} breached for {Grace:0.##}s "
+                + "(session P&L {Pnl:0.##}, position {Qty})",
+                _state.AutoFlattenCount, _state.Settings.DailyLossLimit, _state.Settings.AutoFlattenGraceSeconds,
+                SessionPnl(), _positionQuantity);
         }
     }
 
     /// <summary>
-    /// Called when the liquidation left the machine but did not go through. Latches like a success
-    /// — see safeguard 3 above — and raises the flag the deck turns red on.
+    /// Called when the liquidation left the machine but did not go through. Latches for the rest of
+    /// the day — see safeguard 3 above — and raises the flag the deck turns red on.
     /// </summary>
     public void MarkAutoFlattenFailed(string reason)
     {
         lock (_lock)
         {
             _state.AutoFlattenDay = _state.TradingDay;
+            _state.LastAutoFlattenUtc = DateTime.UtcNow;
             _state.AutoFlattenFailed = true;
             Persist();
             _logger.LogError(
                 "Safety macro: ACCOUNT LIQUIDATION FAILED ({Reason}) — positions may still be open, manual action required",
                 reason);
         }
+    }
+
+    /// <summary>How many times the account has been liquidated during the current trading day.</summary>
+    public int AutoFlattenCount
+    {
+        get { lock (_lock) { return _state.AutoFlattenCount; } }
     }
 
     /// <summary>
@@ -1087,8 +1181,14 @@ public sealed class SafetyMacro
     {
         if (!_state.Armed) return 0;
         if (!_state.Settings.AutoFlattenOnDailyLoss) return 0;
-        if (_state.AutoFlattenDay == _state.TradingDay) return 0;
+        if (_state.AutoFlattenFailed) return 0;
         if (_lossBreachSince is not { } since) return 0;
+
+        // Same conditions as PendingAutoFlatten, or the deck would count down to a liquidation that
+        // is not coming — on a flat account, or during the interval that follows one. Announcing a
+        // sanction that never lands is how a rule stops being believed.
+        if (_positionQuantity <= 0) return 0;
+        if (_state.LastAutoFlattenUtc is { } last && DateTime.UtcNow - last < AutoFlattenRepeatInterval) return 0;
 
         var left = TimeSpan.FromSeconds(_state.Settings.AutoFlattenGraceSeconds) - (DateTime.UtcNow - since);
         return left > TimeSpan.Zero ? (int)Math.Ceiling(left.TotalSeconds) : 0;
@@ -1151,8 +1251,12 @@ public sealed class SafetyMacro
         _state.LastTradeWasLoss = false;
 
         // A new day, a new liquidation allowance. The failure flag goes with it: it described
-        // yesterday's positions, and leaving it up would turn a real alert into wallpaper.
+        // yesterday's positions, and leaving it up would turn a real alert into wallpaper. The
+        // count is a daily statistic like the trade count, and the repeat interval belongs to a
+        // liquidation that ended hours ago.
         _state.AutoFlattenFailed = false;
+        _state.AutoFlattenCount = 0;
+        _state.LastAutoFlattenUtc = null;
         _lossBreachSince = null;
         Persist();
 

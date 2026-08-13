@@ -15,6 +15,7 @@ public sealed class MessageRouter
     private readonly SafetyMacro _safety;
     private readonly MessageValidator _validator;
     private readonly DuplicateGuard _duplicateGuard;
+    private readonly SecurityJournal _journal;
     private readonly ILogger<MessageRouter> _logger;
 
     private static readonly HashSet<string> LocalActions = new(StringComparer.OrdinalIgnoreCase)
@@ -48,12 +49,14 @@ public sealed class MessageRouter
         SafetyMacro safety,
         MessageValidator validator,
         DuplicateGuard duplicateGuard,
+        SecurityJournal journal,
         ILogger<MessageRouter> logger)
     {
         _stateManager = stateManager;
         _safety = safety;
         _validator = validator;
         _duplicateGuard = duplicateGuard;
+        _journal = journal;
         _logger = logger;
     }
 
@@ -263,8 +266,10 @@ public sealed class MessageRouter
         // in the add-on — the two files are read separately when something goes wrong.
         if (message.Type == "event" && message.Action == "guardViolation")
         {
+            var gv = message.Payload is JsonElement e ? e : default;
             _logger.LogWarning("GUARD VIOLATION reported by NT8: {Payload}",
-                message.Payload is JsonElement gv ? gv.GetRawText() : "(no payload)");
+                gv.ValueKind == JsonValueKind.Object ? gv.GetRawText() : "(no payload)");
+            RecordViolation(gv);
             return message;
         }
 
@@ -272,6 +277,54 @@ public sealed class MessageRouter
 
         // Forward everything else from NT8 to plugin as-is
         return message;
+    }
+
+    /// <summary>
+    /// Files the bypass attempt in the behavioural journal.
+    ///
+    /// Written here rather than by the host, which used to do it and did it well right up to the
+    /// moment it mattered: on 2026-08-12 the deck was unplugged, the host process ended, and the
+    /// nineteen manual orders that followed — past a breached daily-loss limit — reached no
+    /// journal at all. An event that only survives while the trader keeps his deck plugged in is
+    /// not evidence, it is a courtesy.
+    ///
+    /// `cancelled: false` is the line to read: the order was seen and survived, which means the
+    /// bypass worked.
+    /// </summary>
+    private void RecordViolation(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return;
+
+        string Text(string nom) =>
+            payload.TryGetProperty(nom, out var v) && v.ValueKind == JsonValueKind.String
+                ? v.GetString() ?? string.Empty
+                : string.Empty;
+
+        // TryGetInt32 and never GetInt32: a malformed quantity must read as absent, never throw.
+        // An exception on this path used to cost the whole plugin session.
+        int Number(string nom) =>
+            payload.TryGetProperty(nom, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)
+                ? n
+                : 0;
+
+        var instrument = Text("instrument");
+
+        _journal.Record("guard.violation", _stateManager.GetSnapshot().Account, instrument, new
+        {
+            reason = Text("violation"),
+            cancelled = payload.TryGetProperty("cancelled", out var c) && c.ValueKind == JsonValueKind.True,
+            // "stopped" or "bypassed", straight from the add-on, which now waits for the order to
+            // reach a terminal state before deciding. Empty only for records written by an older
+            // add-on, and a reader must treat that as UNKNOWN rather than as a success.
+            outcome = Text("outcome"),
+            // Without it, no violation could be traced back to the order it was about — which is
+            // what made the 2026-08-12 discrepancy so slow to pin down.
+            orderId = Text("orderId"),
+            orderAction = Text("orderAction"),
+            orderType = Text("orderType"),
+            quantity = Number("quantity"),
+            orderName = Text("name")
+        });
     }
 
     /// <summary>
@@ -504,6 +557,19 @@ public sealed class MessageRouter
     {
         if (sent) _safety.MarkAutoFlattenSent();
         else _safety.MarkAutoFlattenFailed(reason);
+
+        // Journalled from the bridge for the same reason as the violations: this is the sanction
+        // itself, and now that it can fire several times a day, how many times it fired is the
+        // single most telling number of the session.
+        var snapshot = _stateManager.GetSnapshot();
+        _journal.Record(sent ? "guard.liquidation" : "guard.liquidationFailed",
+            snapshot.Account, snapshot.Instrument, new
+            {
+                sessionPnl = snapshot.Safety.SessionPnl,
+                limit = snapshot.Safety.DailyLossLimit,
+                occurrence = _safety.AutoFlattenCount,
+                reason
+            });
     }
 
     /// <summary>

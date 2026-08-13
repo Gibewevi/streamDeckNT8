@@ -52,6 +52,18 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// <summary>Orders already acted upon, so a second OrderUpdate does not cancel twice.</summary>
         private readonly HashSet<string> _handled = new HashSet<string>();
 
+        /// <summary>
+        /// Orders a cancel was requested for, waiting to find out whether it worked.
+        /// Order id → violation reason. Emptied by <see cref="ResolveOutcome"/>.
+        /// </summary>
+        private readonly Dictionary<string, string> _pending = new Dictionary<string, string>();
+
+        /// <summary>The order got through: it filled despite the refusal.</summary>
+        public const string OutcomeBypassed = "bypassed";
+
+        /// <summary>The order was really stopped — cancelled or rejected before filling.</summary>
+        public const string OutcomeStopped = "stopped";
+
         public GuardEnforcer(ContextResolver resolver, BridgeClient bridgeClient)
         {
             _resolver = resolver;
@@ -70,6 +82,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                 // Cleared policy means a new episode starts from a clean slate: an order id seen
                 // during the previous block must not stay marked as handled forever.
+                //
+                // `_pending` is NOT cleared with it. Those orders are still in flight, and their
+                // outcome is the whole point of the record — dropping them because the block has
+                // since lifted would lose exactly the bypasses that happened at the worst moment.
                 if (!_blocked && _maxContracts <= 0)
                     _handled.Clear();
 
@@ -98,6 +114,13 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             }
 
             if (account == null || order == null) return false;
+
+            // BEFORE every early return below: an order we already acted on must be followed to its
+            // conclusion whatever the policy has become since. Clearing the block, or the order
+            // ceasing to be cancellable — which is precisely what happens when it fills — would
+            // otherwise lose the only update that says how the story ended.
+            ResolveOutcome(order);
+
             if (!blocked && cap <= 0) return false;
 
             // The bridge already ran every rule against this one before it was sent.
@@ -139,30 +162,95 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             {
                 account.Cancel(new[] { order });
                 SdLogger.EventWarn("Guard",
-                    "EXTERNAL ORDER CANCELLED — {0} {1} qty={2} on {3} (name='{4}', state={5}) refused by the safety macro: {6}",
+                    "EXTERNAL ORDER CANCEL REQUESTED — {0} {1} qty={2} on {3} (name='{4}', state={5}) refused by the safety macro: {6}",
                     order.OrderAction, order.OrderType, order.Quantity, instrument,
                     order.Name ?? string.Empty, order.OrderState, violation);
             }
             catch (Exception ex)
             {
-                // A cancel that fails is exactly the case worth shouting about: the order is alive
-                // and the macro did not stop it. Report it as such rather than staying silent.
+                // A cancel that throws is the one case settled on the spot: the order is alive and
+                // the macro did not stop it.
                 SdLogger.Fail("Guard", ex, "Could not cancel external order on " + instrument);
-                Report(order, violation, false, ex.Message);
+                Report(order, violation, OutcomeBypassed, ex.Message);
                 return false;
             }
 
-            Report(order, violation, true, string.Empty);
+            // Deliberately NOT reported as cancelled here. `Account.Cancel` is asynchronous, exactly
+            // like `Account.Submit`: returning without throwing says only that the request left, and
+            // on 2026-08-12 thirty of thirty-five such requests came back "Cancellation rejected —
+            // Order is complete" because the market order had already filled. Every one of them had
+            // been journalled as `cancelled: true`, and Bitlearn read the day as 100% rule
+            // compliance while every trade carried a bypass marker.
+            //
+            // The verdict is whatever state the order reaches next, and ResolveOutcome sends it.
+            lock (_lock)
+            {
+                _pending[order.OrderId ?? string.Empty] = violation;
+            }
             return true;
         }
 
-        private void Report(Order order, string violation, bool cancelled, string error)
+        /// <summary>
+        /// Reports how a cancelled-at order actually ended, once NinjaTrader says so.
+        ///
+        /// Filled or part-filled means the trader got through — the bypass worked. Cancelled or
+        /// rejected means it did not. Anything else is not a conclusion yet and is left pending.
+        /// </summary>
+        private void ResolveOutcome(Order order)
+        {
+            var id = order.OrderId ?? string.Empty;
+            if (id.Length == 0) return;
+
+            string violation;
+            lock (_lock)
+            {
+                if (!_pending.TryGetValue(id, out violation)) return;
+
+                var outcome = TerminalOutcome(order.OrderState);
+                if (outcome == null) return;
+
+                _pending.Remove(id);
+                ReportOutcome(order, violation, outcome);
+            }
+        }
+
+        /// <summary>Null while the order can still change its mind.</summary>
+        private static string TerminalOutcome(OrderState state)
+        {
+            if (state == OrderState.Filled || state == OrderState.PartFilled) return OutcomeBypassed;
+            if (state == OrderState.Cancelled || state == OrderState.Rejected) return OutcomeStopped;
+            return null;
+        }
+
+        private void ReportOutcome(Order order, string violation, string outcome)
+        {
+            if (outcome == OutcomeStopped)
+            {
+                SdLogger.EventWarn("Guard", "EXTERNAL ORDER STOPPED — {0} {1} qty={2} on {3}: {4} ({5})",
+                    order.OrderAction, order.OrderType, order.Quantity,
+                    order.Instrument != null ? order.Instrument.FullName : "?", violation, order.OrderState);
+            }
+            else
+            {
+                // The line that matters on a bad day: the rule was refused AND the order got through.
+                SdLogger.EventWarn("Guard", "GUARD BYPASSED — {0} {1} qty={2} on {3} FILLED despite {4}",
+                    order.OrderAction, order.OrderType, order.Quantity,
+                    order.Instrument != null ? order.Instrument.FullName : "?", violation);
+            }
+
+            Report(order, violation, outcome, string.Empty);
+        }
+
+        private void Report(Order order, string violation, string outcome, string error)
         {
             try
             {
                 var payload = new Dictionary<string, object>();
                 payload["violation"] = violation;
-                payload["cancelled"] = cancelled;
+                // Kept for readers that predate `outcome`, and now honest: true only when the order
+                // was really stopped, never merely asked to stop.
+                payload["cancelled"] = outcome == OutcomeStopped;
+                payload["outcome"] = outcome;
                 payload["orderId"] = order.OrderId ?? string.Empty;
                 payload["orderAction"] = order.OrderAction.ToString();
                 payload["orderType"] = order.OrderType.ToString();
