@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities;
@@ -16,10 +17,16 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
     /// can ask for a bar. No market data crosses the bridge — only the verdict does.
     ///
     /// THREADING. NinjaTrader raises <c>Update</c> on its data thread; the state publisher reads
-    /// from a timer thread. Rather than lock the two against each other, the data thread computes a
-    /// whole immutable <see cref="Verdict"/> and publishes it with a single reference assignment,
-    /// and the timer thread only ever reads that reference. Nothing touches <c>Bars</c> off the
-    /// data thread.
+    /// from a timer thread. Rather than lock the two against each other, whichever thread consumes
+    /// a bar computes a whole immutable <see cref="Verdict"/> and publishes it with a single
+    /// reference assignment, and every reader only ever reads that reference.
+    ///
+    /// HOW A CLOSED BAR IS NOTICED, AND WHY THERE ARE TWO WAYS. The <c>Update</c> event is the
+    /// fast path, but it cannot be the only one: it delivered nothing usable for two days straight
+    /// (see <see cref="Poll"/>), and the failure was silent because a bar that never arrives raises
+    /// nothing to log. The publish timer therefore ALSO looks, twice a second, at whether a bar has
+    /// closed since it last asked. Both paths funnel into the same idempotent <see cref="Consume"/>,
+    /// so whichever notices first simply wins and the other finds nothing to do.
     ///
     /// The freshness test is applied by the READER and not by the writer, which is the one thing
     /// that cannot be got wrong here: a dead feed raises no Update at all, so a staleness check
@@ -210,11 +217,14 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         /// <summary>
         /// The <c>trend</c> block for the state update, and the place the freshness test is
-        /// applied. Reads one volatile reference and a clock: no bar access, no lock, nothing that
-        /// can block the publish loop.
+        /// applied.
         /// </summary>
         public Dictionary<string, object> BuildState()
         {
+            // Notice anything that has closed since the last tick before answering, so a bar that
+            // closed a moment ago is folded in now rather than reported one publish late.
+            Poll();
+
             var verdict = _verdict;
 
             var staleSeconds = 0;
@@ -467,8 +477,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                         series.Minutes, _instrument != null ? _instrument.FullName : "?",
                         request.Bars != null ? request.Bars.Count : 0);
 
-                    Consume(series);
-                    Recompute();
+                    if (Consume(series, "load")) Recompute();
                 }
             }
             catch (Exception ex)
@@ -479,17 +488,26 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             }
         }
 
+        /// <summary>
+        /// Already on NinjaTrader's data thread, so the bars are read without taking the series'
+        /// own lock — see <see cref="Poll"/> for why the other path cannot do the same.
+        /// </summary>
         private void OnBarsUpdate(object sender, BarsUpdateEventArgs e)
         {
             try
             {
                 lock (_lock)
                 {
-                    var series = Match(sender as BarsRequest);
+                    // Identified by the series carried in the event and NOT by the sender. Nothing
+                    // documents what NinjaTrader passes as sender here, and a mismatch is invisible:
+                    // it looks exactly like a series nobody is watching, so the handler returns
+                    // silently and the trend simply stops advancing. The event args name their own
+                    // series, and BarsSeries carries the period — so the reference and higher
+                    // timeframes cannot be confused for one another.
+                    var series = Match(e) ?? Match(sender as BarsRequest);
                     if (series == null) return;
 
-                    Consume(series);
-                    Recompute();
+                    if (Consume(series, "event")) Recompute();
                 }
             }
             catch (Exception ex)
@@ -504,6 +522,21 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             if (_reference != null && ReferenceEquals(_reference.Request, request)) return _reference;
             if (_higher != null && ReferenceEquals(_higher.Request, request)) return _higher;
             return null;
+        }
+
+        private Series Match(BarsUpdateEventArgs e)
+        {
+            var updated = e != null ? e.BarsSeries : null;
+            if (updated == null) return null;
+            if (Owns(_reference, updated)) return _reference;
+            if (Owns(_higher, updated)) return _higher;
+            return null;
+        }
+
+        private static bool Owns(Series series, BarsSeries updated)
+        {
+            var bars = series != null && series.Request != null ? series.Request.Bars : null;
+            return bars != null && ReferenceEquals(bars.BarsSeries, updated);
         }
 
         /// <summary>
@@ -531,16 +564,17 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// entire class of off-by-one and missed-bar bugs. It also makes the verdict independent
         /// of when the add-on happened to start.
         /// </summary>
-        private void Consume(Series series)
+        /// <returns>True when a bar was actually folded in, so the caller knows to republish.</returns>
+        private bool Consume(Series series, string source)
         {
             var bars = series.Request != null ? series.Request.Bars : null;
-            if (bars == null) return;
+            if (bars == null) return false;
 
             var newest = bars.Count - 2;
-            if (newest < 0) return;
+            if (newest < 0) return false;
 
             var newestTime = bars.GetTime(newest);
-            if (newestTime == series.LastClosedBarTime) return;
+            if (newestTime == series.LastClosedBarTime) return false;
 
             var engine = NewEngine();
             for (var i = 0; i <= newest; i++)
@@ -551,6 +585,63 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             series.Engine = engine;
             series.LastClosedBarTime = newestTime;
             series.LastAdvanceUtc = DateTime.UtcNow;
+
+            // Once per closed bar, so twice a minute at the default settings — cheap enough for
+            // DEBUG, and it is the only evidence that the series is advancing at all. The source
+            // names which of the two paths noticed: a log carrying nothing but "poll" means the
+            // Update event is still delivering nothing, which is worth knowing.
+            SdLogger.Debug("Trend: {0}min bar closed at {1:HH:mm} via {2} — direction {3}",
+                series.Minutes, newestTime, source, TrendEngine.ToWire(series.Engine.Direction));
+            return true;
+        }
+
+        /// <summary>
+        /// The publish timer's own look at the bars, and the reason the trend refreshes at all.
+        ///
+        /// The <c>Update</c> event alone left the reference series frozen at its load time: it went
+        /// stale five minutes later on every single cycle, the watchdog below reloaded it, and the
+        /// cycle repeated all day. A direction up to five minutes old is not a direction, and the
+        /// key blinked NO DATA every five minutes on a perfectly healthy feed. Nothing in the logs
+        /// pointed at it, because a bar that is never delivered raises nothing to log.
+        ///
+        /// This runs on the publish thread while NinjaTrader may be appending on its own, hence the
+        /// series' lock — the one NinjaTrader exposes for exactly this. Taken with a ZERO timeout
+        /// and never waited on: NinjaTrader raises <c>Update</c> from under its own write lock, and
+        /// that handler wants <c>_lock</c>, which this thread is holding. Blocking here would let
+        /// the two threads hold what the other needs. A tick that cannot get in immediately simply
+        /// skips — the next one is 500 ms away and the bar will still be there.
+        /// </summary>
+        private void Poll()
+        {
+            lock (_lock)
+            {
+                if (_disposed) return;
+
+                var advanced = PollSeries(_reference);
+                advanced |= PollSeries(_higher);
+                if (advanced) Recompute();
+            }
+        }
+
+        private bool PollSeries(Series series)
+        {
+            if (series == null || series.Failed) return false;
+
+            var bars = series.Request != null ? series.Request.Bars : null;
+            var sync = bars != null && bars.BarsSeries != null ? bars.BarsSeries.SyncRoot : null;
+            // No lock to take means no safe read from this thread. Leave it to the event path and,
+            // failing that, to the watchdog — never read a series being written underneath us.
+            if (sync == null) return false;
+
+            if (!sync.TryEnterReadLock(0)) return false;
+            try
+            {
+                return Consume(series, "poll");
+            }
+            finally
+            {
+                sync.ExitReadLock();
+            }
         }
 
         /// <summary>
