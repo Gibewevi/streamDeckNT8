@@ -1688,11 +1688,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
+      "projectUniqueName": "C:\\Users\\pixel\\Desktop\\trade deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
       "projectName": "StreamDeckBridge",
-      "projectPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
+      "projectPath": "C:\\Users\\pixel\\Desktop\\trade deck\\src\\StreamDeckBridge\\StreamDeckBridge.csproj",
       "packagesPath": "C:\\Users\\pixel\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\StreamDeckBridge\\obj\\",
+      "outputPath": "C:\\Users\\pixel\\Desktop\\trade deck\\src\\StreamDeckBridge\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\pixel\\AppData\\Roaming\\NuGet\\NuGet.Config"

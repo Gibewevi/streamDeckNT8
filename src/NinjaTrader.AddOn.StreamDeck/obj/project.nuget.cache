@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "WcYsTwy8nIM=",
+  "dgSpecHash": "veq61AKRApQ=",
   "success": true,
-  "projectFilePath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
+  "projectFilePath": "C:\\Users\\pixel\\Desktop\\trade deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\pixel\\.nuget\\packages\\newtonsoft.json\\13.0.3\\newtonsoft.json.13.0.3.nupkg.sha512"
   ],

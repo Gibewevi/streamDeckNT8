@@ -1162,6 +1162,7 @@ public sealed class SafetyMacro
             PauseActive = breach?.Reason == "mandatoryPause",
             PauseSecondsRemaining = pause.Remaining,
             PauseDueInSeconds = pause.DueIn,
+            PauseAfterMinutes = _state.Settings.PauseAfterMinutes,
             AutoFlattenEnabled = _state.Settings.AutoFlattenOnDailyLoss,
             AutoFlattenPending = liquidation > 0,
             AutoFlattenSecondsRemaining = liquidation,

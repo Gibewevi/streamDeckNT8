@@ -42,6 +42,10 @@ const store = new LayoutStore();
 const supervisor = new BridgeSupervisor(BRIDGE_PORT);
 const bitlearn = new BitlearnClient();
 const journal = new EventRecorder();
+// La clé de scellement arrive avec le jeton, à l'appairage, et n'est rendue qu'à cet instant.
+// L'add-on la relira dans le dossier du journal : c'est le seul terrain que les deux processus
+// partagent, et il y écrit déjà.
+bitlearn.onJournalKey((cle) => journal.installerCle(cle));
 const uploader = new JournalUploader(
   bitlearn,
   () => comptesJournalises(store.layout),
@@ -1079,6 +1083,10 @@ bridge.onStateUpdate((state) => {
   // Même comparaison, second consommateur : le journal comportemental. Redétecter les
   // transitions de son côté aurait garanti que les deux finissent par diverger.
   journal.observe(empreinte, nouvelle);
+  // Échantillon de solde scellé, limité en fréquence par le journal lui-même. Il ne remplace pas
+  // le solde envoyé avec le lot — celui-là cale le capital de départ du journal — il alimente le
+  // capital de RÉFÉRENCE de l'XP, pris en médiane, et sa réconciliation avec le P&L cumulé.
+  if (typeof state.cashValue === 'number') journal.recordBalance(nouvelle.account, state.cashValue);
   // Retour à plat : l'aller-retour vient de se terminer, c'est le moment où il devient
   // consultable dans Bitlearn. Attendre le tour périodique ferait patienter une minute pour
   // un trade que l'on vient de clôturer et que l'on veut relire tout de suite.

@@ -60,11 +60,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
+      "projectUniqueName": "C:\\Users\\pixel\\Desktop\\trade deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
       "projectName": "NinjaTrader.AddOn.StreamDeck",
-      "projectPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
+      "projectPath": "C:\\Users\\pixel\\Desktop\\trade deck\\src\\NinjaTrader.AddOn.StreamDeck\\NinjaTrader.AddOn.StreamDeck.csproj",
       "packagesPath": "C:\\Users\\pixel\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.AddOn.StreamDeck\\obj\\",
+      "outputPath": "C:\\Users\\pixel\\Desktop\\trade deck\\src\\NinjaTrader.AddOn.StreamDeck\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\pixel\\AppData\\Roaming\\NuGet\\NuGet.Config"

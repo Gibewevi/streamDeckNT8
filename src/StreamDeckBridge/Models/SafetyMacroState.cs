@@ -345,6 +345,17 @@ public sealed class SafetyStatus
     /// </summary>
     public int PauseDueInSeconds { get; set; }
 
+    /// <summary>
+    /// The configured break interval in minutes, 0 when the rule is off.
+    ///
+    /// Published as a SETTING and not only as a countdown, because the countdown is 0 in two very
+    /// different situations — the rule is off, or nothing has been traded yet — and the journal
+    /// needs to tell them apart. Bitlearn scores "were the limits respected" against the limits
+    /// that were actually armed; a break rule that is on but has not yet started counting must
+    /// appear as armed, or a trader who sets one gets no credit for it.
+    /// </summary>
+    public double PauseAfterMinutes { get; set; }
+
     // --- Automatic liquidation ---
 
     /// <summary>Whether the account is liquidated when the daily loss limit is reached.</summary>

@@ -39,6 +39,25 @@ export interface Empreinte {
   cooldownActive: boolean;
   tiltActive: boolean;
   tiltReason: string;
+  /**
+   * Jour de bourse tenu par le bridge. C'est la fenêtre sur laquelle `SafetyMacro` remet à zéro la
+   * perte journalière, le compteur de trades et le plafond de contrats — donc la seule où « la
+   * limite a-t-elle tenu » a un sens. Il voyage sur chaque ligne de journal pour que Bitlearn
+   * découpe ses séances comme le trader les a vécues, au lieu de les recalculer d'un fuseau deviné.
+   */
+  tradingDay: string;
+  /**
+   * Limites en vigueur, publiées sur `guard.armed`.
+   *
+   * Sans elles, « respect des limites » n'a pas de dénominateur : un Guard armé avec toutes ses
+   * limites à zéro n'aurait jamais rien refusé et se lirait comme une séance sans faute. Elles ne
+   * figurent PAS dans l'empreinte comparée — leur changement ne doit pas produire d'événement,
+   * seulement accompagner l'armement.
+   */
+  dailyLossLimit: number;
+  maxTradesWhenLosing: number;
+  maxContracts: number;
+  pauseAfterMinutes: number;
 }
 
 export function empreinteDe(s: TradingState): Empreinte {
@@ -66,6 +85,11 @@ export function empreinteDe(s: TradingState): Empreinte {
     cooldownActive: s.cooldownActive === true,
     tiltActive: s.safety?.tiltActive === true,
     tiltReason: s.safety?.tiltReason ?? '',
+    tradingDay: s.safety?.tradingDay ?? '',
+    dailyLossLimit: s.safety?.dailyLossLimit ?? 0,
+    maxTradesWhenLosing: s.safety?.maxTradesWhenLosing ?? 0,
+    maxContracts: s.safety?.maxContracts ?? 0,
+    pauseAfterMinutes: s.safety?.pauseAfterMinutes ?? 0,
   };
 }
 

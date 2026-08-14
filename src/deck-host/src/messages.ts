@@ -129,6 +129,15 @@ export interface SafetyStatus {
   pauseSecondsRemaining: number;
   /** Secondes de trading avant que la pause ne tombe. 0 si la règle est inactive, si rien n'a été tradé, ou si la pause est déjà due. */
   pauseDueInSeconds: number;
+  /**
+   * Intervalle réglé, en minutes. 0 = règle inactive.
+   *
+   * Publié en plus du décompte parce que celui-ci vaut 0 dans deux situations opposées — règle
+   * coupée, ou rien de tradé encore — et que le journal doit les distinguer : Bitlearn note le
+   * respect des limites RÉELLEMENT armées, et une pause réglée mais pas encore déclenchée doit
+   * compter comme armée.
+   */
+  pauseAfterMinutes: number;
 
   // --- Liquidation automatique sur perte journalière ---
   //
@@ -189,6 +198,7 @@ export const DEFAULT_SAFETY_STATUS: SafetyStatus = {
   pauseActive: false,
   pauseSecondsRemaining: 0,
   pauseDueInSeconds: 0,
+  pauseAfterMinutes: 0,
   autoFlattenEnabled: false,
   autoFlattenPending: false,
   autoFlattenSecondsRemaining: 0,

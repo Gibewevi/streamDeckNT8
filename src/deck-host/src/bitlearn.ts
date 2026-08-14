@@ -166,6 +166,8 @@ function ouvrirDansLeNavigateur(url: string): void {
 
 export class BitlearnClient {
   #token: string | null = null;
+  /** Destinataire de la clé de scellement rendue à l'appairage. Voir `onJournalKey`. */
+  #surCle: ((cleHex: string) => void) | null = null;
   #timer: NodeJS.Timeout | null = null;
   /** Signature de la dernière disposition appliquée — évite de réécrire un fichier identique. */
   #lastApplied = '';
@@ -218,7 +220,9 @@ export class BitlearnClient {
       body: JSON.stringify({ code, deviceName, appVersion }),
     }, false);
 
-    const payload = await response.json() as { token?: string; device?: { id?: number }; error?: string };
+    const payload = await response.json() as {
+      token?: string; journalKey?: string; device?: { id?: number }; error?: string;
+    };
     if (!response.ok || !payload?.token) {
       throw new Error(payload?.error || `Appairage refusé (${response.status})`);
     }
@@ -228,7 +232,27 @@ export class BitlearnClient {
       deviceId: payload.device?.id,
       pairedAt: new Date().toISOString(),
     });
-    log.event('Bitlearn', 'Poste appairé', { deviceId: payload.device?.id });
+
+    // La clé de scellement n'est rendue qu'ici, comme le jeton. Un serveur d'ancienne version ne
+    // l'envoie pas : le poste continue alors de synchroniser sans sceau, et ses séances tombent au
+    // palier non vérifiable côté Bitlearn — dégradé, jamais cassé.
+    if (typeof payload.journalKey === 'string' && payload.journalKey) {
+      this.#surCle?.(payload.journalKey);
+    } else {
+      log.eventWarn('Bitlearn', 'Aucune clé de scellement reçue — le journal partira non scellé');
+    }
+
+    log.event('Bitlearn', 'Poste appairé', { deviceId: payload.device?.id, scelle: Boolean(payload.journalKey) });
+  }
+
+  /**
+   * Branche le destinataire de la clé de scellement.
+   *
+   * Une callback plutôt qu'une dépendance directe sur le journal : ce client sert aussi à la
+   * disposition et au battement, et rien ici ne doit avoir à connaître les spools.
+   */
+  onJournalKey(handler: (cleHex: string) => void): void {
+    this.#surCle = handler;
   }
 
   /**
@@ -342,6 +366,8 @@ export class BitlearnClient {
   async sendJournal(lot: {
     executions: unknown[];
     events: unknown[];
+    /** Échantillons de solde scellés — le capital de référence de l'XP et sa réconciliation. */
+    balances?: unknown[];
     soldes?: Record<string, number>;
   }): Promise<boolean> {
     if (!this.#token) return false;

@@ -57,12 +57,20 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private bool _disposed;
         private bool _sinkFailed;
 
+        /// <summary>
+        /// Chained HMAC over the fills. The key is dropped in this same folder by the host at
+        /// pairing time — it is the only ground the two processes share, and this one already
+        /// writes here.
+        /// </summary>
+        private readonly JournalSeal _seal;
+
         public ExecutionRecorder(TrendMonitor trend = null, string directory = null)
         {
             _trend = trend;
             _directory = directory ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "StreamDeckTrader", FolderName);
+            _seal = new JournalSeal(_directory);
         }
 
         /// <summary>
@@ -201,11 +209,25 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             record["time"] = new DateTimeOffset(quand).ToString("o", CultureInfo.InvariantCulture);
             record["recordedAtUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 
+            // Trading day, computed exactly as the bridge computes it: `DateTime.Now` formatted as
+            // a local date. The two run on the same machine, off the same clock, so they agree
+            // without any message passing — and they MUST agree, because this is the window on
+            // which the guard resets its daily loss, its trade count and its contract cap, and the
+            // window on which Bitlearn cuts the session it scores.
+            //
+            // Deliberately not derived from `exec.Time`: a fill can be reported minutes after the
+            // fact, and around midnight that would file it under the wrong session.
+            record["tradingDay"] = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
             return record;
         }
 
         private void Write(Dictionary<string, object> record)
         {
+            // Sealed BEFORE serialising: the signed line is the one that reaches the disk, leaving
+            // no window during which the file holds an unsigned record.
+            _seal.Stamp(record);
+
             var line = SimpleJson.Serialize(record);
 
             lock (_sync)

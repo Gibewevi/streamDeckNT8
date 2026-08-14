@@ -138,11 +138,17 @@ export class JournalUploader {
 
       const executions = this.#lire('executions-', filtre);
       const events = this.#lire('events-', filtre);
+      const balances = this.#lire('balances-', filtre);
 
-      if (executions.lignes.length === 0 && events.lignes.length === 0) return;
+      if (executions.lignes.length === 0 && events.lignes.length === 0 && balances.lignes.length === 0) return;
 
       // Le solde n'accompagne que le compte que l'hôte a réellement sous les yeux. Deviner celui
       // des autres à partir de leur P&L reviendrait à inventer un capital de départ.
+      //
+      // Il continue de partir en champ de requête EN PLUS du spool scellé : c'est lui qui cale le
+      // capital de départ du journal (`initial_balance = solde − P&L`), et le spool sert à autre
+      // chose — la médiane du capital de référence et la réconciliation. Les retirer d'un coup
+      // aurait cassé l'affichage des pourcentages pour un gain nul.
       const courant = this.#getSolde();
       const soldes = courant && retenu(courant.compte, filtre)
         ? { [courant.compte]: courant.solde }
@@ -151,12 +157,14 @@ export class JournalUploader {
       const envoye = await this.#bitlearn.sendJournal({
         executions: executions.lignes,
         events: events.lignes,
+        balances: balances.lignes,
         soldes,
       });
       if (!envoye) return;
 
       // Après l'accusé seulement.
-      for (const [fichier, offset] of Object.entries({ ...executions.curseurs, ...events.curseurs })) {
+      const curseurs = { ...executions.curseurs, ...events.curseurs, ...balances.curseurs };
+      for (const [fichier, offset] of Object.entries(curseurs)) {
         this.#curseurs[fichier] = offset;
       }
       this.#sauverCurseurs();
@@ -166,7 +174,8 @@ export class JournalUploader {
       // ne disait que le capital de départ n'était jamais parti. Le défaut a vécu une version
       // entière sans laisser la moindre trace.
       log.event('Journal', 'Lot envoyé à Bitlearn', {
-        executions: executions.lignes.length, evenements: events.lignes.length, raison,
+        executions: executions.lignes.length, evenements: events.lignes.length,
+        soldesScelles: balances.lignes.length, raison,
         solde: soldes ? Object.entries(soldes).map(([c, s]) => `${c}=${s}`).join(',') : 'ABSENT',
       });
     } catch (err) {
