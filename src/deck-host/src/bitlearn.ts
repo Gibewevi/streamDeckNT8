@@ -440,7 +440,18 @@ export class BitlearnClient {
         return null;
       }
 
-      const payload = await response.json() as { layout?: unknown };
+      const payload = await response.json() as { layout?: unknown; journalKey?: string };
+
+      // Rattrapage : un poste appairé avant le scellement n'a pas de clé, et Bitlearn la lui rend
+      // ici, une seule fois. Sans ça il resterait au palier non vérifiable pour toujours — son
+      // journal partirait bien, mais son XP serait dérisoire sans que rien ne dise pourquoi.
+      //
+      // Le destinataire ignore une clé qu'il possède déjà : la réinstaller casserait la chaîne en
+      // cours pour rien.
+      if (typeof payload?.journalKey === 'string' && payload.journalKey) {
+        this.#surCle?.(payload.journalKey);
+      }
+
       // Validé même venant de Bitlearn : une disposition sans page fige le boîtier, et la
       // provenance ne rend pas un document correct.
       const layout = validateLayout(payload?.layout);

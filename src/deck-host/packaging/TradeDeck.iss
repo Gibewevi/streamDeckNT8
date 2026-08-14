@@ -13,7 +13,7 @@
 #define ExeBase        "BitlearnTradeDeck-Setup"
 
 #ifndef AppVersion
-  #define AppVersion "0.13.0"
+  #define AppVersion "0.14.0"
 #endif
 #ifndef Payload
   #define Payload "..\..\..\build\payload"

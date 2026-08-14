@@ -128,6 +128,10 @@ export class Sealer {
    */
   installerCle(cleHex: string): void {
     if (!cleHex || !/^[0-9a-f]{64}$/i.test(cleHex)) return;
+    // Une clé déjà en place ne se remplace pas. Le battement peut en proposer une au rattrapage, et
+    // l'écraser casserait la chaîne en cours — le serveur verrait toutes les lignes suivantes
+    // échouer leur signature, ce qui ferait perdre son sceau à la séance du jour pour rien.
+    if (this.#cle) return;
     try {
       mkdirSync(this.#dossier, { recursive: true });
       writeFileSync(this.#cheminCle(), cleHex, 'utf8');

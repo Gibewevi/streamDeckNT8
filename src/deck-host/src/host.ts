@@ -28,7 +28,7 @@ import { JournalUploader, comptesJournalises } from './uploader.js';
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.13.0';
+const VERSION = '0.14.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -42,9 +42,9 @@ const store = new LayoutStore();
 const supervisor = new BridgeSupervisor(BRIDGE_PORT);
 const bitlearn = new BitlearnClient();
 const journal = new EventRecorder();
-// La clé de scellement arrive avec le jeton, à l'appairage, et n'est rendue qu'à cet instant.
-// L'add-on la relira dans le dossier du journal : c'est le seul terrain que les deux processus
-// partagent, et il y écrit déjà.
+// La clé de scellement arrive avec le jeton à l'appairage, ou au battement pour un poste appairé
+// avant que le scellement n'existe — une seule fois dans les deux cas. L'add-on la relira dans le
+// dossier du journal : c'est le seul terrain que les deux processus partagent, et il y écrit déjà.
 bitlearn.onJournalKey((cle) => journal.installerCle(cle));
 const uploader = new JournalUploader(
   bitlearn,
