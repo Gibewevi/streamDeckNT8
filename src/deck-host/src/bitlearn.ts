@@ -127,6 +127,8 @@ export interface SyncContext {
     deckModel: string;
     bridge: boolean;
     nt: boolean;
+    /** Pourquoi `nt` est faux : plateforme absente, add-on non déposé, incomplet, ou déposé. */
+    ntAddon: string;
     appVersion: string;
   };
   /**
