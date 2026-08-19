@@ -25,3 +25,7 @@ src/deck-host/bridge/
 
 # Artefacts d'empaquetage : charge utile assemblee et installateur produit.
 build/
+
+# Journaux recus d'un poste client pendant un depannage. Ils portent son nom de machine et son
+# nom d'utilisateur Windows, et ne decrivent qu'un incident : ils se lisent, puis se jettent.
+logs-externes/
