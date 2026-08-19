@@ -1,4 +1,4 @@
-; Installateur Bitlearn TradeDeck — Inno Setup 6.
+﻿; Installateur Bitlearn TradeDeck — Inno Setup 6.
 ;
 ; Produit un unique .exe téléchargeable depuis Bitlearn. L'utilisateur double-clique, obtient un
 ; raccourci sur son bureau, et TradeDeck démarre à chaque ouverture de session. Plus aucune
@@ -32,11 +32,18 @@
 #define AppUrl BitlearnUrl + "/tradedeck"
 
 #ifndef AppVersion
-  #define AppVersion "0.16.0"
+  #define AppVersion "0.17.0"
 #endif
 
 #ifndef Payload
   #define Payload "..\..\..\build\payload"
+#endif
+
+; Sources NinjaScript à déposer dans NinjaTrader. Hors de `Payload` à dessein : ce dernier est
+; copié en bloc vers `{app}`, et ces fichiers n'ont rien à y faire — leur seule destination est
+; `Documents\NinjaTrader 8\bin\Custom`.
+#ifndef NtPayload
+  #define NtPayload "..\..\..\build\ninjatrader"
 #endif
 #ifndef OutDir
   #define OutDir "..\..\..\build"
@@ -86,6 +93,19 @@ Source: "assets\TradeDeck.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
 ; que la version installée du script n'existe. Sur une mise à jour, celle du dossier serait de
 ; surcroît l'ancienne.
 Source: "register-task.ps1"; Flags: dontcopy
+
+; L'intégration NinjaTrader. Sans elle le voyant « NinjaTrader » reste rouge quoi qu'il arrive :
+; c'est l'add-on chargé DANS NinjaTrader qui ouvre la connexion vers le bridge, et rien d'autre
+; ne le dépose. Les deux premiers clients payés ont buté là.
+;
+; `TdSwingEngine.cs` va dans `Indicators\` et NON avec l'add-on : `TrendEngine` le référence, les
+; deux dossiers compilent dans le même `NinjaTrader.Custom.dll`, mais un second exemplaire sous
+; `AddOns\StreamDeck\` lèverait un CS0101. Une compilation NinjaScript est tout ou rien : cet
+; échec emporterait les indicateurs et stratégies personnels du trader.
+Source: "{#NtPayload}\AddOns\StreamDeck\*.cs"; DestDir: "{code:DossierNinjaScript|AddOns\StreamDeck}"; \
+  Flags: ignoreversion; Check: NinjaTraderPresent
+Source: "{#NtPayload}\Indicators\TdSwingEngine.cs"; DestDir: "{code:DossierNinjaScript|Indicators}"; \
+  Flags: ignoreversion uninsneveruninstall; Check: NinjaTraderPresent
 
 [Icons]
 ; Le raccourci ouvre la configuration sur Bitlearn — l'interface locale n'est plus la référence.
@@ -198,11 +218,95 @@ begin
   if url <> '' then Result := url;
 end;
 
+{
+  Dossier NinjaScript du poste. La constante Inno userdocs, et non %USERPROFILE% suivi de
+  Documents en dur : ce dossier se redirige — OneDrive le fait par défaut sur beaucoup de
+  machines neuves — et seule la constante suit la redirection.
+}
+function DossierNinjaScript(Param: String): String;
+begin
+  Result := AddBackslash(ExpandConstant('{userdocs}\NinjaTrader 8\bin\Custom')) + Param;
+end;
+
+var
+  NtVerifie: Boolean;
+  NtDetecte: Boolean;
+
+{
+  NinjaTrader 8 est-il installé ?
+
+  On ne crée jamais l'arborescence : la fabriquer sur un poste sans NinjaTrader y laisserait un
+  faux dossier de plateforme, et NinjaTrader installé ensuite ne le lirait pas forcément.
+  Absent, on saute le dépôt et on le DIT à la fin — un voyant rouge sans explication est
+  exactement ce qu'on corrige ici.
+}
+function NinjaTraderPresent: Boolean;
+begin
+  if not NtVerifie then
+  begin
+    NtDetecte := DirExists(ExpandConstant('{userdocs}\NinjaTrader 8\bin\Custom'));
+    NtVerifie := True;
+  end;
+  Result := NtDetecte;
+end;
+
+{
+  Efface les sources de la version précédente avant d'écrire les nôtres.
+
+  Sans cela, un fichier retiré ou renommé entre deux versions resterait à compiler pour
+  toujours. Et comme une compilation NinjaScript est tout ou rien, une source orpheline qui ne
+  compile plus emporterait avec elle les indicateurs et stratégies du trader.
+
+  Seuls les `.cs` de NOTRE dossier sont touchés. C'est aussi ce qui rattrape une copie
+  égarée de `TdSwingEngine.cs` déposée ici à la main : elle produirait un CS0101 avec
+  celle d'`Indicators\`.
+}
+procedure PurgerSourcesAddOn;
+var
+  dossier: String;
+  rec: TFindRec;
+begin
+  dossier := DossierNinjaScript('AddOns\StreamDeck');
+  if not DirExists(dossier) then Exit;
+  if not FindFirst(AddBackslash(dossier) + '*.cs', rec) then Exit;
+  try
+    repeat
+      DeleteFile(AddBackslash(dossier) + rec.Name);
+    until not FindNext(rec);
+  finally
+    FindClose(rec);
+  end;
+end;
+
+{ Ce que le trader doit savoir en partant, et rien de plus. }
+procedure MessageNinjaTrader;
+begin
+  if WizardSilent then Exit;
+
+  if NinjaTraderPresent then
+    MsgBox('L''intégration NinjaTrader a été installée.' + #13#10#13#10 +
+           'Si NinjaTrader 8 est ouvert, fermez-le et rouvrez-le : il compile l''add-on à son ' +
+           'démarrage. Le voyant « NinjaTrader » passe alors au vert.', mbInformation, MB_OK)
+  else
+    MsgBox('NinjaTrader 8 n''a pas été trouvé sur ce poste.' + #13#10#13#10 +
+           'TradeDeck est installé et fonctionnel, mais son intégration NinjaTrader ne l''est ' +
+           'pas : le voyant « NinjaTrader » restera rouge. Installez NinjaTrader 8, puis ' +
+           'relancez cet installateur.', mbInformation, MB_OK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   dossier, config, precedente: String;
 begin
+  if CurStep = ssPostInstall then
+  begin
+    MessageNinjaTrader;
+    Exit;
+  end;
   if CurStep <> ssInstall then Exit;
+
+  { Avant la copie : les fichiers de cette version arrivent ensuite, dans un dossier propre. }
+  if NinjaTraderPresent then PurgerSourcesAddOn;
 
   dossier := ExpandConstant('{userappdata}\StreamDeckTrader');
   config := AddBackslash(dossier) + 'bitlearn.json';
@@ -236,3 +340,11 @@ Type: filesandordirs; Name: "{app}\dist"
 Type: filesandordirs; Name: "{app}\node_modules"
 Type: filesandordirs; Name: "{app}\bridge"
 Type: filesandordirs; Name: "{app}\ui"
+
+; L'add-on est retiré de NinjaTrader : le laisser ferait compiler à chaque démarrage un add-on
+; qui cherche un bridge désinstallé.
+;
+; `Indicators\TdSwingEngine.cs` reste, délibérément. Ce fichier seul ne coûte rien et
+; compile sans rien exiger, alors que le supprimer casserait la compilation — tout ou rien,
+; indicateurs du trader compris — s'il l'utilise dans un indicateur à lui.
+Type: filesandordirs; Name: "{code:DossierNinjaScript|AddOns\StreamDeck}"

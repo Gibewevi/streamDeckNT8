@@ -341,9 +341,13 @@ Copy-Item "src\NinjaTrader.Scripts\Indicators\TdSwingEngine.cs" "$nt\Indicators\
 Le `<Compile Include… Link=…>` du `.csproj` de l'add-on ne sert qu'à la **vérification de
 compilation locale** et ne se déploie jamais.
 
-**L'installateur ne déploie rien dans NinjaTrader** — ni cette macro, ni l'add-on en général. Un
-utilisateur qui installe le `.exe` obtient l'hôte et le bridge, et aucune intégration NinjaTrader.
-Lacune connue, antérieure à cette macro, à traiter à part.
+**Depuis 0.17.0, l'installateur dépose ces fichiers lui-même** — les sources de l'add-on dans
+`AddOns\StreamDeck\`, `TdSwingEngine.cs` dans `Indicators\`, et rien d'autre à faire que
+redémarrer NinjaTrader. La copie manuelle ci-dessus ne sert plus qu'au poste de développement.
+
+Le dédoublement reste le danger : l'installateur efface les `.cs` de `AddOns\StreamDeck\` avant
+d'écrire les siens, ce qui rattrape une copie égarée de `TdSwingEngine.cs` déposée là à la
+main, mais il ne peut rien contre un exemplaire caché ailleurs dans `bin\Custom`.
 
 ## Vérifier
 

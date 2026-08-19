@@ -28,6 +28,7 @@ $deckHost = Split-Path $PSScriptRoot -Parent
 $repo = Split-Path (Split-Path $deckHost -Parent) -Parent
 $build = Join-Path $repo 'build'
 $payload = Join-Path $build 'payload'
+$ntPayload = Join-Path $build 'ninjatrader'
 
 function Etape($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
 
@@ -127,6 +128,37 @@ $node = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $node) { throw "node.exe introuvable dans le PATH" }
 Copy-Item $node (Join-Path $payload 'node.exe') -Force
 
+# --- 2 bis. Sources NinjaScript ------------------------------------------------------
+# Assemblées à part : l'installateur les dépose dans `Documents\NinjaTrader 8\bin\Custom`,
+# pas dans le dossier de l'hôte. Les mêler à la charge utile les copierait aux deux endroits.
+#
+# La séparation des deux dossiers n'est pas cosmétique : `TrendEngine` référence
+# `TdSwingEngine`, qui doit exister en UNE seule copie. Deux exemplaires lèvent un CS0101, et une
+# compilation NinjaScript est tout ou rien — l'échec emporterait les indicateurs du trader.
+Etape "Assemblage des sources NinjaScript"
+if (Test-Path $ntPayload) { Remove-Item $ntPayload -Recurse -Force }
+New-Item -ItemType Directory -Path "$ntPayload/AddOns/StreamDeck" -Force | Out-Null
+New-Item -ItemType Directory -Path "$ntPayload/Indicators" -Force | Out-Null
+
+Get-ChildItem (Join-Path $repo 'src/NinjaTrader.AddOn.StreamDeck') -Recurse -Filter *.cs |
+  Where-Object { $_.FullName -notlike '*\obj\*' -and $_.FullName -notlike '*\bin\*' } |
+  ForEach-Object { Copy-Item $_.FullName "$ntPayload/AddOns/StreamDeck" -Force }
+Copy-Item (Join-Path $repo 'src/NinjaTrader.Scripts/Indicators/TdSwingEngine.cs') "$ntPayload/Indicators" -Force
+
+$sources = @(Get-ChildItem "$ntPayload/AddOns/StreamDeck" -Filter *.cs)
+if ($sources.Count -lt 10) { throw "Sources de l'add-on introuvables : $($sources.Count) fichier(s) seulement" }
+# Un `AssemblyInfo.cs` ou un `AssemblyAttributes.cs` venu de `obj\` ne gênerait pas la
+# construction : il exploserait chez le trader, en attributs d'assembly dupliqués, et une
+# compilation NinjaScript est tout ou rien. C'est arrivé à la première écriture de ce
+# script, un `[\/]` en regex .NET ne contenant que la barre oblique.
+$generes = @($sources | Where-Object { $_.Name -match 'AssemblyInfo|AssemblyAttributes' })
+if ($generes) { throw "Artefacts generes dans les sources de l'add-on : $($generes.Name -join ', ')" }
+if (Test-Path "$ntPayload/AddOns/StreamDeck/TdSwingEngine.cs") {
+  throw "TdSwingEngine.cs se trouve dans AddOns/StreamDeck : ce doublon leverait un CS0101 chez le trader."
+}
+if (-not (Test-Path "$ntPayload/Indicators/TdSwingEngine.cs")) { throw "TdSwingEngine.cs manquant dans Indicators/" }
+Write-Host "  add-on : $($sources.Count) sources + TdSwingEngine.cs"
+
 $taille = [math]::Round((Get-ChildItem $payload -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 1)
 Write-Host "  charge utile : $taille Mo avant compression"
 
@@ -142,7 +174,7 @@ $iscc = @(
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "Inno Setup 6 introuvable. winget install JRSoftware.InnoSetup" }
 
-$argsIscc = @("/DAppVersion=$Version", "/DPayload=$payload", "/DOutDir=$build", "/DBitlearnUrl=$BitlearnUrl")
+$argsIscc = @("/DAppVersion=$Version", "/DPayload=$payload", "/DNtPayload=$ntPayload", "/DOutDir=$build", "/DBitlearnUrl=$BitlearnUrl")
 if ($suffixe) { $argsIscc += "/DFileSuffix=$suffixe" }
 & $iscc @argsIscc (Join-Path $PSScriptRoot 'TradeDeck.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC a echoue" }

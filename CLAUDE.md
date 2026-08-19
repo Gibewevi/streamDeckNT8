@@ -108,7 +108,9 @@ L'installation active **ne correspond pas** aux instructions du README :
 
 - l'add-on NT8 est déployé **en sources `.cs` à plat** dans
   `Documents\NinjaTrader 8\bin\Custom\AddOns\StreamDeck\` — NinjaScript les compile au démarrage
-  de NinjaTrader. Le DLL construit localement ne sert qu'à vérifier la compilation ;
+  de NinjaTrader. Le DLL construit localement ne sert qu'à vérifier la compilation. **Depuis
+  0.17.0 l'installateur s'en charge**, avec `TdSwingEngine.cs` dans `Indicators\` : le poste de
+  développement reste le seul endroit où l'on copie ces fichiers à la main ;
 - **l'hôte TradeDeck** s'installe dans `%LOCALAPPDATA%\TradeDeck` via
   `src/deck-host/packaging/install.ps1` : il y copie `dist/`, `ui/`, `node_modules/`, `bridge/`
   et un `node.exe`, enregistre une tâche planifiée (démarrage à l'ouverture de session, relance
