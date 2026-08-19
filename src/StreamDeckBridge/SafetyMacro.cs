@@ -160,9 +160,13 @@ public sealed class SafetyMacro
 
         lock (_lock)
         {
-            // Resume from the last known P&L so the loss rules are live immediately,
-            // instead of staying inert until NinjaTrader publishes again.
-            _accountPnl = _state.LastAccountPnl;
+            // Resume from the last known P&L so the loss rules are live immediately, instead of
+            // staying inert until NinjaTrader publishes again — but ONLY when the persisted state
+            // still belongs to today. On a new day that reading describes YESTERDAY, and
+            // RollTradingDay would take it for today's baseline. See the comment there: that is
+            // exactly what locked the trader out on 2026-08-18.
+            if (_state.TradingDay == DateTime.Now.ToString("yyyy-MM-dd"))
+                _accountPnl = _state.LastAccountPnl;
 
             RollTradingDay();
             ExpireLockIfDue();
@@ -204,7 +208,13 @@ public sealed class SafetyMacro
             _state.Armed = true;
             _state.ArmedAtUtc = DateTime.UtcNow;
             _state.LockedUntilUtc = DateTime.UtcNow.AddHours(_state.Settings.LockDurationHours);
-            _state.BaselinePnl ??= _accountPnl;
+            // Only adopt a baseline here if today has none yet. Going through the same helper as the
+            // P&L path means arming can never install a reading from another day as the session's
+            // reference — which is precisely how the 2026-08-18 lockout was armed at "-46" on a
+            // flat account that had not traded.
+            if (!BaselineBelongsToToday() && _accountPnl.HasValue)
+                SeedBaseline(_accountPnl.Value);
+
             Persist();
 
             _logger.LogWarning(
@@ -523,12 +533,30 @@ public sealed class SafetyMacro
                 TrackGiveBack();
             }
 
-            if (_state.BaselinePnl == null)
+            // Re-seeded whenever the stored baseline does not belong to today — missing, or stamped
+            // for another day. That second case is what repairs a state file written before the
+            // stamp existed, or by a bridge that inherited yesterday's reading: the offending
+            // baseline is dropped the first time NinjaTrader publishes, rather than governing the
+            // whole session.
+            if (!BaselineBelongsToToday())
             {
-                _state.BaselinePnl = accountPnl;
+                var previous = _state.BaselinePnl;
+                SeedBaseline(accountPnl);
                 _lastPnlPersistedAt = DateTime.UtcNow;
                 Persist();
-                _logger.LogInformation("Safety macro P&L baseline for {Day} set to {Pnl:0.##}", _state.TradingDay, accountPnl);
+
+                if (previous.HasValue)
+                {
+                    _logger.LogWarning(
+                        "Safety macro P&L baseline for {Day} RE-OBSERVED at {Pnl:0.##} — the stored baseline ({Stale:0.##}) "
+                        + "did not belong to this day and was offsetting every session P&L by {Offset:0.##}",
+                        _state.TradingDay, accountPnl, previous.Value, -previous.Value);
+                }
+                else
+                {
+                    _logger.LogInformation("Safety macro P&L baseline for {Day} set to {Pnl:0.##}", _state.TradingDay, accountPnl);
+                }
+
                 return;
             }
 
@@ -688,10 +716,12 @@ public sealed class SafetyMacro
                     $"Daily loss limit reached ({pnl:0.##} / -{settings.DailyLossLimit:0.##}). The safety macro blocks new positions.");
             }
 
-            if (settings.MaxTradesWhenLosing > 0 && pnl < 0 && _state.TradeCount >= settings.MaxTradesWhenLosing)
+            if (settings.MaxTradesWhenLosing > 0 && _state.TradeCount >= settings.MaxTradesWhenLosing
+                && SessionIsLosing())
             {
+                var reference = HasRealized() ? SessionRealized() : pnl;
                 return new LimitBreach("tradeLimit", "SAFETY_TRADE_LIMIT_REACHED",
-                    $"Trade limit reached while losing ({_state.TradeCount}/{settings.MaxTradesWhenLosing}, session P&L {pnl:0.##}). The safety macro blocks new positions.");
+                    $"Trade limit reached while losing ({_state.TradeCount}/{settings.MaxTradesWhenLosing}, realised session P&L {reference:0.##}). The safety macro blocks new positions.");
             }
         }
 
@@ -1107,10 +1137,29 @@ public sealed class SafetyMacro
         return (false, string.Empty, string.Empty);
     }
 
+    private bool HasRealized() => _realizedPnl.HasValue && _state.BaselineRealizedPnl.HasValue;
+
     private double SessionRealized() =>
-        _realizedPnl.HasValue && _state.BaselineRealizedPnl.HasValue
-            ? _realizedPnl.Value - _state.BaselineRealizedPnl.Value
-            : 0;
+        HasRealized() ? _realizedPnl!.Value - _state.BaselineRealizedPnl!.Value : 0;
+
+    /// <summary>
+    /// Is the day actually in the red, for the purposes of the TRADE BUDGET?
+    ///
+    /// Reads REALIZED P&amp;L when NinjaTrader publishes it, and only falls back to the
+    /// realized+unrealized sum when it does not. The trade budget is a rule about trades that are
+    /// DONE — "you have taken your fifteen and they went badly" — so an open position that happens
+    /// to be marked down has no business deciding it.
+    ///
+    /// The distinction is not academic. On 2026-08-18 the trader reached his 15th trade with the
+    /// position still open: an unrealized dip of a few ticks is enough to make the sum negative
+    /// while every closed trade of the day is in profit, and the budget would then switch on and
+    /// off with the price of a trade he had not finished. A limit that flickers is a limit nobody
+    /// can trade against.
+    ///
+    /// Nothing is given away by this. The daily loss limit still reads the sum, because an open
+    /// loser IS real risk — that rule is the one that must see it, and it does.
+    /// </summary>
+    private bool SessionIsLosing() => HasRealized() ? SessionRealized() < 0 : SessionPnl() < 0;
 
     private SafetyStatus BuildStatus()
     {
@@ -1234,7 +1283,24 @@ public sealed class SafetyMacro
 
         _state.TradingDay = today;
         _state.TradeCount = 0;
-        _state.BaselinePnl = _accountPnl;
+
+        // The baseline is DROPPED, never carried across the boundary.
+        //
+        // It used to be seeded from _accountPnl, which at startup holds the value restored from the
+        // PREVIOUS day. On 2026-08-18 the bridge started at 08:52 still holding yesterday's +46,
+        // took it as the day's baseline, and every session P&L of that day read 46 too low — the
+        // macro armed at "session P&L -46" on a flat account with zero trades. At the 15th trade
+        // the account was really at +39 and the macro saw -7, so the trade budget fired on a
+        // winning day. A limit that triggers on a number nobody can see is worse than no limit.
+        //
+        // Null means "not observed yet": UpdatePnl seeds it from the first genuine sample of the
+        // new day, which is the only reading that describes this day. The loss rules stay inert for
+        // the few hundred milliseconds until then, which is correct — a day with no data and no
+        // trades has nothing to refuse.
+        _state.BaselinePnl = null;
+        _state.BaselinePnlDay = string.Empty;
+        _state.LastAccountPnl = null;
+        _accountPnl = null;
 
         // The mandatory-break anchors are NOT reset here either, and for a stronger reason than the
         // episode: a trader working through local midnight is in one continuous stretch, and
@@ -1245,7 +1311,12 @@ public sealed class SafetyMacro
         // Anti-tilt counters are all about the day's behaviour, so they start over with it.
         // A running episode is NOT cleared here: it is a short pause the trader is serving, and a
         // day boundary falling inside it is no reason to hand back the keys early.
-        _state.BaselineRealizedPnl = _realizedPnl;
+        // Same reasoning as BaselinePnl above, and the same treatment: a reading taken before the
+        // boundary describes the day that just ended. It escaped the 2026-08-18 bug only by luck —
+        // _realizedPnl is runtime-only, so it happened to be null at startup — and that luck runs
+        // out at a live midnight roll, where it holds the pre-midnight figure.
+        _state.BaselineRealizedPnl = null;
+        _realizedPnl = null;
         _state.HighWaterRealizedPnl = 0;
         _state.ConsecutiveLosses = 0;
         _state.LastTradeQuantity = 0;
@@ -1287,7 +1358,28 @@ public sealed class SafetyMacro
         return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
     }
 
-    private bool HasPnl() => _accountPnl.HasValue && _state.BaselinePnl.HasValue;
+    /// <summary>
+    /// Is the stored baseline usable for the day currently being measured?
+    ///
+    /// The day stamp is what makes the answer trustworthy — see
+    /// <see cref="SafetyMacroPersistedState.BaselinePnlDay"/>. A baseline carried over from another
+    /// day is not "slightly stale", it is an arbitrary offset applied to every P&amp;L decision of
+    /// the session, and it silently moved a 15-trade budget onto a winning day.
+    /// </summary>
+    private bool BaselineBelongsToToday() =>
+        _state.BaselinePnl.HasValue && _state.BaselinePnlDay == _state.TradingDay;
+
+    /// <summary>
+    /// Adopts the current reading as today's baseline. Called from the P&amp;L path and from
+    /// <see cref="Arm"/>, so the two can never disagree about what a session is measured from.
+    /// </summary>
+    private void SeedBaseline(double accountPnl)
+    {
+        _state.BaselinePnl = accountPnl;
+        _state.BaselinePnlDay = _state.TradingDay;
+    }
+
+    private bool HasPnl() => _accountPnl.HasValue && BaselineBelongsToToday();
 
     private double SessionPnl() => HasPnl() ? _accountPnl!.Value - _state.BaselinePnl!.Value : 0;
 

@@ -151,6 +151,21 @@ public sealed class SafetyMacroPersistedState
     public double? BaselinePnl { get; set; }
 
     /// <summary>
+    /// The trading day <see cref="BaselinePnl"/> was actually OBSERVED on. Empty when it was never
+    /// observed, or was written by a version that did not stamp it.
+    ///
+    /// A baseline is only meaningful for its own day, and nothing used to enforce that. On
+    /// 2026-08-18 the bridge started at 08:52, seeded the new day's baseline from the previous
+    /// day's closing P&amp;L (+46), and every session P&amp;L of the day read 46 too low — the trade
+    /// budget locked the session at a real +39 because the macro believed it was at -7.
+    ///
+    /// The stamp makes that unrepresentable rather than merely fixed: a baseline whose day does not
+    /// match is discarded and re-observed, so a state file carrying a stale one repairs itself on
+    /// the next publish instead of poisoning the whole session.
+    /// </summary>
+    public string BaselinePnlDay { get; set; } = string.Empty;
+
+    /// <summary>
     /// Last account P&amp;L seen from NinjaTrader. Persisted (throttled) so that a bridge
     /// restart resumes with a known P&amp;L instead of an inert loss rule.
     /// </summary>
