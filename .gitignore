@@ -8,6 +8,13 @@ logs/
 # Note : bin/, obj/ et dist/ sont volontairement versionnés dans ce dépôt et le restent.
 # Les ajouter ici n'aurait aucun effet — .gitignore ne s'applique pas aux fichiers déjà suivis.
 
+# Exception à la ligne ci-dessus : la sortie autonome du bridge. `npm run build:bridge` publie
+# en `--self-contained`, ce qui dépose le runtime .NET complet dans un sous-dossier propre au
+# RID — 74 Mo, en double entre `bin/` et `obj/`, entièrement régénérables. Ce qui compte est
+# la copie livrée dans `src/deck-host/bridge/`, déjà ignorée plus bas.
+src/StreamDeckBridge/bin/Release/net8.0/win-x64/
+src/StreamDeckBridge/obj/Release/net8.0/win-x64/
+
 # Hôte propriétaire (remplacement de l'application Stream Deck) : son node_modules représente
 # plusieurs milliers de fichiers, qui rendraient `git status` inexploitable.
 src/deck-host/node_modules/

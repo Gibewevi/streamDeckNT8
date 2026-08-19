@@ -1,6 +1,6 @@
 {
   "name": "deck-host",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Hôte propriétaire du cockpit NinjaTrader — remplace l'application Stream Deck d'Elgato",
   "type": "module",
   "private": true,
@@ -11,7 +11,7 @@
     "start": "node dist/host.js",
     "dev": "tsc && node dist/host.js",
     "typecheck": "tsc --noEmit",
-    "build:bridge": "dotnet publish ../StreamDeckBridge/StreamDeckBridge.csproj -c Release -o bridge",
+    "build:bridge": "dotnet publish ../StreamDeckBridge/StreamDeckBridge.csproj -c Release -r win-x64 --self-contained true -o bridge",
     "build:all": "npm run build:bridge && npm run build"
   },
   "dependencies": {

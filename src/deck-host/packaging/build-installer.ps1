@@ -70,6 +70,20 @@ foreach ($requis in @('dist\host.js', 'bridge\StreamDeckBridge.exe', 'ui\index.h
   if (-not (Test-Path (Join-Path $deckHost $requis))) { throw "Manquant apres construction : $requis" }
 }
 
+# Le bridge doit être AUTONOME. Publié dépendant du framework, il exige un runtime .NET 8 que
+# Windows n'embarque pas : l'exe se termine aussitôt, et comme le superviseur le lance en
+# `windowsHide` avec les sorties ignorées, personne ne voit le message. Côté client cela donne
+# deux voyants rouges sans explication — bridge, puis NinjaTrader dont l'état transite par lui.
+# Vécu le 19/08/2026 sur la première installation payante.
+#
+# `hostfxr.dll` est le marqueur : il n'existe que dans une publication autonome. Le contrôle est
+# ici parce qu'un `dotnet publish` lancé à la main, sans `--self-contained`, réécrit le
+# dossier sans rien signaler.
+$marqueur = Join-Path $deckHost 'bridge\hostfxr.dll'
+if (-not (Test-Path $marqueur)) {
+  throw "Le bridge n'est pas autonome : hostfxr.dll absent de bridge/. Reconstruire avec npm run build:bridge, qui publie en --self-contained."
+}
+
 # --- 2. Charge utile ---------------------------------------------------------------
 Etape "Assemblage de la charge utile"
 if (Test-Path $payload) { Remove-Item $payload -Recurse -Force }
