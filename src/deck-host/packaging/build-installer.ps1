@@ -157,6 +157,10 @@ if (Test-Path "$ntPayload/AddOns/StreamDeck/TdSwingEngine.cs") {
   throw "TdSwingEngine.cs se trouve dans AddOns/StreamDeck : ce doublon leverait un CS0101 chez le trader."
 }
 if (-not (Test-Path "$ntPayload/Indicators/TdSwingEngine.cs")) { throw "TdSwingEngine.cs manquant dans Indicators/" }
+# La liste part dans l'installateur : c'est elle qui lui permet de retirer, APRES la copie, une
+# source d'une version precedente qu'on ne livre plus. Sans liste il ne purge rien -- une source
+# orpheline vaut mieux qu'un dossier vide par accident.
+$listeSources = ($sources.Name | Sort-Object) -join ';'
 Write-Host "  add-on : $($sources.Count) sources + TdSwingEngine.cs"
 
 $taille = [math]::Round((Get-ChildItem $payload -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 1)
@@ -174,7 +178,7 @@ $iscc = @(
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "Inno Setup 6 introuvable. winget install JRSoftware.InnoSetup" }
 
-$argsIscc = @("/DAppVersion=$Version", "/DPayload=$payload", "/DNtPayload=$ntPayload", "/DOutDir=$build", "/DBitlearnUrl=$BitlearnUrl")
+$argsIscc = @("/DAppVersion=$Version", "/DPayload=$payload", "/DNtPayload=$ntPayload", "/DNtSources=$listeSources", "/DOutDir=$build", "/DBitlearnUrl=$BitlearnUrl")
 if ($suffixe) { $argsIscc += "/DFileSuffix=$suffixe" }
 & $iscc @argsIscc (Join-Path $PSScriptRoot 'TradeDeck.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC a echoue" }

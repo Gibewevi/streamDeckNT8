@@ -32,7 +32,7 @@
 #define AppUrl BitlearnUrl + "/tradedeck"
 
 #ifndef AppVersion
-  #define AppVersion "0.19.0"
+  #define AppVersion "0.20.0"
 #endif
 
 #ifndef Payload
@@ -44,6 +44,13 @@
 ; `Documents\NinjaTrader 8\bin\Custom`.
 #ifndef NtPayload
   #define NtPayload "..\..\..\build\ninjatrader"
+#endif
+
+; Noms des sources livrées, séparés par des points-virgules. Sert à retirer APRÈS la copie
+; celles d'une version précédente qu'on ne livre plus. Vide, la purge ne s'exécute pas : mieux
+; vaut une source orpheline qu'un dossier vidé parce qu'ISCC a été appelé sans cette liste.
+#ifndef NtSources
+  #define NtSources ""
 #endif
 #ifndef OutDir
   #define OutDir "..\..\..\build"
@@ -75,9 +82,21 @@ PrivilegesRequired=lowest
 Compression=lzma2/max
 SolidCompression=yes
 
-; Refuse d'installer par-dessus une version plus récente, plutôt que de la rétrograder en silence.
 VersionInfoVersion={#AppVersion}
-AppMutex=BitlearnTradeDeckSetup
+
+; Deux installateurs simultanés se disputeraient les mêmes fichiers et la même tâche planifiée.
+; `SetupMutex` et non `AppMutex` : ce dernier cherche un mutex créé par l'APPLICATION, or l'hôte
+; n'en crée aucun — son unicité vient de l'ouverture du port 8220. La directive était donc
+; inerte, et le commentaire qui l'accompagnait annonçait une protection contre la rétrogradation
+; qui n'existait nulle part. Elle est maintenant dans `InitializeSetup`.
+SetupMutex=BitlearnTradeDeckSetup
+
+; Tout le paquet est 64 bits : `node.exe` est un binaire x64, et le bridge est publié `win-x64`
+; autonome depuis la 0.16.0. Le runtime .NET 8 qu'il transporte exige Windows 10 ou plus récent.
+; Sans ces deux gardes, l'installation réussissait sur un Windows 32 bits ou un Windows 7, la
+; tâche s'enregistrait, et rien ne démarrait jamais — un refus explicite vaut mieux.
+ArchitecturesAllowed=x64compatible
+MinVersion=10.0
 
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
@@ -129,6 +148,50 @@ Filename: "powershell.exe"; \
   RunOnceId: "RetirerTacheTradeDeck"; Flags: runhidden waituntilterminated
 
 [Code]
+
+{
+  Clé de désinstallation posée par Inno pour ce paquet. Le GUID doit rester identique à `AppId`
+  ci-dessus : c'est lui qui relie une installation à ses mises à jour. Duplication assumée
+  plutôt que dérivée — `AppId` s'écrit avec une accolade échappée, et le faire passer par une
+  définition ISPP est un excellent moyen de casser l'identité du produit sur tous les postes.
+
+  Sous HKCU parce que l'installation est par utilisateur (`PrivilegesRequired=lowest`).
+}
+const
+  CLE_DESINSTALLATION =
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8E4C1B77-3D2A-4C6E-9F31-TRADEDECK0001}_is1';
+
+{
+  Refuse d'écraser une version plus récente.
+
+  Ce contrôle n'existait pas : un commentaire l'annonçait, appuyé sur `AppMutex`, qui ne fait
+  rien de tel. Rien n'empêchait donc un 0.15.0 de s'installer par-dessus un 0.19.0 sans un mot,
+  et de ramener au passage le bridge dépendant du framework — la panne des deux premiers clients.
+
+  En cas de doute on laisse passer : version illisible, clé absente, produit jamais installé. Un
+  garde-fou qui bloque une installation légitime coûte plus cher que celui qu'il remplace.
+}
+function InitializeSetup: Boolean;
+var
+  installee: String;
+  vInstallee, vPaquet: Int64;
+begin
+  Result := True;
+
+  if not RegQueryStringValue(HKEY_CURRENT_USER, CLE_DESINSTALLATION, 'DisplayVersion', installee) then Exit;
+  if not StrToVersion(installee, vInstallee) then Exit;
+  if not StrToVersion('{#AppVersion}', vPaquet) then Exit;
+  if ComparePackedVersion(vPaquet, vInstallee) >= 0 then Exit;
+
+  Result := False;
+  if not WizardSilent then
+    MsgBox('Ce poste utilise déjà TradeDeck ' + installee + ', plus récent que le '
+           + '{#AppVersion} que vous lancez.' + #13#10#13#10
+           + 'Installer une version antérieure retirerait des corrections déjà en place. Pour le '
+           + 'faire quand même, désinstallez d''abord TradeDeck depuis les paramètres de Windows.',
+           mbError, MB_OK);
+end;
+
 {
   Arrête l'hôte ET le bridge avant que le moindre fichier ne soit remplacé.
 
@@ -305,37 +368,91 @@ begin
 end;
 
 {
-  Efface les sources de la version précédente avant d'écrire les nôtres.
+  Retire les sources d'une version précédente que celle-ci ne livre plus.
 
-  Sans cela, un fichier retiré ou renommé entre deux versions resterait à compiler pour
-  toujours. Et comme une compilation NinjaScript est tout ou rien, une source orpheline qui ne
-  compile plus emporterait avec elle les indicateurs et stratégies du trader.
+  Après la copie, et non avant. Purger d'abord était plus simple, mais rien ne restaurait ces
+  fichiers si l'installation échouait ou était annulée ensuite : Inno remet les siens, pas
+  ceux-là, et le trader se retrouvait avec un NinjaTrader sans intégration, sans un mot.
 
-  Seuls les `.cs` de NOTRE dossier sont touchés. C'est aussi ce qui rattrape une copie
-  égarée de `TdSwingEngine.cs` déposée ici à la main : elle produirait un CS0101 avec
-  celle d'`Indicators\`.
+  Une source orpheline n'est pas bénigne : une compilation NinjaScript est tout ou rien, donc un
+  fichier qui ne compile plus emporte les indicateurs et stratégies du trader avec lui. C'est
+  aussi ce qui rattrape une copie égarée de `TdSwingEngine.cs` déposée ici à la main, qui
+  lèverait un CS0101 avec celle d'`Indicators\`.
+
+  Seuls les `.cs` de NOTRE dossier sont examinés, et seuls ceux absents de la liste livrée sont
+  retirés.
 }
-procedure PurgerSourcesAddOn;
+procedure PurgerOrphelinsAddOn;
 var
-  dossier: String;
+  dossier, livrees, nom: String;
   rec: TFindRec;
 begin
+  livrees := Lowercase(Trim('{#NtSources}'));
+  if livrees = '' then
+  begin
+    Log('NinjaScript : liste des sources livrees absente, purge ignoree');
+    Exit;
+  end;
+
   dossier := DossierNinjaScript('AddOns\StreamDeck');
   if not DirExists(dossier) then Exit;
+
+  { Encadrée de séparateurs aux deux bouts, sinon `TrendEngine.cs` couvrirait `Engine.cs`. }
+  livrees := ';' + livrees + ';';
+
   if not FindFirst(AddBackslash(dossier) + '*.cs', rec) then Exit;
   try
     repeat
-      DeleteFile(AddBackslash(dossier) + rec.Name);
+      nom := Lowercase(rec.Name);
+      if Pos(';' + nom + ';', livrees) = 0 then
+      begin
+        DeleteFile(AddBackslash(dossier) + rec.Name);
+        Log('NinjaScript : source orpheline retiree -> ' + rec.Name);
+      end;
     until not FindNext(rec);
   finally
     FindClose(rec);
   end;
 end;
 
+{
+  L'hôte a-t-il répondu après l'installation ?
+
+  `register-task.ps1` sonde le port 8220 pendant vingt secondes et écrit son verdict ici.
+  `Start-ScheduledTask` est un ordre, pas une garantie : sans cette vérification l'installateur
+  annonçait une réussite alors que l'hôte était mort au démarrage, et le client se retrouvait
+  devant une page « aucun poste lié » sans la moindre piste.
+
+  Marqueur absent — script d'une version antérieure, écriture refusée — on ne dit rien :
+  alarmer à tort coûte plus cher que de se taire.
+}
+function HoteADemarre: Boolean;
+var
+  brut: AnsiString;
+  texte: String;
+begin
+  Result := True;
+  if not LoadStringFromFile(ExpandConstant('{app}\dernier-demarrage.txt'), brut) then Exit;
+  texte := Trim(brut);
+  Result := Copy(texte, 1, 2) <> 'KO';
+end;
+
 { Ce que le trader doit savoir en partant, et rien de plus. }
-procedure MessageNinjaTrader;
+procedure MessageDeFin;
 begin
   if WizardSilent then Exit;
+
+  { L'hôte d'abord : sans lui, l'état de l'intégration NinjaTrader n'a aucun intérêt. }
+  if not HoteADemarre then
+  begin
+    MsgBox('TradeDeck est installé, mais il n''a pas démarré.' + #13#10#13#10
+           + 'Rien ne répond sur le port 8220 vingt secondes après l''installation. Les deux '
+           + 'causes habituelles : un antivirus qui a mis node.exe en quarantaine, ou un autre '
+           + 'programme qui occupe déjà ce port.' + #13#10#13#10
+           + 'Le journal de démarrage se trouve dans :' + #13#10
+           + ExpandConstant('{userappdata}\StreamDeckTrader\logs'), mbError, MB_OK);
+    Exit;
+  end;
 
   if NinjaTraderPresent then
     MsgBox('L''intégration NinjaTrader a été installée.' + #13#10#13#10 +
@@ -354,13 +471,11 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
-    MessageNinjaTrader;
+    if NinjaTraderPresent then PurgerOrphelinsAddOn;
+    MessageDeFin;
     Exit;
   end;
   if CurStep <> ssInstall then Exit;
-
-  { Avant la copie : les fichiers de cette version arrivent ensuite, dans un dossier propre. }
-  if NinjaTraderPresent then PurgerSourcesAddOn;
 
   dossier := ExpandConstant('{userappdata}\StreamDeckTrader');
   config := AddBackslash(dossier) + 'bitlearn.json';
@@ -382,7 +497,10 @@ begin
 
   if CompareText(precedente, '{#BitlearnUrl}') <> 0 then
   begin
+    { Les deux logements : le jeton a quitté le profil itinérant en 0.20.0, et un poste qui
+      n'a pas encore été migré porte encore l'ancien. En oublier un le ferait revivre. }
     DeleteFile(AddBackslash(dossier) + 'device.json');
+    DeleteFile(ExpandConstant('{localappdata}\StreamDeckTrader\device.json'));
     Log('Serveur Bitlearn : ' + precedente + ' -> {#BitlearnUrl}, le poste sera reapparie');
   end;
 end;
@@ -394,6 +512,8 @@ Type: filesandordirs; Name: "{app}\dist"
 Type: filesandordirs; Name: "{app}\node_modules"
 Type: filesandordirs; Name: "{app}\bridge"
 Type: filesandordirs; Name: "{app}\ui"
+; Écrit par `register-task.ps1`, donc inconnu du journal de désinstallation d'Inno.
+Type: files; Name: "{app}\dernier-demarrage.txt"
 
 ; L'add-on est retiré de NinjaTrader : le laisser ferait compiler à chaque démarrage un add-on
 ; qui cherche un bridge désinstallé.

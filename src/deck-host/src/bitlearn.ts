@@ -11,7 +11,7 @@
  * fonctionner sur la dernière disposition connue. Seul un `401` explicite signifie quelque chose,
  * et même lui n'arrête pas l'envoi d'ordres : il coupe la synchronisation, pas le trading.
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { createServer } from 'http';
 import { randomBytes } from 'crypto';
@@ -66,10 +66,25 @@ function resolveBaseUrl(): string {
 const BASE_URL = resolveBaseUrl();
 
 /**
- * Le jeton vit à côté de l'état de l'hôte, pas dans le dossier d'installation : une mise à jour
- * qui remplace `%LOCALAPPDATA%\TradeDeck` ne doit pas obliger à ré-appairer le poste.
+ * Le jeton vit hors du dossier d'installation : une mise à jour qui remplace
+ * `%LOCALAPPDATA%\TradeDeck` ne doit pas obliger à ré-appairer le poste.
+ *
+ * Et hors du profil **itinérant**, contrairement au reste de l'état. `%APPDATA%` suit
+ * l'utilisateur d'une machine à l'autre sur un profil itinérant : le jeton y voyageait avec lui,
+ * deux postes physiques se retrouvaient à partager une seule identité d'appareil, et la limite de
+ * trois appareils cessait de vouloir dire quelque chose. La disposition et les journaux ont de
+ * bonnes raisons de suivre l'utilisateur — ce jeton-là, non : il désigne une machine.
  */
-const TOKEN_PATH = join(DEFAULT_DATA_DIR, 'device.json');
+const TOKEN_PATH = join(process.env.LOCALAPPDATA || DEFAULT_DATA_DIR, 'StreamDeckTrader', 'device.json');
+
+/**
+ * L'ancien logement, itinérant. Lu une seule fois, puis déplacé.
+ *
+ * Sans cette reprise, la mise à jour désapparierait tous les postes existants. Et l'ancien fichier
+ * est bien **supprimé** après recopie : le laisser en ferait la source qu'un autre poste du même
+ * profil lirait, et le défaut ne serait pas corrigé mais doublé.
+ */
+const TOKEN_PATH_ITINERANT = join(DEFAULT_DATA_DIR, 'device.json');
 
 /**
  * Cadence du battement d'état.
@@ -192,10 +207,36 @@ export class BitlearnClient {
     return this.#token !== null;
   }
 
-  #loadToken(): string | null {
-    if (!existsSync(TOKEN_PATH)) return null;
+  /**
+   * Déplace le jeton du profil itinérant vers le profil local, une fois.
+   *
+   * Rien ici n'a le droit d'empêcher le démarrage : un déplacement impossible — fichier verrouillé,
+   * dossier en lecture seule — laisse simplement le jeton où il est, et l'ancien chemin reste lu.
+   */
+  #migrerJeton(): void {
+    if (existsSync(TOKEN_PATH) || !existsSync(TOKEN_PATH_ITINERANT)) return;
     try {
-      const stored = JSON.parse(readFileSync(TOKEN_PATH, 'utf8')) as StoredDevice;
+      mkdirSync(dirname(TOKEN_PATH), { recursive: true });
+      writeFileSync(TOKEN_PATH, readFileSync(TOKEN_PATH_ITINERANT, 'utf8'), 'utf8');
+      unlinkSync(TOKEN_PATH_ITINERANT);
+      log.event('Bitlearn', 'Jeton d\'appareil déplacé hors du profil itinérant', { vers: TOKEN_PATH });
+    } catch (err) {
+      log.eventWarn('Bitlearn', 'Jeton d\'appareil non déplacé — l\'ancien emplacement reste utilisé', {
+        raison: (err as Error)?.message,
+      });
+    }
+  }
+
+  #loadToken(): string | null {
+    this.#migrerJeton();
+
+    // L'ancien chemin sert de repli tant que le déplacement n'a pas pu se faire : sans lui, un
+    // poste dont le profil refuse l'écriture se retrouverait désapparié à la mise à jour.
+    const chemin = existsSync(TOKEN_PATH) ? TOKEN_PATH : TOKEN_PATH_ITINERANT;
+    if (!existsSync(chemin)) return null;
+
+    try {
+      const stored = JSON.parse(readFileSync(chemin, 'utf8')) as StoredDevice;
       return typeof stored?.token === 'string' && stored.token ? stored.token : null;
     } catch (err) {
       // Un fichier illisible ne doit pas empêcher l'hôte de démarrer : le poste se comporte

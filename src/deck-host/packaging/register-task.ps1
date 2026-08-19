@@ -172,11 +172,59 @@ puis relancer cet installateur.
 
 # L'application Elgato occupe l'unique place plugin du bridge et se dispute le boîtier : son
 # démarrage automatique doit céder la place. L'hôte la ferme aussi à chaque lancement.
+#
+# On filtre sur la COMMANDE et non sur le nom de la valeur. Le code cherchait « Elgato Stream Deck »
+# et « StreamDeck » ; sur une installation Elgato courante la valeur s'appelle « Stream Deck », avec
+# une espace. Aucun des deux noms ne correspondait, et ce nettoyage n'a donc jamais rien retiré :
+# l'application redémarrait à chaque ouverture de session et reprenait la place plugin du bridge,
+# exactement la panne que ce bloc est censé prévenir. Un nom de valeur est un choix de l'éditeur,
+# un chemin d'exécutable est un fait.
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-foreach ($nom in 'Elgato Stream Deck', 'StreamDeck') {
-  if (Get-ItemProperty -Path $run -Name $nom -ErrorAction SilentlyContinue) {
-    Remove-ItemProperty -Path $run -Name $nom -ErrorAction SilentlyContinue
+$cle = Get-Item $run -ErrorAction SilentlyContinue
+if ($cle) {
+  foreach ($nom in $cle.Property) {
+    $commande = "$((Get-ItemProperty -Path $run -Name $nom -ErrorAction SilentlyContinue).$nom)"
+    # `-like` et non `-match` : dans une regex .NET, \S est la classe « non-espace », donc
+    # 'Elgato\StreamDeck' ne désigne pas le chemin qu'on croit lire. Vérifié : le motif ne
+    # correspondait pas à la vraie valeur. Le joker traite l'antislash littéralement.
+    if ($commande -like '*\Elgato\StreamDeck\StreamDeck.exe*') {
+      Remove-ItemProperty -Path $run -Name $nom -ErrorAction SilentlyContinue
+      Write-Output "Demarrage automatique Elgato retire : $nom"
+    }
   }
 }
 
 Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+
+<#
+Sonde de fin d'installation.
+
+`Start-ScheduledTask` est un ordre, pas une garantie : port 8220 déjà pris, node.exe mis en
+quarantaine par un antivirus, profil en lecture seule — l'hôte peut mourir au démarrage sans que
+rien ne le signale. L'installateur annonçait alors une réussite, et le client se retrouvait devant
+une page « aucun poste lié » sans la moindre piste.
+
+Le résultat est écrit sur disque plutôt que rendu en code de sortie : Inno ignore les codes de
+sortie de ses entrées [Run], et le fichier reste lisible après coup, pendant un dépannage.
+
+Vingt secondes au plus, et on sort dès que le port répond : dans le cas normal la sonde coûte
+trois à cinq secondes.
+#>
+$fin = (Get-Date).AddSeconds(20)
+$repond = $false
+do {
+  try {
+    $sonde = New-Object Net.Sockets.TcpClient
+    $sonde.Connect('127.0.0.1', 8220)
+    $sonde.Close()
+    $repond = $true
+  } catch {
+    Start-Sleep -Milliseconds 700
+  }
+} while (-not $repond -and (Get-Date) -lt $fin)
+
+# ASCII : ce fichier est relu par le code Pascal de l'installateur, une BOM s'y lirait comme des
+# caracteres parasites en tete.
+$etat = if ($repond) { 'OK' } else { 'KO' }
+Set-Content -Path (Join-Path $InstallDir 'dernier-demarrage.txt') `
+  -Value "$etat $(Get-Date -Format 's')" -Encoding ascii
