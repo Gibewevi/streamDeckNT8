@@ -11,6 +11,11 @@
 
 param(
   [string]$Version,
+  # Serveur Bitlearn que le paquet vise. Il finit à trois endroits qui doivent s'accorder : le
+  # fichier écrit par l'installateur, le repli du lanceur, et le nom du .exe produit. Les laisser
+  # se régler séparément reviendrait à pouvoir publier un paquet de développement qui ouvre
+  # la production.
+  [string]$BitlearnUrl = 'https://bitlearn.fr',
   # Chemin d'un certificat .pfx. Sans lui, l'installateur n'est PAS signé : voir l'avertissement
   # en fin de script.
   [string]$SignPfx,
@@ -29,6 +34,27 @@ function Etape($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
 if (-not $Version) {
   $Version = (Get-Content (Join-Path $deckHost 'package.json') -Raw | ConvertFrom-Json).version
 }
+
+# Ramenée à une origine : `https://dev.bitlearn.fr/tradedeck/` et `https://dev.bitlearn.fr`
+# doivent produire le même paquet. Un chemin résiduel donnerait
+# `.../tradedeck/tradedeck/configuration`, soit un 404 dont la cause serait invisible côté poste.
+$PRODUCTION = 'https://bitlearn.fr'
+try { $uri = [uri]$BitlearnUrl } catch { throw "BitlearnUrl illisible : $BitlearnUrl" }
+if (-not $uri.IsAbsoluteUri -or $uri.Scheme -notin @('http', 'https')) {
+  throw "BitlearnUrl doit être une adresse http(s) absolue : $BitlearnUrl"
+}
+$BitlearnUrl = '{0}://{1}' -f $uri.Scheme, $uri.Authority
+
+# Un paquet qui ne vise pas la production porte sa cible dans son nom. Deux .exe de même
+# version pointant deux serveurs sont autrement indiscernables une fois téléchargés, et se
+# tromper des deux mène à un 404 muet. `-dev` pour dev.bitlearn.fr, `-localhost` en local.
+$suffixe = ''
+if ($BitlearnUrl -ne $PRODUCTION) {
+  $etiquette = ($uri.Host -split '\.')[0].ToLowerInvariant() -replace '[^a-z0-9]', ''
+  if (-not $etiquette) { $etiquette = 'autre' }
+  $suffixe = "-$etiquette"
+}
+Write-Host "Serveur Bitlearn visé : $BitlearnUrl" -ForegroundColor Yellow
 
 # --- 1. Construction ---------------------------------------------------------------
 if (-not $SkipBuild) {
@@ -53,7 +79,18 @@ foreach ($d in @('dist', 'ui', 'bridge')) {
   Copy-Item (Join-Path $deckHost $d) (Join-Path $payload $d) -Recurse -Force
 }
 Copy-Item (Join-Path $deckHost 'package.json') $payload -Force
-Copy-Item (Join-Path $PSScriptRoot 'TradeDeck.vbs') $payload -Force
+# Le lanceur part avec le repli de SA cible, pas avec la production en dur : un paquet de
+# développement dont le fichier de configuration aurait disparu ouvrirait sinon bitlearn.fr.
+# L'ancre est vérifiée avant substitution — une substitution muette produirait un paquet
+# annoncé comme dev et repliant sur la production, l'exacte panne qu'on corrige ici.
+#
+# Lecture et écriture en UTF-8 SANS BOM, par .NET : `Set-Content -Encoding UTF8` en PowerShell
+# 5.1 pose une BOM, et wscript.exe la lit comme trois caractères parasites en tête de script.
+$ancre = 'Const REPLI = "https://bitlearn.fr"'
+$lanceur = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'TradeDeck.vbs'), [System.Text.Encoding]::UTF8)
+if (-not $lanceur.Contains($ancre)) { throw "Repli introuvable dans TradeDeck.vbs : la substitution du serveur ne s'applique plus" }
+$lanceur = $lanceur.Replace($ancre, 'Const REPLI = "' + $BitlearnUrl + '"')
+[System.IO.File]::WriteAllText((Join-Path $payload 'TradeDeck.vbs'), $lanceur, (New-Object System.Text.UTF8Encoding($false)))
 # Lanceur silencieux appelé par la tâche planifiée : sans lui, Node ouvre une fenêtre console.
 Copy-Item (Join-Path $PSScriptRoot 'run-host.vbs') $payload -Force
 
@@ -91,12 +128,15 @@ $iscc = @(
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "Inno Setup 6 introuvable. winget install JRSoftware.InnoSetup" }
 
-& $iscc "/DAppVersion=$Version" "/DPayload=$payload" "/DOutDir=$build" (Join-Path $PSScriptRoot 'TradeDeck.iss')
+$argsIscc = @("/DAppVersion=$Version", "/DPayload=$payload", "/DOutDir=$build", "/DBitlearnUrl=$BitlearnUrl")
+if ($suffixe) { $argsIscc += "/DFileSuffix=$suffixe" }
+& $iscc @argsIscc (Join-Path $PSScriptRoot 'TradeDeck.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC a echoue" }
 
 $exe = Get-ChildItem $build -Filter '*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 $mo = [math]::Round($exe.Length / 1MB, 1)
 Write-Host "`nInstallateur : $($exe.FullName) ($mo Mo)" -ForegroundColor Green
+Write-Host "Serveur visé : $BitlearnUrl" -ForegroundColor Green
 
 # --- 4. Signature ------------------------------------------------------------------
 if ($SignPfx) {

@@ -8,7 +8,13 @@
 ' Sonde de vie, pas destination : l'hôte sert encore cette page, c'est le moyen le plus simple de
 ' savoir s'il répond avant d'envoyer l'utilisateur sur Bitlearn.
 Const SONDE = "http://127.0.0.1:8220"
-Const PRODUCTION = "https://bitlearn.fr"
+
+' Repli quand bitlearn.json est absent ou illisible. L'installateur écrit ce fichier avec le
+' serveur pour lequel il a été construit ; la valeur ci-dessous est remplacée à la
+' construction par `build-installer.ps1`, pour qu'un paquet de développement ne puisse pas
+' retomber sur la production — le trader y arriverait sur un 404 sans rien qui le relie à
+' l'installateur qu'il a lancé.
+Const REPLI = "https://bitlearn.fr"
 
 Set sh = CreateObject("WScript.Shell")
 
@@ -38,7 +44,7 @@ sh.Run ServeurBitlearn() & "/tradedeck/configuration", 1, False
 ' le fichier. Sur un poste de développement les deux divergeaient : la synchronisation marchait
 ' vers le serveur local, et le raccourci ouvrait une page absente en production.
 Function ServeurBitlearn()
-  ServeurBitlearn = PRODUCTION
+  ServeurBitlearn = REPLI
   On Error Resume Next
 
   chemin = sh.ExpandEnvironmentStrings("%APPDATA%") & "\StreamDeckTrader\bitlearn.json"

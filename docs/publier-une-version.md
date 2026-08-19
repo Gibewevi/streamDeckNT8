@@ -32,7 +32,7 @@ qui regarde le marché et non plus la comptabilité de la séance. Elle n'en ref
 — elle affiche le sens et journalise ce qu'elle aurait refusé, le temps de calibrer le seuil sur une
 vraie séance. · `0.11.0` la Tendance perd son mode Heikin Ashi : une seule méthode, la structure de
 marché. La couleur d'une bougie HA est une statistique à une barre, elle bascule à chaque pullback
-et n'offre rien à régler — deux méthodes à expliquer pour une qui répond. · `0.12.0` la Tendance devient armable : un maintien de 1,5 s sur la touche, et les entrées à contre-sens sont refusées — clôturer et réduire restent toujours possibles. Optionnel, désactivé par défaut. Corrige au passage le défaut qui la faisait se périmer deux minutes après chaque chargement (`BarsBack` maintient une fenêtre glissante, donc `Bars.Count` ne bouge jamais). · `0.13.0` sanctions et journal fidèles à ce qui se passe réellement · `0.14.0` **le journal part scellé.** Chaque ligne des trois spools porte un compteur et un HMAC chaîné, ce qui rend détectables l'édition, la suppression, l'insertion et le réordonnancement d'un spool — c'est la condition pour que Bitlearn accorde de l'XP à une séance sans que l'XP se fabrique au bloc-notes. Partent aussi le jour de bourse sur chaque ligne, les limites en vigueur sur `guard.armed`, et un troisième spool d'échantillons de solde. Un poste appairé avant cette version reçoit sa clé au battement, une seule fois.
+et n'offre rien à régler — deux méthodes à expliquer pour une qui répond. · `0.12.0` la Tendance devient armable : un maintien de 1,5 s sur la touche, et les entrées à contre-sens sont refusées — clôturer et réduire restent toujours possibles. Optionnel, désactivé par défaut. Corrige au passage le défaut qui la faisait se périmer deux minutes après chaque chargement (`BarsBack` maintient une fenêtre glissante, donc `Bars.Count` ne bouge jamais). · `0.13.0` sanctions et journal fidèles à ce qui se passe réellement · `0.14.0` **le journal part scellé.** Chaque ligne des trois spools porte un compteur et un HMAC chaîné, ce qui rend détectables l'édition, la suppression, l'insertion et le réordonnancement d'un spool — c'est la condition pour que Bitlearn accorde de l'XP à une séance sans que l'XP se fabrique au bloc-notes. Partent aussi le jour de bourse sur chaque ligne, les limites en vigueur sur `guard.armed`, et un troisième spool d'échantillons de solde. Un poste appairé avant cette version reçoit sa clé au battement, une seule fois. · `0.15.0` **l'installateur vise le serveur pour lequel il a été construit.** Il écrit `bitlearn.json`, que l'hôte et le raccourci lisaient déjà sans que rien ne l'écrive jamais : un client servi par dev.bitlearn.fr installait un poste qui ouvrait bitlearn.fr, où les pages TradeDeck n'existent pas — 404, sans rien à l'écran pour relier la panne à l'adresse.
 
 ## Où vit le numéro
 
@@ -73,6 +73,38 @@ powershell -ExecutionPolicy Bypass -File packaging/build-installer.ps1
 rm -f ../../../Bitlearn/private/tradedeck/BitlearnTradeDeck-Setup-*.exe
 cp ../../build/BitlearnTradeDeck-Setup-0.8.0.exe ../../../Bitlearn/private/tradedeck/
 ```
+
+## Un paquet pour dev.bitlearn.fr
+
+```bash
+powershell -ExecutionPolicy Bypass -File packaging/build-installer.ps1 -BitlearnUrl https://dev.bitlearn.fr
+# → build/BitlearnTradeDeck-Setup-0.15.0-dev.exe
+```
+
+Le serveur visé traverse tout le paquet : l'installateur écrit
+`%APPDATA%\StreamDeckTrader\bitlearn.json`, que l'hôte **et** le raccourci du bureau lisent, et le
+repli du lanceur est réécrit à la construction. Le suffixe `-dev` du nom de fichier n'est pas
+cosmétique : deux `.exe` de même version pointant deux serveurs sont indiscernables une fois
+téléchargés, et se tromper des deux mène à un 404 sans cause visible.
+
+Ce paquet se dépose dans le dossier de l'environnement **dev**, jamais dans celui de production :
+
+```bash
+EXE=BitlearnTradeDeck-Setup-0.15.0-dev.exe
+VPS=debian@vps-a7e6d37c.vps.ovh.ca
+DEST=/home/bitlearn/bitlearn_dev/private/tradedeck
+
+scp -P 50000 build/$EXE $VPS:/tmp/
+ssh -p 50000 $VPS "sudo -u bitlearn bash -c 'rm -f $DEST/*.exe && mv /tmp/$EXE $DEST/'"
+```
+
+**Changer de serveur désapparie le poste.** Le jeton d'appareil ne vaut que pour le serveur qui l'a
+émis, et l'hôte se considère appairé tant qu'il existe : le garder produirait un poste
+silencieusement désynchronisé — 401 à chaque appel, aucune nouvelle demande d'appairage, et le deck
+qui continue de trader comme si de rien n'était. L'installateur l'efface donc quand la cible change,
+et le navigateur redemande une autorisation au démarrage suivant. Un fichier `bitlearn.json` absent
+compte pour la production : sans cette équivalence, la première mise à jour vers 0.15.0
+désapparierait tous les postes déjà installés.
 
 ## Le piège : Release contre Debug
 

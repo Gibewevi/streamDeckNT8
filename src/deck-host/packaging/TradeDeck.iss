@@ -9,12 +9,32 @@
 
 #define AppName        "Bitlearn TradeDeck"
 #define AppPublisher   "Bitlearn"
-#define AppUrl         "https://bitlearn.fr/tradedeck"
 #define ExeBase        "BitlearnTradeDeck-Setup"
 
-#ifndef AppVersion
-  #define AppVersion "0.14.0"
+; Serveur Bitlearn que ce paquet vise. L'installateur l'écrit dans
+; %APPDATA%\StreamDeckTrader\bitlearn.json — la seule source lue à la fois par l'hôte et par le
+; raccourci du bureau. Sans elle, les deux retombent sur la production, quelle que soit la
+; provenance du téléchargement.
+;
+; Ne pas surcharger à la main : `build-installer.ps1 -BitlearnUrl https://dev.bitlearn.fr` aligne
+; aussi le repli du lanceur et le nom du fichier produit.
+#ifndef BitlearnUrl
+  #define BitlearnUrl "https://bitlearn.fr"
 #endif
+
+; Suffixe de nom pour un paquet qui ne vise pas la production. Deux .exe de même version pointant
+; deux serveurs différents sont autrement impossibles à distinguer dans un dossier de
+; téléchargements — et se tromper des deux mène à un 404 muet.
+#ifndef FileSuffix
+  #define FileSuffix ""
+#endif
+
+#define AppUrl BitlearnUrl + "/tradedeck"
+
+#ifndef AppVersion
+  #define AppVersion "0.15.0"
+#endif
+
 #ifndef Payload
   #define Payload "..\..\..\build\payload"
 #endif
@@ -35,7 +55,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\assets\TradeDeck.ico
 OutputDir={#OutDir}
-OutputBaseFilename={#ExeBase}-{#AppVersion}
+OutputBaseFilename={#ExeBase}-{#AppVersion}{#FileSuffix}
 SetupIconFile=assets\TradeDeck.ico
 WizardStyle=modern
 
@@ -113,6 +133,100 @@ begin
     { L'échec du lancement de PowerShell n'est pas bloquant : si rien ne tournait, la copie
       passera de toute façon. Inno signalera lui-même un fichier verrouillé le cas échéant. }
     Log('Arret prealable impossible a lancer');
+end;
+
+{
+  Fixe le serveur Bitlearn du poste, avant que quoi que ce soit ne démarre.
+
+  L'hôte et le raccourci lisent tous deux %APPDATA%\StreamDeckTrader\bitlearn.json, et
+  retombent sur la production quand il manque. Rien ne l'écrivait : un client servi par
+  dev.bitlearn.fr installait donc un poste qui visait bitlearn.fr, où les pages TradeDeck
+  n'existent pas. Il y arrivait sur un 404, sans le moindre indice que l'adresse était en
+  cause. Constaté le 19/08/2026.
+
+  Écrit en ssInstall et non en ssPostInstall : `register-task.ps1` lance la tâche à la
+  fin de son enregistrement, et l'hôte lit sa cible une seule fois, au démarrage. Un fichier
+  écrit après lui ne serait pris en compte qu'au redémarrage suivant.
+
+  Le jeton d'appareil est effacé quand la cible change : il ne vaut que pour le serveur qui l'a
+  émis, et l'hôte se considère appairé tant qu'il existe. Le garder produirait un
+  poste silencieusement désynchronisé — 401 à chaque appel, aucune nouvelle demande
+  d'appairage, et le deck qui continue de trader comme si de rien n'était. Le perdre coûte
+  un clic au prochain démarrage.
+
+  Le journal en attente n'est pas touché : ces lignes sont le travail du trader, pas un cache.
+  Scellées avec la clé de l'ancien serveur, elles tomberont au palier non vérifiable sur
+  le nouveau — dégradé, jamais perdu.
+}
+
+{ La valeur de "url" dans le fichier de configuration. Écrit par cet installateur, mais aussi
+  à la main sur un poste de développement : on cherche la clé, pas une mise en forme. }
+function UrlLue(const contenu: String): String;
+var
+  reste: String;
+  p: Integer;
+begin
+  Result := '';
+  p := Pos('"url"', contenu);
+  if p = 0 then Exit;
+  reste := Copy(contenu, p + 5, Length(contenu));
+  p := Pos(':', reste);
+  if p = 0 then Exit;
+  reste := Copy(reste, p + 1, Length(reste));
+  p := Pos('"', reste);
+  if p = 0 then Exit;
+  reste := Copy(reste, p + 1, Length(reste));
+  p := Pos('"', reste);
+  if p = 0 then Exit;
+  Result := Copy(reste, 1, p - 1);
+end;
+
+{ La cible actuelle du poste. Fichier absent = production : c'est le repli codé en dur dans
+  l'hôte comme dans le lanceur, donc bien ce que le poste visait jusqu'ici. Sans cette
+  équivalence, la première mise à jour vers un installateur qui écrit le fichier
+  désapparierait tous les postes déjà installés. }
+function CibleActuelle(const chemin: String): String;
+var
+  brut: AnsiString;
+  contenu, url: String;
+begin
+  Result := 'https://bitlearn.fr';
+  if not FileExists(chemin) then Exit;
+  if not LoadStringFromFile(chemin, brut) then Exit;
+  contenu := brut;
+  url := Trim(UrlLue(contenu));
+  if url <> '' then Result := url;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  dossier, config, precedente: String;
+begin
+  if CurStep <> ssInstall then Exit;
+
+  dossier := ExpandConstant('{userappdata}\StreamDeckTrader');
+  config := AddBackslash(dossier) + 'bitlearn.json';
+  precedente := CibleActuelle(config);
+
+  if not ForceDirectories(dossier) then
+  begin
+    { Non bloquant : un poste sans fichier retombe sur la production, soit exactement l'état
+      d'avant. Tracé dans le journal d'installation, rien n'est montré au trader. }
+    Log('bitlearn.json : dossier d etat impossible a creer');
+    Exit;
+  end;
+
+  if not SaveStringToFile(config, '{"url": "{#BitlearnUrl}"}' + #13#10, False) then
+  begin
+    Log('bitlearn.json : ecriture impossible');
+    Exit;
+  end;
+
+  if CompareText(precedente, '{#BitlearnUrl}') <> 0 then
+  begin
+    DeleteFile(AddBackslash(dossier) + 'device.json');
+    Log('Serveur Bitlearn : ' + precedente + ' -> {#BitlearnUrl}, le poste sera reapparie');
+  end;
 end;
 
 [UninstallDelete]
