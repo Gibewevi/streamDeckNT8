@@ -32,7 +32,7 @@
 #define AppUrl BitlearnUrl + "/tradedeck"
 
 #ifndef AppVersion
-  #define AppVersion "0.18.0"
+  #define AppVersion "0.19.0"
 #endif
 
 #ifndef Payload
@@ -218,14 +218,68 @@ begin
   if url <> '' then Result := url;
 end;
 
+var
+  RacineNinjaScript: String;
+
 {
-  Dossier NinjaScript du poste. La constante Inno userdocs, et non %USERPROFILE% suivi de
-  Documents en dur : ce dossier se redirige — OneDrive le fait par défaut sur beaucoup de
-  machines neuves — et seule la constante suit la redirection.
+  La racine `bin\Custom` telle que NinjaTrader la publie lui-même.
+
+  Elle vit dans `HKCU\Software\NinjaTrader, LLC\NinjaTrader\cmp<empreinte>`, une valeur par
+  sous-clé : les noms de clés sont des empreintes, il faut donc les parcourir. Mesuré :
+  476 sous-clés, 211 ms, et le résultat est mis en cache pour les dix-sept fichiers déposés.
+
+  On le demande à la plateforme plutôt que de le déduire de Documents : ce n'est l'emplacement
+  par défaut, rien n'oblige NinjaTrader à y rester, et se tromper de dossier ferait un dépôt
+  invisible — l'add-on à côté de là où NinjaScript compile.
+
+  Plusieurs correspondances = plusieurs instances NinjaTrader. On prend la première : rien ne
+  permet de désigner la bonne, et le message de fin dira ce qui a été fait.
+}
+function RacineDeclareeParNinjaTrader: String;
+var
+  cles: TArrayOfString;
+  i: Integer;
+  valeur: String;
+begin
+  Result := '';
+  if not RegGetSubkeyNames(HKEY_CURRENT_USER, 'Software\NinjaTrader, LLC\NinjaTrader', cles) then Exit;
+
+  for i := 0 to GetArrayLength(cles) - 1 do
+  begin
+    if RegQueryStringValue(HKEY_CURRENT_USER,
+        'Software\NinjaTrader, LLC\NinjaTrader\' + cles[i], 'PERSONAL_ROOT_BIN_CUSTOM', valeur) then
+    begin
+      Result := RemoveBackslashUnlessRoot(Trim(valeur));
+      Exit;
+    end;
+  end;
+end;
+
+{
+  Dossier NinjaScript du poste, résolu une fois pour toutes.
+
+  Repli sur la constante Inno userdocs — et non sur %USERPROFILE% suivi de Documents en dur —
+  quand la plateforme ne déclare rien, ce qui arrive lorsqu'elle est installée sans avoir
+  jamais été lancée : ce dossier se redirige, OneDrive le fait par défaut sur beaucoup de
+  machines neuves, et seule la constante suit la redirection.
 }
 function DossierNinjaScript(Param: String): String;
 begin
-  Result := AddBackslash(ExpandConstant('{userdocs}\NinjaTrader 8\bin\Custom')) + Param;
+  if RacineNinjaScript = '' then
+  begin
+    RacineNinjaScript := RacineDeclareeParNinjaTrader;
+    if RacineNinjaScript <> '' then
+      Log('NinjaScript : racine declaree par NinjaTrader -> ' + RacineNinjaScript)
+    else
+    begin
+      RacineNinjaScript := ExpandConstant('{userdocs}\NinjaTrader 8\bin\Custom');
+      { Trace dans le journal d'installation : les deux chemins coincident sur un poste par
+        defaut, et l'on ne saurait pas autrement lequel a servi. }
+      Log('NinjaScript : rien de declare, repli sur Documents -> ' + RacineNinjaScript);
+    end;
+  end;
+
+  Result := AddBackslash(RacineNinjaScript) + Param;
 end;
 
 var
@@ -244,7 +298,7 @@ function NinjaTraderPresent: Boolean;
 begin
   if not NtVerifie then
   begin
-    NtDetecte := DirExists(ExpandConstant('{userdocs}\NinjaTrader 8\bin\Custom'));
+    NtDetecte := DirExists(RemoveBackslashUnlessRoot(DossierNinjaScript('')));
     NtVerifie := True;
   end;
   Result := NtDetecte;

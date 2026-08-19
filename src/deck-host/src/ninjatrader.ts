@@ -48,14 +48,29 @@ const FICHIER_INDICATEUR = 'TdSwingEngine.cs';
 const FRAICHEUR_MS = 60_000;
 
 /**
+ * Valeur sous laquelle NinjaTrader publie sa racine `bin\Custom`, dans
+ * `HKCU\Software\NinjaTrader, LLC\NinjaTrader\cmp<empreinte>`.
+ *
+ * C'est la plateforme elle-même qui l'écrit, une valeur par sous-clé. On la lui demande plutôt
+ * que de la déduire : le dossier de données n'est pas toujours sous Documents, et rien
+ * n'obligerait NinjaTrader à l'y laisser.
+ */
+const CLE_RACINE = 'PERSONAL_ROOT_BIN_CUSTOM';
+
+/**
  * Repli immédiat, remplacé dès que la base de registre a répondu.
  *
  * `%USERPROFILE%\Documents` est faux sur un poste où OneDrive a repris le dossier Documents, ce
- * qui est le réglage par défaut de beaucoup de machines neuves. L'installateur, lui, utilise la
- * constante Inno `{userdocs}`, qui suit la redirection : les deux doivent désigner le même
- * dossier, sans quoi l'hôte annoncerait « add-on non déposé » à côté de fichiers bien présents.
+ * qui est le réglage par défaut de beaucoup de machines neuves. L'installateur suit la même
+ * cascade : les deux doivent désigner le même dossier, sans quoi l'hôte annoncerait « add-on non
+ * déposé » à côté de fichiers bien présents.
  */
 let racine = join(process.env.USERPROFILE || '', 'Documents', 'NinjaTrader 8', 'bin', 'Custom');
+
+/** D'où vient `racine`. Dans le journal de démarrage : sans elle, impossible de savoir si la
+ *  plateforme a été interrogée ou si l'on a deviné — les deux donnent le même chemin sur un
+ *  poste par défaut, et divergent silencieusement partout ailleurs. */
+let origineRacine = 'repli %USERPROFILE%';
 
 let dernierConstat: EtatAddOn = 'UNKNOWN';
 let constateA = 0;
@@ -65,20 +80,24 @@ function etendreVariables(valeur: string): string {
   return valeur.replace(/%([^%]+)%/g, (tout, nom: string) => process.env[nom] ?? tout);
 }
 
+/** Pose la racine et invalide le constat fait sur la précédente, qui visait un autre dossier. */
+function adopterRacine(resolue: string, origine: string): void {
+  origineRacine = origine;
+  if (resolue === racine) return;
+  racine = resolue;
+  constateA = 0;
+}
+
 /**
- * Aligne la racine sur le dossier Documents réel, celui que lit l'Explorateur — et l'installateur.
- *
- * Lancé sans être attendu : le démarrage ne dépend pas de `reg.exe`, et le repli couvre les
- * quelques dizaines de millisecondes où la réponse n'est pas encore là.
+ * Le dossier Documents réel, celui que lit l'Explorateur. Deuxième recours seulement : il ne
+ * décrit où vit NinjaTrader que tant que NinjaTrader s'y trouve.
  */
-export function localiserNinjaScript(apres: () => void): void {
+function parLeDossierDocuments(apres: () => void): void {
   execFile(
     'reg',
     ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders', '/v', 'Personal'],
     { timeout: 2_000, windowsHide: true },
     (err, stdout) => {
-      // `apres` est appelé quoi qu'il arrive : le repli est utilisable, et un constat sur le
-      // mauvais dossier vaut mieux qu'un journal de démarrage muet sur la question.
       try {
         if (err) {
           log.debugEvent('NinjaTrader', 'Dossier Documents non résolu — repli sur %USERPROFILE%', {
@@ -86,20 +105,50 @@ export function localiserNinjaScript(apres: () => void): void {
           });
           return;
         }
-
         const documents = etendreVariables((stdout.match(/Personal\s+REG_\w+\s+(.+)/)?.[1] || '').trim());
-        if (!documents) return;
-
-        const resolue = join(documents, 'NinjaTrader 8', 'bin', 'Custom');
-        if (resolue === racine) return;
-
-        racine = resolue;
-        // Invalide le constat fait sur le repli : il portait peut-être sur le mauvais dossier.
-        constateA = 0;
-        log.debugEvent('NinjaTrader', 'Dossier Documents redirigé', { documents });
+        if (documents) adopterRacine(join(documents, 'NinjaTrader 8', 'bin', 'Custom'), 'dossier Documents');
       } finally {
         apres();
       }
+    },
+  );
+}
+
+/**
+ * Demande à NinjaTrader où il range son NinjaScript, plutôt que de le déduire.
+ *
+ * Le dossier de données n'est `Documents\NinjaTrader 8` que par défaut, et le déduire fait
+ * dépendre le dépôt d'une convention que rien ne garantit. La plateforme, elle, publie le chemin
+ * exact. `/s` balaie les sous-clés — leurs noms sont des empreintes, il n'y a rien à deviner — et
+ * `/v` ne rend que la valeur cherchée : une seule invocation, mesurée à 38 ms sur 476 sous-clés.
+ *
+ * Absente, la valeur signifie le plus souvent une plateforme installée mais jamais lancée. Son
+ * dossier de données n'existe pas encore non plus, et le repli par Documents conclura de toute
+ * façon à une absence — mais il conclura sur le bon dossier.
+ *
+ * Rien de tout cela n'est attendu par le démarrage : le repli code en dur sert entre-temps.
+ */
+export function localiserNinjaScript(apres: () => void): void {
+  execFile(
+    'reg',
+    ['query', 'HKCU\\Software\\NinjaTrader, LLC\\NinjaTrader', '/s', '/v', CLE_RACINE],
+    { timeout: 4_000, windowsHide: true },
+    (err, stdout) => {
+      // Plusieurs correspondances = plusieurs instances NinjaTrader sur le poste. On prend la
+      // première : rien ne permet de designer « la bonne », et se tromper coûte un message,
+      // pas une panne.
+      const declaree = err
+        ? ''
+        : (stdout.match(new RegExp(CLE_RACINE + '\\s+REG_\\w+\\s+(.+)'))?.[1] || '').trim();
+
+      if (declaree) {
+        adopterRacine(declaree.replace(/[\\/]+$/, ''), 'registre NinjaTrader');
+        apres();
+        return;
+      }
+
+      log.debugEvent('NinjaTrader', 'NinjaTrader ne déclare pas sa racine — repli sur le dossier Documents');
+      parLeDossierDocuments(apres);
     },
   );
 }
@@ -151,7 +200,7 @@ export function etatAddOn(ntConnecte: boolean): EtatAddOn {
 /** Une phrase pour le journal de démarrage, là où on cherche quand un voyant reste rouge. */
 export function journaliserEtat(ntConnecte: boolean): void {
   const etat = etatAddOn(ntConnecte);
-  const details = { dossier: racine };
+  const details = { dossier: racine, origine: origineRacine };
 
   switch (etat) {
     case 'DEPLOYED':
