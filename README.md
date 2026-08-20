@@ -115,7 +115,7 @@ Pour installer dans Stream Deck :
 | `DefaultAccount` | Sim101 | Compte par défaut |
 | `DefaultInstrument` | ES 06-25 | Instrument par défaut |
 | `DefaultQuantity` | 1 | Quantité de départ |
-| `AllowLiveAccounts` | false | **Safe mode** — interdit les comptes réels |
+| `AllowLiveAccounts` | **true** | Comptes réels autorisés. À `false`, seuls les comptes `Sim*` passent |
 | `DefaultMaxTradesWhenLosing` | 15 | Macro de sécurité — trades max en perte (1ᵗ lancement) |
 | `DefaultDailyLossLimit` | 300 | Macro de sécurité — perte journalière max (1ᵗ lancement) |
 | `DefaultSafetyLockHours` | 6 | Macro de sécurité — durée du verrou (1ᵗ lancement) |
@@ -169,7 +169,11 @@ le trader doit toujours pouvoir sortir de position.
 
 ## Sécurité
 
-- **Safe mode** activé par défaut : seuls les comptes `Sim*` sont autorisés
+- **Comptes réels autorisés par défaut** (`AllowLiveAccounts = true`). C'est délibéré : TradeDeck
+  est une surface de trading, et un produit qui refuserait le compte sur lequel le trader travaille
+  ne servirait à rien. Ce qui protège n'est pas l'interdiction du compte réel, c'est la macro de
+  sécurité ci-dessus — budget de trades, limite de perte journalière, verrou à échéance.
+  `SDBRIDGE_AllowLiveAccounts=false` remet le filtre `Sim*` pour qui veut s'entraîner.
 - **Macro de sécurité verrouillable** (ci-dessus) — blocage avant envoi de l'ordre
 - Validation stricte des payloads à chaque couche
 - Protection anti-doublons (requestId unique sur 60s)
