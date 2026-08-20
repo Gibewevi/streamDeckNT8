@@ -3,7 +3,7 @@
  *
  * Le voyant « NinjaTrader » de l'éditeur ne savait dire que `hors ligne`, ce qui recouvre trois
  * situations qu'on ne peut pas distinguer depuis Bitlearn : NinjaTrader pas installé, add-on
- * jamais déposé, ou add-on déposé mais pas encore compilé faute de redémarrage. Tant que l'add-on
+ * jamais déposé, ou add-on déposé mais jamais compilé. Tant que l'add-on
  * n'est pas chargé, **rien du côté NinjaTrader ne parle** — ni journal, ni connexion sur le port
  * 8219. Trois clients, trois diagnostics impossibles à distinguer à distance.
  *
@@ -30,7 +30,7 @@ export type EtatAddOn =
   | 'NOT_DEPLOYED'
   /** Des sources, mais pas celles qu'il faut — dépôt interrompu, ou copie manuelle partielle. */
   | 'INCOMPLETE'
-  /** Tout est en place. NinjaTrader hors ligne malgré ça = il n'a pas encore recompilé. */
+  /** Tout est en place. NinjaTrader hors ligne malgré ça = les sources n'ont pas été compilées. */
   | 'DEPLOYED'
   /** La question n'a pas encore été posée au disque. */
   | 'UNKNOWN';
@@ -204,7 +204,7 @@ export function journaliserEtat(ntConnecte: boolean): void {
 
   switch (etat) {
     case 'DEPLOYED':
-      log.event('NinjaTrader', 'Add-on déposé — NinjaTrader le compile à son démarrage', details);
+      log.event('NinjaTrader', 'Add-on déposé — reste à le compiler dans NinjaTrader (éditeur NinjaScript, F5)', details);
       break;
     case 'NOT_DEPLOYED':
       log.eventWarn('NinjaTrader', 'Add-on absent du dossier NinjaScript — NinjaTrader restera hors ligne', details);

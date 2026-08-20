@@ -107,10 +107,17 @@ Toute propriété de `BridgeConfig` est surchargeable par `SDBRIDGE_<NomDeLaProp
 L'installation active **ne correspond pas** aux instructions du README :
 
 - l'add-on NT8 est déployé **en sources `.cs` à plat** dans
-  `Documents\NinjaTrader 8\bin\Custom\AddOns\StreamDeck\` — NinjaScript les compile au démarrage
-  de NinjaTrader. Le DLL construit localement ne sert qu'à vérifier la compilation. **Depuis
-  0.17.0 l'installateur s'en charge**, avec `TdSwingEngine.cs` dans `Indicators\` : le poste de
-  développement reste le seul endroit où l'on copie ces fichiers à la main ;
+  `Documents\NinjaTrader 8\bin\Custom\AddOns\StreamDeck\`. Le DLL construit localement ne sert
+  qu'à vérifier la compilation. **Depuis 0.17.0 l'installateur dépose ces sources**, avec
+  `TdSwingEngine.cs` dans `Indicators\` : le poste de développement reste le seul endroit où
+  l'on copie ces fichiers à la main ;
+
+  > **Le dépôt ne suffit pas : il faut COMPILER.** NinjaTrader charge son
+  > `NinjaTrader.Custom.dll` déjà compilé et ne refait rien parce qu'un `.cs` a changé sur le
+  > disque — redémarrer la plateforme n'y change rien. Le geste est *Control Center → New →
+  > NinjaScript Editor → F5*. Vérifié le 20/08/2026 : le DLL du 12/08 ne contenait pas
+  > `JournalSeal`, arrivé dans les sources le 13/08, alors que l'add-on tournait — il tournait
+  > sur la compilation du 12.
 - **l'hôte TradeDeck** s'installe dans `%LOCALAPPDATA%\TradeDeck` via
   `src/deck-host/packaging/install.ps1` : il y copie `dist/`, `ui/`, `node_modules/`, `bridge/`
   et un `node.exe`, enregistre une tâche planifiée (démarrage à l'ouverture de session, relance

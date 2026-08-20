@@ -32,7 +32,7 @@
 #define AppUrl BitlearnUrl + "/tradedeck"
 
 #ifndef AppVersion
-  #define AppVersion "0.20.0"
+  #define AppVersion "0.21.0"
 #endif
 
 #ifndef Payload
@@ -455,9 +455,16 @@ begin
   end;
 
   if NinjaTraderPresent then
-    MsgBox('L''intégration NinjaTrader a été installée.' + #13#10#13#10 +
-           'Si NinjaTrader 8 est ouvert, fermez-le et rouvrez-le : il compile l''add-on à son ' +
-           'démarrage. Le voyant « NinjaTrader » passe alors au vert.', mbInformation, MB_OK)
+    { Compiler, et non redémarrer. NinjaTrader charge l'assemblage déjà compilé et ne refait rien
+      parce qu'un .cs a changé sur le disque : redémarrer ne peut donc pas suffire, et le disait
+      pourtant à chaque client. }
+    MsgBox('L''intégration NinjaTrader a été installée. Une dernière étape, dans NinjaTrader :'
+           + #13#10#13#10
+           + '   Control Center  →  New  →  NinjaScript Editor,  puis F5 pour compiler.'
+           + #13#10#13#10
+           + 'Déposer les fichiers ne suffit pas : NinjaTrader utilise sa dernière compilation '
+           + 'jusqu''à ce qu''on lui en demande une nouvelle. Le voyant « NinjaTrader » passe au '
+           + 'vert dans les secondes qui suivent.', mbInformation, MB_OK)
   else
     MsgBox('NinjaTrader 8 n''a pas été trouvé sur ce poste.' + #13#10#13#10 +
            'TradeDeck est installé et fonctionnel, mais son intégration NinjaTrader ne l''est ' +

@@ -342,8 +342,11 @@ Le `<Compile Include… Link=…>` du `.csproj` de l'add-on ne sert qu'à la **v
 compilation locale** et ne se déploie jamais.
 
 **Depuis 0.17.0, l'installateur dépose ces fichiers lui-même** — les sources de l'add-on dans
-`AddOns\StreamDeck\`, `TdSwingEngine.cs` dans `Indicators\`, et rien d'autre à faire que
-redémarrer NinjaTrader. La copie manuelle ci-dessus ne sert plus qu'au poste de développement.
+`AddOns\StreamDeck\` et `TdSwingEngine.cs` dans `Indicators\`. La copie manuelle ci-dessus ne sert
+plus qu'au poste de développement.
+
+Reste à **compiler** : NinjaTrader charge son assemblage déjà compilé et ignore la date des
+sources, donc redémarrer ne déclenche rien. *Control Center → New → NinjaScript Editor → F5*.
 
 Le dédoublement reste le danger : l'installateur efface les `.cs` de `AddOns\StreamDeck\` avant
 d'écrire les siens, ce qui rattrape une copie égarée de `TdSwingEngine.cs` déposée là à la
