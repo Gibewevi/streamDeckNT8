@@ -15,7 +15,7 @@
  * immédiatement.
  */
 import { execFile } from 'child_process';
-import { existsSync, readdirSync } from 'fs';
+import { existsSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import * as log from './logger.js';
 
@@ -30,7 +30,14 @@ export type EtatAddOn =
   | 'NOT_DEPLOYED'
   /** Des sources, mais pas celles qu'il faut — dépôt interrompu, ou copie manuelle partielle. */
   | 'INCOMPLETE'
-  /** Tout est en place. NinjaTrader hors ligne malgré ça = les sources n'ont pas été compilées. */
+  /**
+   * Déposé, mais NinjaTrader tourne sur autre chose : assemblage plus ancien que les sources, ou
+   * pas d'assemblage du tout. C'est le cas dangereux — il ne casse rien de visible, il fige
+   * l'ancien add-on. Six versions ont ainsi été livrées à un poste qui tournait sur la
+   * compilation du 12 août, voyant au vert, sans que rien ne le signale.
+   */
+  | 'STALE'
+  /** Déposé et compilé : ce que NinjaTrader exécute correspond aux sources sur le disque. */
   | 'DEPLOYED'
   /** La question n'a pas encore été posée au disque. */
   | 'UNKNOWN';
@@ -171,18 +178,51 @@ function constater(): EtatAddOn {
 
   if (!existsSync(join(racine, 'Indicators', FICHIER_INDICATEUR))) return 'INCOMPLETE';
 
-  return 'DEPLOYED';
+  return compilationAJour(dossierAddOn) ? 'DEPLOYED' : 'STALE';
+}
+
+/**
+ * L'assemblage compilé est-il plus récent que les sources déposées ?
+ *
+ * NinjaTrader compile tout `bin\Custom` dans un unique `NinjaTrader.Custom.dll`, et ne le refait
+ * **pas** parce qu'un `.cs` a changé de date : il charge l'assemblage existant. Déposer des
+ * sources ne suffit donc pas, et redémarrer la plateforme non plus — il faut compiler depuis
+ * l'éditeur NinjaScript.
+ *
+ * Comparer les dates est la seule mesure possible depuis l'extérieur, et elle suffit : une
+ * compilation, quelle qu'en soit la raison, embarque forcément nos sources, puisqu'elle est tout
+ * ou rien. Un assemblage postérieur à la dernière source déposée est donc à jour.
+ *
+ * Assemblage absent : rien n'a jamais été compilé sur ce poste, ce qui se traite exactement
+ * pareil — il faut compiler.
+ */
+function compilationAJour(dossierAddOn: string): boolean {
+  const assemblage = join(racine, 'NinjaTrader.Custom.dll');
+  if (!existsSync(assemblage)) return false;
+
+  try {
+    const compileA = statSync(assemblage).mtimeMs;
+    const sources = readdirSync(dossierAddOn)
+      .filter((n) => n.toLowerCase().endsWith('.cs'))
+      .map((n) => statSync(join(dossierAddOn, n)).mtimeMs);
+    sources.push(statSync(join(racine, 'Indicators', FICHIER_INDICATEUR)).mtimeMs);
+
+    return compileA >= Math.max(...sources);
+  } catch {
+    // Un disque qui refuse de répondre ne doit pas faire crier à la péremption : dans le doute,
+    // on ne dérange pas.
+    return true;
+  }
 }
 
 /**
  * L'état du dépôt, tel qu'il part dans le battement.
  *
- * `ntConnecte` court-circuite tout : si l'add-on parle, il est évidemment déposé et compilé, et
- * il n'y a aucune raison d'aller lire le disque cinq fois par minute pour le confirmer.
+ * Le constat est fait même quand l'add-on répond. Il répondait aussi sur le poste qui tournait
+ * six versions en retard : « il parle donc tout va bien » est précisément le raccourci qui
+ * rendait la péremption invisible. Deux `statSync` par minute au plus, le coût est nul.
  */
-export function etatAddOn(ntConnecte: boolean): EtatAddOn {
-  if (ntConnecte) return 'DEPLOYED';
-
+export function etatAddOn(): EtatAddOn {
   const maintenant = Date.now();
   if (dernierConstat !== 'UNKNOWN' && maintenant - constateA < FRAICHEUR_MS) return dernierConstat;
 
@@ -198,13 +238,18 @@ export function etatAddOn(ntConnecte: boolean): EtatAddOn {
 }
 
 /** Une phrase pour le journal de démarrage, là où on cherche quand un voyant reste rouge. */
-export function journaliserEtat(ntConnecte: boolean): void {
-  const etat = etatAddOn(ntConnecte);
+export function journaliserEtat(): void {
+  const etat = etatAddOn();
   const details = { dossier: racine, origine: origineRacine };
 
   switch (etat) {
     case 'DEPLOYED':
-      log.event('NinjaTrader', 'Add-on déposé — reste à le compiler dans NinjaTrader (éditeur NinjaScript, F5)', details);
+      log.event('NinjaTrader', 'Add-on déposé et compilé', details);
+      break;
+    case 'STALE':
+      log.eventWarn('NinjaTrader',
+        'Add-on déposé mais non compilé — NinjaTrader exécute une version antérieure ou rien du tout '
+        + '(éditeur NinjaScript, F5)', details);
       break;
     case 'NOT_DEPLOYED':
       log.eventWarn('NinjaTrader', 'Add-on absent du dossier NinjaScript — NinjaTrader restera hors ligne', details);

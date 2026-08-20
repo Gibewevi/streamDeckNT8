@@ -29,7 +29,7 @@ import { etatAddOn, journaliserEtat, localiserNinjaScript } from './ninjatrader.
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.21.0';
+const VERSION = '0.22.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -1175,7 +1175,7 @@ async function main(): Promise<void> {
   // là. Sans cette ligne, un voyant NinjaTrader rouge n'a aucune trace exploitable — l'add-on
   // absent ne journalise rien, par définition. Pas attendu : la résolution du dossier Documents
   // passe par `reg.exe`, et rien ici n'a le droit de retarder le démarrage.
-  localiserNinjaScript(() => journaliserEtat(lastState?.ntConnected ?? false));
+  localiserNinjaScript(() => journaliserEtat());
 
   // Avant toute connexion : libérer le boîtier ET la place plugin du bridge. Windows relance
   // l'application Elgato à l'ouverture de session même sans démarrage automatique, et son
@@ -1219,7 +1219,7 @@ async function main(): Promise<void> {
       // Pourquoi NinjaTrader est hors ligne, quand il l'est. Le booléen seul recouvrait trois
       // causes que Bitlearn ne pouvait pas départager : plateforme absente, add-on jamais
       // déposé, add-on déposé mais pas encore compilé.
-      ntAddon: etatAddOn(lastState?.ntConnected ?? false),
+      ntAddon: etatAddOn(),
       appVersion: VERSION,
     },
     // L'état exact que reçoit `computeVisual` : l'éditeur ayant le même moteur de visuels, il
