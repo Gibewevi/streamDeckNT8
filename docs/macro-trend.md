@@ -345,8 +345,10 @@ compilation locale** et ne se déploie jamais.
 `AddOns\StreamDeck\` et `TdSwingEngine.cs` dans `Indicators\`. La copie manuelle ci-dessus ne sert
 plus qu'au poste de développement.
 
-Reste à **compiler** : NinjaTrader charge son assemblage déjà compilé et ignore la date des
-sources, donc redémarrer ne déclenche rien. *Control Center → New → NinjaScript Editor → F5*.
+Reste à **compiler**, et le plus simple est de ne rien avoir à faire : NinjaTrader ouvert
+surveille `bin\Custom`, voit les fichiers arriver et recompile seul. Fermé, il chargera son
+assemblage précédent au lancement suivant — le relancer ne déclenche rien, il faut alors
+*Control Center → New → NinjaScript Editor → F5*.
 
 Le dédoublement reste le danger : l'installateur efface les `.cs` de `AddOns\StreamDeck\` avant
 d'écrire les siens, ce qui rattrape une copie égarée de `TdSwingEngine.cs` déposée là à la

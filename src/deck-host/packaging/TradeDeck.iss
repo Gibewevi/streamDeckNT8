@@ -32,7 +32,7 @@
 #define AppUrl BitlearnUrl + "/tradedeck"
 
 #ifndef AppVersion
-  #define AppVersion "0.22.0"
+  #define AppVersion "0.23.0"
 #endif
 
 #ifndef Payload
@@ -426,6 +426,20 @@ end;
   Marqueur absent — script d'une version antérieure, écriture refusée — on ne dit rien :
   alarmer à tort coûte plus cher que de se taire.
 }
+{
+  NinjaTrader tournait-il pendant le dépôt ? Écrit par `register-task.ps1` dans le même marqueur.
+}
+function NinjaTraderTournait: Boolean;
+var
+  brut: AnsiString;
+  texte: String;
+begin
+  Result := False;
+  if not LoadStringFromFile(ExpandConstant('{app}\dernier-demarrage.txt'), brut) then Exit;
+  texte := brut;
+  Result := Pos('NinjaTrader=oui', texte) > 0;
+end;
+
 function HoteADemarre: Boolean;
 var
   brut: AnsiString;
@@ -455,16 +469,28 @@ begin
   end;
 
   if NinjaTraderPresent then
-    { Compiler, et non redémarrer. NinjaTrader charge l'assemblage déjà compilé et ne refait rien
-      parce qu'un .cs a changé sur le disque : redémarrer ne peut donc pas suffire, et le disait
-      pourtant à chaque client. }
-    MsgBox('L''intégration NinjaTrader a été installée. Une dernière étape, dans NinjaTrader :'
-           + #13#10#13#10
-           + '   Control Center  →  New  →  NinjaScript Editor,  puis F5 pour compiler.'
-           + #13#10#13#10
-           + 'Déposer les fichiers ne suffit pas : NinjaTrader utilise sa dernière compilation '
-           + 'jusqu''à ce qu''on lui en demande une nouvelle. Le voyant « NinjaTrader » passe au '
-           + 'vert dans les secondes qui suivent.', mbInformation, MB_OK)
+  begin
+    { NinjaTrader ouvert surveille `bin\Custom` et recompile de lui-même, sans redémarrer.
+      Fermé, il ne verra jamais ces fichiers arriver : il chargera son assemblage précédent au
+      prochain lancement, et redémarrer n'y changera rien — c'est ce qu'on a demandé en vain à
+      un client. Les deux situations n'appellent pas le même geste, donc pas le même message. }
+    if NinjaTraderTournait then
+      MsgBox('L''intégration NinjaTrader a été installée.' + #13#10#13#10
+             + 'NinjaTrader était ouvert : il a recompilé l''add-on tout seul. Le voyant '
+             + '« NinjaTrader » passe au vert dans les secondes qui suivent.', mbInformation, MB_OK)
+    else
+      MsgBox('L''intégration NinjaTrader a été installée. Une dernière étape :'
+             + #13#10#13#10
+             + '   Lancez NinjaTrader, puis  Control Center  →  New  →  NinjaScript Editor,'
+             + #13#10
+             + '   et appuyez sur F5 pour compiler.'
+             + #13#10#13#10
+             + 'Déposer les fichiers ne suffit pas : NinjaTrader réutilise sa dernière compilation '
+             + 'tant qu''on ne lui en demande pas une nouvelle, et le relancer n''y change rien.'
+             + #13#10#13#10
+             + 'Plus simple la prochaine fois : ouvrez NinjaTrader AVANT de lancer cet '
+             + 'installateur, il recompile alors de lui-même.', mbInformation, MB_OK);
+  end
   else
     MsgBox('NinjaTrader 8 n''a pas été trouvé sur ce poste.' + #13#10#13#10 +
            'TradeDeck est installé et fonctionnel, mais son intégration NinjaTrader ne l''est ' +

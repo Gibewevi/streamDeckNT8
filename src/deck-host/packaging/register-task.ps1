@@ -226,5 +226,12 @@ do {
 # ASCII : ce fichier est relu par le code Pascal de l'installateur, une BOM s'y lirait comme des
 # caracteres parasites en tete.
 $etat = if ($repond) { 'OK' } else { 'KO' }
+
+# NinjaTrader ouvert au moment du depot : il surveille bin\Custom et recompile l add-on tout seul,
+# sans meme redemarrer — verifie, meme PID avant et apres le rechargement. Ferme, il ne verra
+# jamais les fichiers arriver et chargera son assemblage precedent au demarrage suivant. Le
+# message de fin doit donc dire deux choses differentes, et c est ici qu on sait laquelle.
+$ninja = if (Get-Process NinjaTrader -ErrorAction SilentlyContinue) { 'oui' } else { 'non' }
+
 Set-Content -Path (Join-Path $InstallDir 'dernier-demarrage.txt') `
-  -Value "$etat $(Get-Date -Format 's')" -Encoding ascii
+  -Value "$etat $(Get-Date -Format 's')", "NinjaTrader=$ninja" -Encoding ascii

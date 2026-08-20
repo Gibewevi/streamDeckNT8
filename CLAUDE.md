@@ -112,12 +112,16 @@ L'installation active **ne correspond pas** aux instructions du README :
   `TdSwingEngine.cs` dans `Indicators\` : le poste de développement reste le seul endroit où
   l'on copie ces fichiers à la main ;
 
-  > **Le dépôt ne suffit pas : il faut COMPILER.** NinjaTrader charge son
-  > `NinjaTrader.Custom.dll` déjà compilé et ne refait rien parce qu'un `.cs` a changé sur le
-  > disque — redémarrer la plateforme n'y change rien. Le geste est *Control Center → New →
-  > NinjaScript Editor → F5*. Vérifié le 20/08/2026 : le DLL du 12/08 ne contenait pas
-  > `JournalSeal`, arrivé dans les sources le 13/08, alors que l'add-on tournait — il tournait
-  > sur la compilation du 12.
+  > **Déposer les sources NinjaTrader OUVERT, toujours.** Il surveille `bin\Custom` tant qu'il
+  > tourne : les fichiers arrivent, il recompile et recharge l'add-on de lui-même, sans même
+  > redémarrer — vérifié le 20/08/2026, même PID avant et après le rechargement.
+  >
+  > **Fermé, il ne verra jamais ces fichiers arriver.** Il chargera son `NinjaTrader.Custom.dll`
+  > précédent au lancement suivant, et le relancer n'y changera rien : il faut alors compiler à
+  > la main, *Control Center → New → NinjaScript Editor → F5*. C'est ce qui a bloqué un client,
+  > à qui on demandait justement de redémarrer. Preuve du mécanisme : le DLL du 12/08 ne
+  > contenait pas `JournalSeal`, arrivé dans les sources le 13/08, alors que l'add-on tournait —
+  > il tournait sur la compilation du 12.
 - **l'hôte TradeDeck** s'installe dans `%LOCALAPPDATA%\TradeDeck` via
   `src/deck-host/packaging/install.ps1` : il y copie `dist/`, `ui/`, `node_modules/`, `bridge/`
   et un `node.exe`, enregistre une tâche planifiée (démarrage à l'ouverture de session, relance
