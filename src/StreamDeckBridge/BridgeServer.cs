@@ -495,10 +495,9 @@ public sealed class BridgeServer : BackgroundService
     /// <summary>
     /// Tells the add-on what to mirror and where.
     ///
-    /// This is also where a change of master account is noticed. Deliberately here and not in the
-    /// <c>setAccount</c> handler: NinjaTrader picks an account on its own when the tracked one
-    /// disappears, and that path never goes through a command. Watching the value about to be
-    /// published catches every route to a changed master, including the ones nobody asked for.
+    /// The follower list it sends is the one the host resolved: the copy group minus the selected
+    /// account. Switching accounts therefore swaps the roles on its own — the account just taken
+    /// leaves the followers, the one just left joins them — without a line of the layout moving.
     ///
     /// Like the guard policy, it only speaks on a change — this runs five times a second.
     /// </summary>
@@ -506,10 +505,6 @@ public sealed class BridgeServer : BackgroundService
     {
         var state = _stateManager.GetSnapshot();
         var master = state.Account ?? string.Empty;
-
-        // Returns true when this very call is what held copying. Push it immediately: the add-on
-        // must stop mirroring before the next order, not at the next configuration edit.
-        if (_copier.NoteMaster(master)) force = true;
 
         var enabled = _copier.IsEffectivelyEnabled;
         var entriesBlocked = state.Safety.EntriesBlocked;

@@ -520,7 +520,7 @@ sélectionné. Détail complet dans [macro-copieur.md](macro-copieur.md).
 | Champ | Description |
 |-------|-------------|
 | `enabled` | Le réglage « Copier les positions » de la touche Compte |
-| `followers` | **Une chaîne**, une ligne par suiveur : `nom\|multiplicateur\|plafond` |
+| `followers` | **Une chaîne**, une ligne par compte lié : `nom\|multiplicateur\|plafond` |
 
 Le compte maître **n'est pas transmis** : le bridge le connaît déjà. Un second endroit où le
 déclarer aurait été un second endroit où il peut diverger.
@@ -529,9 +529,9 @@ déclarer aurait été un second endroit où il peut diverger.
 que `string`, `boolean` et `number` dans les réglages d'une touche : un tableau y serait écarté en
 silence, et la sélection du trader disparaîtrait sans message.
 
-Passer `enabled: false` est aussi ce qui **libère une copie retenue** après un changement de compte
-maître — un rejeu de `enabled: true` ne suffit pas, sinon la reprise se ferait toute seule à la
-première reconnexion.
+`followers` est la liste **déjà résolue** par l'hôte : le groupe configuré moins le compte
+sélectionné. C'est là que se fait la bascule des rôles, et c'est pourquoi l'hôte renvoie cette
+commande à chaque changement de compte, pas seulement à chaque édition du layout.
 
 #### `copierPanic`
 ```json
@@ -727,7 +727,7 @@ Le bridge y ajoute aussi le bloc `copier`, dont il possède la moitié configura
 {
   "copier": {
     "enabled": true, "master": "Sim101", "masterResolved": true,
-    "entriesBlocked": false, "suspendedReason": "",
+    "entriesBlocked": false,
     "followers": [
       { "name": "Sim102", "multiplier": 1, "maxContracts": 0,
         "resolved": true, "drifted": false, "drift": 0, "lastError": "" }
@@ -739,11 +739,10 @@ Le bridge y ajoute aussi le bloc `copier`, dont il possède la moitié configura
 
 | Champ | Description |
 |-------|-------------|
-| `enabled` | **Bridge.** Le réglage ET rien qui le retienne — faux si `suspendedReason` est renseigné |
+| `enabled` | **Bridge.** Le réglage « Copier les positions » |
 | `master` | **Bridge.** Le compte sélectionné ; il n'existe pas de réglage séparé |
 | `masterResolved` | Add-on. Le nom correspond à un compte NinjaTrader actif |
 | `entriesBlocked` | **Bridge.** Guard refuse les entrées : leurs copies s'arrêtent, **les sorties continuent** |
-| `suspendedReason` | **Bridge.** `"masterChanged"` quand la copie est retenue. Vide sinon |
 | `multiplier` / `maxContracts` | **Bridge.** Les réglages du suiveur. `0` de multiplicateur le désactive ; `0` de plafond veut dire « sans plafond » |
 | `resolved` | Add-on. Le compte existe et sa connexion est active **en ce moment** |
 | `drifted` | Add-on. Écart installé — les entrées ne partent plus vers ce compte, **rien n'est envoyé pour corriger** |

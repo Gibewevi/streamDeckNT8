@@ -482,16 +482,6 @@ export function computeVisual(
       // La copie n'écrase jamais l'identité du compte : elle occupe le sous-titre et le détail.
       // Savoir SUR QUEL compte on trade prime sur tout le reste de cette touche.
 
-      // Retenue après un changement de compte maître. En tête, et en rouge, parce que c'est le
-      // seul état où le trader croit que la copie tourne alors qu'elle est arrêtée — un écart
-      // entre ce qu'on croit et ce qui est vaut ici plus qu'un simple avertissement.
-      if (copier?.suspendedReason) {
-        return {
-          title, subtitle: 'COPY HOLD', detail: 'MAITRE',
-          bgColor: Colors.refuse, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
-        };
-      }
-
       if (copier?.enabled && copier.followers.length > 0) {
         const total = copier.followers.length;
         const resolved = copier.followers.filter((f) => f.resolved).length;

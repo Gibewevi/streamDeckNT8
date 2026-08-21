@@ -273,20 +273,42 @@
   .maitre .n { display:block; margin-top:5px; font-size:11px; color:var(--faint); line-height:1.45; }
 
   /* Comptes suiveurs : ceux que NinjaTrader publie, à cocher. */
-  .fl-liste { display:flex; flex-direction:column; gap:6px; }
-  .fl-compte { border:1px solid var(--edge); border-radius:var(--r-sm); padding:8px 10px; }
-  .fl-actif { border-color:var(--accent); background:var(--accent-soft); }
-  .fl-tete { display:flex; align-items:center; gap:9px; cursor:pointer; margin:0; }
-  .fl-tete input[type=checkbox] { width:15px; height:15px; margin:0; flex:none; cursor:pointer; accent-color:var(--accent); }
-  .fl-tete input[type=checkbox]:disabled { cursor:not-allowed; opacity:.4; }
-  .fl-nom { font-family:var(--mono); font-size:13px; color:var(--txt); }
-  .fl-absent { margin-left:auto; font-size:10px; text-transform:uppercase; letter-spacing:.04em;
-               color:var(--dim); border:1px solid var(--edge-2); border-radius:999px; padding:1px 7px; }
-  /* Les deux réglages n'apparaissent qu'une fois le compte activé : proposer un multiplicateur
+  /* Une ligne par compte, sobre au repos. Le cadre ne s'allume que sur le compte retenu :
+     encadrer les huit d'un trait plein transformait une liste de trois comptes en mur de boîtes. */
+  .fl-liste { display:flex; flex-direction:column; gap:2px; }
+  .fl-compte { border:1px solid transparent; border-radius:var(--r-sm); transition:.14s var(--ease); }
+  .fl-compte:hover { background:rgba(255,255,255,.03); }
+  .fl-actif { border-color:var(--edge); background:var(--card); }
+  .fl-actif:hover { background:var(--card); }
+
+  /* La ligne entière est la cible de clic : 40 px de haut, pas un carré de 19. */
+  .fl-tete { display:flex; align-items:center; gap:13px; cursor:pointer; margin:0; padding:10px 11px; }
+  /* Case native masquée mais toujours présente : c'est elle qui porte l'état et le focus clavier.
+     La pastille n'en est que le reflet. */
+  .fl-on { position:absolute; opacity:0; width:0; height:0; margin:0; pointer-events:none; }
+  .fl-puce { width:19px; height:19px; flex:none; border-radius:6px; border:1.5px solid var(--edge-2);
+             display:grid; place-items:center; background:var(--bg); transition:.14s var(--ease); }
+  .fl-puce svg { width:12px; height:12px; color:#fff; opacity:0; transform:scale(.7); transition:.14s var(--ease); }
+  .fl-on:checked + .fl-puce { background:var(--accent); border-color:var(--accent); }
+  .fl-on:checked + .fl-puce svg { opacity:1; transform:scale(1); }
+  .fl-on:focus-visible + .fl-puce { box-shadow:0 0 0 3px var(--accent-soft); }
+  .fl-on:disabled + .fl-puce { opacity:.35; }
+  .fl-on:disabled ~ .fl-nom { opacity:.45; }
+  .fl-tete:hover .fl-puce { border-color:var(--accent); }
+
+  .fl-nom { font-family:var(--mono); font-size:13.5px; color:var(--txt); letter-spacing:-.01em; }
+  .fl-absent, .fl-maitre { margin-left:auto; font-size:10px; text-transform:uppercase;
+                          letter-spacing:.04em; border-radius:999px; padding:1px 7px; }
+  .fl-absent { color:var(--dim); border:1px solid var(--edge-2); }
+  /* Le compte sélectionné : dans le groupe, mais pas copié tant qu'il est maître. Accentué plutôt
+     que grisé — ce n'est pas une anomalie, c'est le rôle qu'il tient en ce moment. */
+  .fl-maitre { color:var(--accent); border:1px solid var(--accent); }
+  .fl-absent + .fl-maitre, .fl-maitre + .fl-absent { margin-left:6px; }
+  /* Les deux réglages n'apparaissent qu'une fois le compte retenu : proposer un multiplicateur
      pour un compte qu'on ne copie pas encombre sans rien dire. */
-  .fl-reglages { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:9px; }
+  .fl-reglages { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 11px 11px 43px; }
   .fl-reglages label { display:block; font-size:10.5px; color:var(--dim); margin-bottom:4px; }
-  .fl-reglages input { height:31px; }
+  .fl-reglages input { height:30px; }
   .fl-empty { margin-top:8px; font-size:12px; color:var(--dim); line-height:1.45; }
   label { display:block; font-size:11.5px; color:var(--dim); margin-bottom:6px; font-weight:500; }
   input[type=text], input[type=number], select, textarea {
@@ -846,17 +868,24 @@ function parseFl(v) {
  */
 function followerField(f, v) {
   const configures = parseFl(v);
-  const dispo = (snap && snap.state && snap.state.availableAccounts) || [];
+  // Le compte sélectionné FAIT PARTIE de la liste : elle décrit un GROUPE, pas des suiveurs. Les
+  // suiveurs effectifs sont le groupe moins le compte sélectionné, soustraits par l'hôte au moment
+  // d'envoyer. C'est ce qui fait basculer les rôles quand on change de compte, sans rien réécrire.
+  const proposes = (snap && snap.state && snap.state.availableAccounts) || [];
   const maitre = ((snap && snap.state && snap.state.account) || '').toUpperCase();
-  const proposes = dispo.filter(a => a.toUpperCase() !== maitre);
 
   const parNom = new Map(configures.map(l => [l.name.toUpperCase(), l]));
   const publies = new Set(proposes.map(a => a.toUpperCase()));
   const absents = configures.filter(l => !publies.has(l.name.toUpperCase()));
 
   const rangs = [
-    ...proposes.map(nom => ({ nom, publie: true, ligne: parNom.get(nom.toUpperCase()) || null })),
-    ...absents.map(l => ({ nom: l.name, publie: false, ligne: l })),
+    ...proposes.map(nom => ({
+      nom, publie: true, estMaitre: nom.toUpperCase() === maitre,
+      ligne: parNom.get(nom.toUpperCase()) || null,
+    })),
+    ...absents.map(l => ({
+      nom: l.name, publie: false, estMaitre: l.name.toUpperCase() === maitre, ligne: l,
+    })),
   ];
 
   const plein = configures.length >= 8;
@@ -870,10 +899,17 @@ function followerField(f, v) {
     : rangs.map(r => {
         const actif = !!r.ligne;
         const bloque = !actif && plein;
+        // Toute la ligne est cliquable, pas seulement la case : viser un carré de 19 px est le
+        // geste le plus raté d'un formulaire, et il n'y a rien d'autre à cliquer sur cette ligne.
         return `<div class="fl-compte${actif ? ' fl-actif' : ''}" data-fl-nom="${esc(r.nom)}">
           <label class="fl-tete">
             <input type="checkbox" class="fl-on"${actif ? ' checked' : ''}${bloque ? ' disabled' : ''}>
+            <span class="fl-puce" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            </span>
             <span class="fl-nom">${esc(r.nom)}</span>
+            ${r.estMaitre ? `<span class="fl-maitre" title="Compte sélectionné : il ne reçoit pas de copie tant qu'il est maître, mais il en recevra dès que la touche passera à un autre compte du groupe">maître</span>` : ''}
             ${r.publie ? '' : `<span class="fl-absent" title="Compte non publié par NinjaTrader en ce moment">hors ligne</span>`}
           </label>
           ${actif ? `<div class="fl-reglages">

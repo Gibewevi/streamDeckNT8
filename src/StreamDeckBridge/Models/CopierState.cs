@@ -30,16 +30,6 @@ public sealed class CopierStatus
     /// </summary>
     public bool EntriesBlocked { get; set; }
 
-    /// <summary>
-    /// Bridge-owned: copying is held after the master account changed, until the trader turns the
-    /// setting off and on again. Empty when nothing is holding it.
-    ///
-    /// The follower positions belong to the PREVIOUS master; copying a different account onto them
-    /// would merge two sources into one position. Resuming has to be a deliberate act, which is
-    /// why a replay of the same configuration on reconnection does not clear it.
-    /// </summary>
-    public string SuspendedReason { get; set; } = string.Empty;
-
     public List<CopierFollowerStatus> Followers { get; set; } = [];
 
     /// <summary>Add-on: master orders copied today. Display and diagnosis only.</summary>

@@ -46,12 +46,6 @@ public sealed class CopierPolicy
 
     private CopierPersistedState _state = new();
 
-    /// <summary>
-    /// Master the copier was last seen running against. Changing it holds copying — see
-    /// <see cref="NoteMaster"/>.
-    /// </summary>
-    private string _activeMaster = string.Empty;
-
     public CopierPolicy(BridgeConfig config, ILogger<CopierPolicy> logger)
     {
         _config = config;
@@ -71,33 +65,9 @@ public sealed class CopierPolicy
     {
         public bool Enabled { get; set; }
         public List<FollowerSetting> Followers { get; set; } = [];
-
-        /// <summary>
-        /// Non-empty while copying is held after a master change. Persisted on purpose: a bridge
-        /// restart must not quietly resume copying onto follower positions that belong to an
-        /// account nobody is watching any more.
-        /// </summary>
-        public string SuspendedReason { get; set; } = string.Empty;
     }
 
-    /// <summary>
-    /// The trader's setting AND nothing holding it back. Only this decides whether the copy engine
-    /// runs; <see cref="CopierPersistedState.Enabled"/> alone is just what the layout asked for.
-    /// </summary>
     public bool IsEffectivelyEnabled
-    {
-        get
-        {
-            lock (_lock) return _state.Enabled && _state.SuspendedReason.Length == 0;
-        }
-    }
-
-    public string SuspendedReason
-    {
-        get { lock (_lock) return _state.SuspendedReason; }
-    }
-
-    public bool RequestedEnabled
     {
         get { lock (_lock) return _state.Enabled; }
     }
@@ -137,16 +107,6 @@ public sealed class CopierPolicy
 
             if (enabled.HasValue)
             {
-                // Turning the setting OFF is what releases a hold. Resuming after a master change
-                // has to be a deliberate act, and this is the gesture that expresses it: off, then
-                // on. A host replaying `enabled: true` on every reconnection must never do it by
-                // accident, which is exactly what would happen if the hold cleared on `true`.
-                if (!enabled.Value && _state.SuspendedReason.Length > 0)
-                {
-                    _logger.LogInformation("Copier hold released ({Reason}) — the setting was switched off", _state.SuspendedReason);
-                    _state.SuspendedReason = string.Empty;
-                }
-
                 if (_state.Enabled != enabled.Value)
                 {
                     _logger.LogWarning("Copier {State} — master={Master} followers={Count}",
@@ -160,43 +120,6 @@ public sealed class CopierPolicy
 
             Persist();
             return (true, null, null);
-        }
-    }
-
-    /// <summary>
-    /// Notes the account the copier is running against, and holds copying when it changes.
-    ///
-    /// Called from the broadcast loop rather than from the <c>setAccount</c> handler on purpose:
-    /// NinjaTrader can change the selected account on its own — it auto-selects one when the
-    /// tracked account disappears — and that path never goes through a command. Watching the value
-    /// the bridge is about to publish catches every route to a changed master.
-    ///
-    /// Returns true when this call is what held it.
-    /// </summary>
-    public bool NoteMaster(string master)
-    {
-        master ??= string.Empty;
-
-        lock (_lock)
-        {
-            var previous = _activeMaster;
-            _activeMaster = master;
-
-            // First master of the session, or losing the account entirely: neither is a switch of
-            // masters, and holding on them would mean the copier could never start.
-            if (previous.Length == 0 || master.Length == 0) return false;
-            if (string.Equals(previous, master, StringComparison.OrdinalIgnoreCase)) return false;
-            if (!_state.Enabled || _state.SuspendedReason.Length > 0) return false;
-
-            _state.SuspendedReason = "masterChanged";
-            Persist();
-
-            _logger.LogWarning(
-                "COPIER HELD — master changed {Previous} → {Master}. Positions already copied belong to "
-                + "{Previous} and are now unmanaged; copying resumes only when the setting is switched off and on.",
-                previous, master, previous);
-
-            return true;
         }
     }
 
@@ -271,10 +194,9 @@ public sealed class CopierPolicy
     {
         lock (_lock)
         {
-            status.Enabled = _state.Enabled && _state.SuspendedReason.Length == 0;
+            status.Enabled = _state.Enabled;
             status.Master = master;
             status.EntriesBlocked = entriesBlocked;
-            status.SuspendedReason = _state.SuspendedReason;
 
             // The follower list is the bridge's, not the add-on's: it is what the trader
             // configured, and it must show even when NinjaTrader is disconnected and nothing can
@@ -318,12 +240,10 @@ public sealed class CopierPolicy
                 if (loaded != null)
                 {
                     loaded.Followers ??= [];
-                    loaded.SuspendedReason ??= string.Empty;
                     _state = loaded;
 
-                    _logger.LogInformation("Copier configuration loaded — enabled={Enabled} followers={Count} held={Held}",
-                        _state.Enabled, _state.Followers.Count,
-                        _state.SuspendedReason.Length == 0 ? "-" : _state.SuspendedReason);
+                    _logger.LogInformation("Copier configuration loaded — enabled={Enabled} followers={Count}",
+                        _state.Enabled, _state.Followers.Count);
                     return;
                 }
             }

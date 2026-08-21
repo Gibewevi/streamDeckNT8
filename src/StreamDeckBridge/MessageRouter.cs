@@ -489,7 +489,6 @@ public sealed class MessageRouter
                         {
                             success = true,
                             enabled = _copier.IsEffectivelyEnabled,
-                            suspendedReason = _copier.SuspendedReason,
                             followers = _copier.Followers.Count
                         })
                     };

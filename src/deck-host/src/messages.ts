@@ -129,11 +129,6 @@ export interface CopierState {
   masterResolved: boolean;
   /** Guard refuse les entrées : leurs copies s'arrêtent avec elles, les sorties continuent. */
   entriesBlocked: boolean;
-  /**
-   * Non vide quand la copie est retenue après un changement de compte maître. Reprendre demande
-   * d'éteindre puis rallumer le réglage — un rejeu de la même configuration ne suffit pas.
-   */
-  suspendedReason: string;
   followers: CopierFollower[];
   copiedToday: number;
 }
@@ -143,7 +138,6 @@ export const DEFAULT_COPIER_STATE: CopierState = {
   master: '',
   masterResolved: false,
   entriesBlocked: false,
-  suspendedReason: '',
   followers: [],
   copiedToday: 0,
 };

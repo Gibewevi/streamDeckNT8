@@ -49,6 +49,18 @@ export interface SettingField {
    */
   showIf?: { key: string; equals: boolean | string | number };
   /**
+   * Le champ ne produit RIEN tant que son `showIf` le masque.
+   *
+   * L'éditeur Bitlearn réaffiche d'ordinaire un champ masqué qui porte une valeur, et c'est un
+   * garde-fou : un réglage qui agit sans être visible est introuvable, donc incorrigeable — un
+   * `devMode: true` oublié avait ainsi désarmé la macro de sécurité sans que rien ne le montre.
+   * Ce drapeau dit que le cas ne se pose pas ici : la liste des comptes liés ne fait rien tant que
+   * « Copier les positions » est éteint, et la réafficher n'encombrerait que l'écran.
+   *
+   * À ne poser que sur un champ dont on a vérifié qu'il est réellement inerte une fois masqué.
+   */
+  inertWhenHidden?: boolean;
+  /**
    * Plancher applicable **aux valeurs non nulles**, 0 valant « règle désactivée ».
    *
    * Distinct de `min`, qui ne saurait pas exprimer « 0, ou bien 5 et plus ». Sans lui, l'éditeur
@@ -158,30 +170,33 @@ export const CATALOG: ActionDef[] = [
   {
     id: 'com.trader.ninjatrader.account', name: 'Compte', group: 'Sélection',
     description: 'Fait défiler les comptes disponibles.',
+    // Le réglage `accounts` — une liste de comptes à saisir, un par ligne — a été RETIRÉ. Il
+    // servait à filtrer et ordonner le défilement, mais il obligeait à retaper des noms de comptes
+    // que NinjaTrader publie déjà, et son exemple « Sim101 / Sim102 » était le seul nom de compte
+    // visible dans le tiroir : on le prenait pour le compte en service. Le défilement parcourt
+    // maintenant les comptes actifs, moins ceux qui sont liés. Une clé résiduelle dans un layout
+    // ancien est ignorée — un réglage retiré de l'écran ne doit pas continuer d'agir en silence.
     settings: [
-      { key: 'accounts', label: 'Comptes (un par ligne)', type: 'textarea', placeholder: 'Sim101\nSim102', help: 'Vide = tous les comptes remontés par NinjaTrader.' },
       // Porté par la touche Compte plutôt que par une action dédiée : journaliser est une
       // propriété du compte courtier, pas une commande que l'on déclenche.
       {
         key: 'journal', label: 'Journaliser ce compte', type: 'toggle',
-        help: 'Remonte les sessions de ce compte vers Bitlearn : trades, statistiques et '
-            + 'comportement. Le journal créé est privé, publiable comme les autres. '
-            + 'Désactivé, rien ne quitte ce PC.',
+        help: 'Remonte les sessions de ce compte vers Bitlearn. Désactivé, rien ne quitte ce PC.',
       },
       // La copie vit ICI plutôt que sur une touche à elle : le compte maître est le compte
       // sélectionné, et une seconde macro aurait dupliqué toute la logique de sélection.
       {
         key: 'copyEnabled', label: 'Copier les positions', type: 'toggle',
-        help: 'Recopie les ordres du compte sélectionné vers les comptes suiveurs ci-dessous. '
-            + 'Les suiveurs sortent du défilement de cette touche tant que la copie est active — '
-            + 'sans quoi un appui suffirait à promouvoir un suiveur au rang de maître.',
+        help: 'Recopie les ordres de ce compte vers les comptes liés.',
       },
       {
-        key: 'followers', label: 'Comptes suiveurs', type: 'followerList',
+        key: 'followers', label: 'Comptes liés', type: 'followerList',
         showIf: { key: 'copyEnabled', equals: true },
-        help: 'Huit au maximum. Le multiplicateur s\'applique à la quantité du maître et arrondit '
-            + 'à l\'entier : 0,3 sur 1 contrat n\'envoie RIEN plutôt que d\'arrondir à 1. '
-            + 'Multiplicateur 0 désactive un suiveur sans le retirer. Plafond 0 = sans plafond.',
+        // La liste ne copie rien tant que la bascule est éteinte : l'hôte pousse alors
+        // `enabled: false`, et le moteur n'ouvre aucune souscription.
+        inertWhenHidden: true,
+        help: 'Huit au maximum. Multiplicateur 0 met un compte en pause sans le délier ; '
+            + 'plafond 0 = sans plafond.',
       },
     ],
   },

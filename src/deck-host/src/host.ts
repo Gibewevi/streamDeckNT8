@@ -11,7 +11,7 @@
 import { BridgeClient } from './bridge-client.js';
 import {
   DEFAULT_GLOBAL_SETTINGS, DEFAULT_SAFETY_STATUS, DISCONNECTED_STATE, TradingState, OrderUpdate, GuardViolation, SafetyStatus, createCommand,
-  parseFollowers,
+  parseFollowers, formatFollowers,
 } from './messages.js';
 import { DeckDevice } from './device.js';
 import { DEFAULT_DATA_DIR, LayoutStore, SlotAssignment } from './layout.js';
@@ -30,7 +30,7 @@ import { etatAddOn, journaliserEtat, localiserNinjaScript } from './ninjatrader.
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.25.1';
+const VERSION = '0.26.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -278,34 +278,25 @@ function normalizeAccountList(value: unknown): string[] {
 }
 
 /**
- * Les réglages ne font que réordonner ou filtrer les comptes actuellement actifs dans NT8.
- * Ils ne réintroduisent jamais un compte que NinjaTrader ne publie plus.
+ * Les comptes que la touche fait défiler : ceux que NinjaTrader publie, ni plus ni moins.
+ * Elle ne réintroduit jamais un compte que la plateforme ne publie plus.
  */
-function getAccountCycleList(settings: Record<string, unknown>, state: TradingState | null): string[] {
-  const available = normalizeAccountList(state?.availableAccounts ?? []);
-  if (available.length === 0) return [];
-  const configured = normalizeAccountList(settings.accounts);
-  const base = configured.length === 0 ? available : (() => {
-    const byName = new Map(available.map((a) => [a.toUpperCase(), a]));
-    const kept = configured.map((a) => byName.get(a.toUpperCase())).filter((a): a is string => Boolean(a));
-    return kept.length > 0 ? kept : available;
-  })();
+function getAccountCycleList(state: TradingState | null): string[] {
+  const base = normalizeAccountList(state?.availableAccounts ?? []);
+  if (base.length === 0) return [];
 
-  // Les comptes suiveurs sortent du défilement tant que la copie est active. Sans ça, un appui
-  // suffisait à sélectionner un suiveur — qui devenait maître de lui-même et se copiait vers ses
-  // propres pairs. C'est le seul piège qu'a introduit le rattachement de la copie à cette touche,
-  // et il se referme ici.
-  if (settings.copyEnabled !== true) return base;
-
-  const followers = new Set(parseFollowers(settings.followers).map((f) => f.name.toUpperCase()));
-  if (followers.size === 0) return base;
-
-  const filtered = base.filter((a) => !followers.has(a.toUpperCase()));
-
-  // Tout retirer laisserait une touche qui ne fait plus rien. Mieux vaut rendre la liste
-  // complète : le trader verra le compte changer, ce qui est réparable, plutôt qu'une touche
-  // muette qu'il croira cassée.
-  return filtered.length > 0 ? filtered : base;
+  // Le réglage `accounts` n'est PLUS lu, et ce n'est pas un oubli : il a été retiré du catalogue,
+  // et un réglage retiré de l'écran qui continuerait d'agir serait le pire des deux mondes — un
+  // défilement restreint par une liste que plus personne ne voit ni ne peut corriger. Une clé
+  // résiduelle dans un layout ancien est donc inerte.
+  //
+  // Les comptes du groupe de copie ne sont PAS exclus, et c'est un renversement voulu. Ils
+  // l'étaient tant que la liste décrivait des « suiveurs » : sélectionner l'un d'eux en aurait
+  // fait un maître qui se copiait vers ses propres pairs. La liste décrit désormais un groupe
+  // dont le maître fait partie, et les suiveurs effectifs s'en déduisent — `syncCopierConfig`
+  // retire le compte sélectionné avant d'envoyer. Passer d'un membre à l'autre est donc devenu
+  // le geste normal : c'est lui qui échange les rôles.
+  return base;
 }
 
 /**
@@ -460,10 +451,10 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
     }
 
     case 'com.trader.ninjatrader.account': {
-      const accounts = getAccountCycleList(s, lastState);
+      const accounts = getAccountCycleList(lastState);
       if (accounts.length === 0) {
         log.eventWarn('Account', 'Touche Compte pressée mais NinjaTrader ne publie aucun compte actif', {
-          ntConnected: lastState?.ntConnected ?? false, configured: s.accounts,
+          ntConnected: lastState?.ntConnected ?? false,
         });
         return;
       }
@@ -478,6 +469,12 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
       if (bridge.isConnected) {
         const resp = await bridge.sendCommand(createCommand('setAccount', { account: next }));
         if (resp.error) throw new Error(`${resp.error.code}: ${resp.error.message}`);
+
+        // Les rôles viennent de changer : le compte qui vient d'être sélectionné sort des
+        // suiveurs, celui qu'on quitte y entre. La liste effective se recalcule ici et pas
+        // seulement à la prochaine édition du layout — sans ce renvoi, le moteur continuerait
+        // de copier vers le compte désormais maître, que le bridge refuserait.
+        await syncCopierConfig();
       }
       return;
     }
@@ -1000,22 +997,36 @@ async function syncCopierConfig(): Promise<void> {
   if (!cfg || !bridge.isConnected) return;
 
   const enabled = cfg.settings?.copyEnabled === true;
-  const followers = typeof cfg.settings?.followers === 'string' ? cfg.settings.followers : '';
+  const groupe = parseFollowers(cfg.settings?.followers);
+  const maitre = (lastState?.account ?? '').toUpperCase();
+
+  // Le réglage décrit le GROUPE de copie, maître compris. Les suiveurs effectifs s'en déduisent
+  // à l'exécution : groupe moins le compte sélectionné.
+  //
+  // C'est ce qui fait basculer les rôles tout seul. Groupe {A, B, C}, maître A → on copie vers
+  // B et C. La touche passe à B → on copie vers A et C, sans qu'une ligne du layout ait bougé.
+  //
+  // Et il FALLAIT que rien ne bouge : `PUT /api/tradedeck/layout` exige une session utilisateur,
+  // le poste ne peut pas réécrire le layout côté Bitlearn. Une bascule qui aurait modifié la
+  // liste localement aurait divergé du site en silence, jusqu'à la prochaine édition qui l'aurait
+  // écrasée sans prévenir.
+  const suiveurs = groupe.filter((f) => f.name.toUpperCase() !== maitre);
+  const followers = formatFollowers(suiveurs);
 
   const resp = await bridge.sendCommand(createCommand('configureCopier', { enabled, followers }));
   if (resp.error) {
     // Un refus ici n'est pas anodin : il veut dire que la copie que le trader croit configurée ne
-    // tourne PAS. Compte réel interdit en mode sûr, suiveur égal au maître, liste trop longue.
+    // tourne PAS. Compte réel interdit en mode sûr, liste trop longue.
     log.eventWarn('Copier', 'configureCopier refusé par le bridge', {
       code: resp.error.code, reason: resp.error.message, enabled, followers,
     });
     return;
   }
 
-  const result = resp.result as { enabled?: boolean; suspendedReason?: string; followers?: number } | undefined;
+  const result = resp.result as { enabled?: boolean; followers?: number } | undefined;
   log.event('Copier', 'Configuration de copie poussée vers le bridge', {
-    demande: enabled, effectif: result?.enabled, suiveurs: result?.followers,
-    retenue: result?.suspendedReason || undefined,
+    demande: enabled, effectif: result?.enabled,
+    maitre: lastState?.account ?? '', groupe: groupe.length, suiveurs: result?.followers,
   });
 }
 

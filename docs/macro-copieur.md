@@ -16,13 +16,27 @@ l'intérieur de NinjaTrader, sans que le chemin maître → suiveur ne traverse 
 
 ```
 Touche Compte
-  Compte maître ....... Sim101        (= le compte sélectionné, cyclé par la touche)
-  Copier les positions  ON
-  Suiveurs
-    → Sim102   × 1    plafond 0
-    → Sim103   × 2    plafond 5
-    → APEX-4471 × 1   plafond 3
+  ┌ COMPTE MAÎTRE ──────────────┐
+  │ Sim101                      │   ← affiché, non modifiable : c'est le compte sélectionné
+  └─────────────────────────────┘
+  ◯ Journaliser ce compte
+  ● Copier les positions
+
+  COMPTES LIÉS                       ← n'apparaît que si la copie est activée
+   ☑ Sim101  maître                   ← dans le groupe, pas copié tant qu'il est maître
+   ☑ Sim102        Multiplicateur 1   Plafond (contrats) 0
+   ☐ Sim103
+   ☑ APEX-4471     Multiplicateur 2   Plafond (contrats) 5
 ```
+
+La liste décrit un **groupe**, maître compris. On copie donc vers Sim102 et APEX-4471. Sélectionner
+Sim102 sur la touche ferait copier vers Sim101 et APEX-4471 — les rôles s'échangent, rien d'autre
+ne bouge.
+
+Les comptes sont **proposés, jamais saisis** : la liste est celle que NinjaTrader publie, et il n'y
+a qu'à cocher. Taper un nom de compte à la main est la façon la plus simple de configurer une copie
+qui ne partira jamais — une faute de frappe donne un compte qui ne résout pas, et le seul signe en
+est une pastille sur une touche du boîtier, là où personne ne la cherche.
 
 - recopie des entrées, des sorties, des déplacements de stop/target et des annulations ;
 - **multiplicateur et plafond de contrats par suiveur**, arrondi entier ;
@@ -35,16 +49,27 @@ Touche Compte
 Il n'existe pas de réglage « compte maître » : c'est le compte que la touche Compte a sélectionné,
 celui sur lequel le deck envoie déjà ses ordres. Deux conséquences, toutes deux voulues.
 
-**Les comptes suiveurs sortent du défilement de la touche.** Sans cela, un appui suffirait à
-sélectionner un suiveur, qui deviendrait maître de lui-même — et se copierait vers ses propres
-pairs. Tant que la copie est active, les suiveurs sont retirés de la liste de défilement, comme
-REPEATER9000 retirait déjà les meneurs de la liste des suiveurs assignables.
+**Le réglage décrit un GROUPE, pas des suiveurs.** Le maître en fait partie. Les suiveurs
+effectifs s'en déduisent au moment d'envoyer : *groupe moins compte sélectionné*.
 
-**Changer de compte maître désactive la copie.** Les positions ouvertes chez les suiveurs
-appartiennent au maître précédent ; continuer à copier depuis un autre compte mélangerait deux
-sources dans une même position, ce qui est précisément la divergence que la section Dérive existe
-pour empêcher. La copie se coupe, la touche le montre, le journal le dit, et le trader la
-réactive délibérément. Fermeture par sécurité, jamais par surprise.
+**Changer de compte échange donc les rôles, tout seul.** Groupe `{A, B, C}`, maître `A` → on copie
+vers `B` et `C`. La touche passe à `B` → on copie vers `A` et `C`. Le compte qu'on prend quitte les
+suiveurs, celui qu'on quitte y entre, les autres ne bougent pas. **Aucune ligne du layout n'est
+réécrite** — et il le fallait : `PUT /api/tradedeck/layout` exige une session utilisateur, le poste
+ne peut pas modifier le layout côté Bitlearn. Une bascule qui l'aurait fait localement aurait
+divergé du site en silence, jusqu'à la première édition qui l'aurait écrasée sans prévenir.
+
+C'est aussi ce qui supprime le piège : un membre du groupe sélectionné devient maître et cesse
+d'être copié au même instant. Il ne peut pas se copier vers lui-même, et le refus
+`COPIER_MASTER_IS_FOLLOWER` du bridge n'a plus l'occasion de se déclencher — il reste comme
+garde-fou.
+
+> **La copie n'est plus retenue au changement de maître.** Elle l'était, par une retenue qu'il
+> fallait lever à la main : la bascule était alors un accident. Elle en est devenue le geste
+> normal. Le risque qu'elle couvrait — un compte lié détenant encore une position ouverte par
+> l'ancien maître — est exactement celui que le [contrôle de dérive](#la-dérive--on-sarrête-on-ne-répare-pas)
+> détecte, et il le fait mieux : compte par compte, chiffré, et il se lève seul quand les positions
+> se rejoignent.
 
 ## D'où vient le moteur
 
@@ -182,33 +207,43 @@ sous-titre, sans jamais masquer l'identité du compte.
 | Copie active, tout résolu | `ACC-101` / `COPY ×3`, orange |
 | Un suiveur non résolu | `ACC-101` / `COPY 2/3`, badge blanc |
 | Guard bloque les entrées | `ACC-101` / `COPY ×3`, détail `SORTIES`, orange atténué |
-| Dérive ou rejet sur un suiveur | `ACC-101` / `COPY STOP`, détail `DERIVE` ou `REJET`, rouge |
-| Copie retenue (maître changé) | `ACC-101` / `COPY HOLD`, détail `MAITRE`, rouge |
+| Dérive ou rejet sur un compte lié | `ACC-101` / `COPY STOP`, détail `DERIVE` ou `REJET`, rouge |
 
-`COPY HOLD` est en tête de liste et en rouge délibérément : c'est le seul état où le trader **croit
-que la copie tourne alors qu'elle est arrêtée**, et cet écart-là vaut plus qu'un avertissement.
-
-Appui : défilement du compte, suiveurs exclus. La copie ne se coupe pas depuis le boîtier — c'est
-un réglage, pas une commande de séance ; son interrupteur est dans les réglages de la touche.
+Appui : défilement du compte, **groupe compris** — c'est lui qui échange les rôles. La copie ne se
+coupe pas depuis le boîtier : c'est un réglage, pas une commande de séance.
 
 Au repos — copie éteinte, ou aucun suiveur — la touche rend **exactement** comme avant : c'est ce
 que vérifient les 28 instantanés de `deckPreview.test.js` côté Bitlearn, tous verts sans mise à jour.
 
 ## Réglages de la touche Compte
 
+Le tiroir tient en quatre blocs, dans cet ordre : le **compte maître** (affiché, non modifiable —
+c'est le compte sélectionné), *Journaliser ce compte*, *Copier les positions*, et la liste des
+**comptes liés** qui n'apparaît que si la copie est activée.
+
 | Clé | Type | Rôle |
 |---|---|---|
-| `accounts` | `textarea` | *(existant)* Ordre et filtre du défilement |
 | `journal` | `toggle` | *(existant)* Journaliser ce compte vers Bitlearn |
-| `copyEnabled` | `toggle` | Copier les positions vers les comptes suiveurs |
-| `followers` | `followerList` | Les suiveurs, leur multiplicateur et leur plafond |
+| `copyEnabled` | `toggle` | Copier les positions vers les comptes liés |
+| `followers` | `followerList` | Les comptes liés, leur multiplicateur et leur plafond |
+
+> **Le réglage `accounts` a été retiré** — une liste de comptes à saisir, un par ligne, qui
+> filtrait et ordonnait le défilement. Il obligeait à retaper des noms que NinjaTrader publie
+> déjà, et son exemple « Sim101 / Sim102 » était le **seul nom de compte visible dans le tiroir** :
+> on le prenait pour le compte en service. Le défilement parcourt maintenant les comptes actifs,
+> moins ceux qui sont liés.
+>
+> Une clé résiduelle dans un layout ancien est **ignorée**, par `getAccountCycleList` comme par
+> `comptesJournalises`. Un réglage retiré de l'écran qui continuerait d'agir serait le pire des
+> deux mondes : un défilement restreint, ou des séances non journalisées, par une liste que plus
+> personne ne voit ni ne peut corriger.
 
 > **`followers` est une CHAÎNE, pas un tableau — et ce n'est pas négociable.**
 > `sanitizeSettings` (`Bitlearn/lib/tradeDeck/layout.js`) n'accepte que `string`, `boolean` et
 > `number` dans les réglages d'une touche : un tableau ou un objet est **silencieusement écarté**
 > en traversant le site, et le trader verrait sa sélection disparaître sans un message.
 
-Format : **une ligne par suiveur**, `nom|multiplicateur|plafond`.
+Format : **une ligne par compte lié**, `nom|multiplicateur|plafond`.
 
 ```
 Sim102|1|0
@@ -301,8 +336,8 @@ comptes Sim au minimum.
 | 2 | Stop déplacé sur le maître | Suit chez le suiveur, par `Change`, sans recréer l'ordre |
 | 3 | Take profit maître exécuté | Stop suiveur annulé par son propre OCO |
 | 4 | Multiplicateur 0,3 sur 1 contrat | Rien envoyé, ligne de journal |
-| 5 | Appui sur la touche Compte | Les suiveurs sont **absents** du défilement |
-| 6 | Changement de compte maître | Copie désactivée, raison journalisée |
+| 5 | Appui sur la touche Compte | Tous les comptes défilent, groupe compris |
+| 6 | Bascule A → B (groupe A, B, C) | On copie vers A et C ; B n'est plus copié. Aucune écriture du layout |
 | 7 | Suiveur déconnecté puis reconnecté | `resolved` passe à faux puis à vrai, copie reprise |
 | 8 | Rejet marge sur un suiveur | `copierViolation`, touche rouge, `lastError` renseigné |
 | 9 | Position fermée à la main sur un suiveur | Dérive détectée, entrées arrêtées, **aucun ordre émis** |

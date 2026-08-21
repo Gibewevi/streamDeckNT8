@@ -30,18 +30,28 @@ const INTERVALLE_MS = 60_000;
 
 const ACTION_COMPTE = 'com.trader.ninjatrader.account';
 
-/** Comptes dont les sessions remontent. `tous` couvre une touche Compte sans liste explicite. */
+/**
+ * Comptes dont les sessions remontent.
+ *
+ * `noms` n'est plus alimenté : le réglage qui le remplissait — une liste de comptes à saisir, un
+ * par ligne — a été retiré de la touche Compte. La structure demeure parce qu'elle porte encore la
+ * décision qui compte, marche ou arrêt : bascule éteinte, `tous` reste faux et `noms` vide, donc
+ * rien ne quitte le poste.
+ */
 export interface FiltreComptes {
   tous: boolean;
   noms: Set<string>;
 }
 
 /**
- * Lit dans le layout quels comptes l'utilisateur a choisi de journaliser.
+ * Lit dans le layout si l'utilisateur a choisi de journaliser.
  *
  * La bascule vit sur la touche Compte : journaliser est une propriété du compte courtier, pas une
- * commande. Une touche sans liste de comptes pilote tous ceux que NinjaTrader remonte — la
- * journalisation suit la même règle, sans quoi cocher la case n'aurait aucun effet visible.
+ * commande. Elle couvre tous les comptes que NinjaTrader remonte.
+ *
+ * `settings.accounts` n'est délibérément PLUS lu. Le réglage a disparu de l'écran, et une clé
+ * restée dans un layout ancien restreindrait sinon la journalisation à des comptes que plus
+ * personne ne voit ni ne peut corriger — des séances manqueraient sans que rien ne le dise.
  */
 export function comptesJournalises(layout: Layout): FiltreComptes {
   const filtre: FiltreComptes = { tous: false, noms: new Set() };
@@ -50,11 +60,7 @@ export function comptesJournalises(layout: Layout): FiltreComptes {
     for (const slot of Object.values(page.slots)) {
       if (slot.actionId !== ACTION_COMPTE) continue;
       if (slot.settings?.journal !== true) continue;
-
-      const brut = typeof slot.settings.accounts === 'string' ? slot.settings.accounts : '';
-      const noms = brut.split(/\r?\n/).map((n) => n.trim()).filter(Boolean);
-      if (noms.length === 0) filtre.tous = true;
-      else for (const nom of noms) filtre.noms.add(nom);
+      filtre.tous = true;
     }
   }
 
