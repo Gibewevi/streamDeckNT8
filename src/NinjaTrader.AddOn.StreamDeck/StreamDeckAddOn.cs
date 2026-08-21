@@ -85,7 +85,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // Mirrors the selected account onto follower accounts. Created before the publisher,
                 // which drives its account resolution and its drift check on every tick — the
                 // copier deliberately owns no timer of its own.
-                _copyEngine = new CopyEngine(_resolver, _bridgeClient, _guardEnforcer);
+                _copyEngine = new CopyEngine(_resolver, _bridgeClient, _guardEnforcer, _executionRecorder);
+
+                // Chaque exécution d'un compte lié part au journal annotée de son origine : quel
+                // ordre maître elle copie, avec combien de retard et quel écart de prix. Branché
+                // ici plutôt qu'injecté pour ne pas faire connaître le moteur de copie à
+                // l'enregistreur — même motif que `_orderMonitor.StateChanged`.
+                _executionRecorder.CopyContext = _copyEngine.DescribeCopiedExecution;
 
                 _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor, _trendMonitor, _copyEngine);
 

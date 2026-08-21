@@ -211,6 +211,12 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private readonly BridgeClient _bridgeClient;
         private readonly GuardEnforcer _enforcer;
 
+        /// <summary>
+        /// Optional. Absent, copying works exactly the same and simply leaves no trace of what the
+        /// linked accounts actually executed.
+        /// </summary>
+        private readonly ExecutionRecorder _recorder;
+
         private volatile CopierConfig _config = CopierConfig.Empty;
         private volatile FollowerRoute[] _routes = new FollowerRoute[0];
         private volatile Account _masterAccount;
@@ -247,6 +253,39 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private readonly ConcurrentDictionary<string, long> _lastCopyActivity =
             new ConcurrentDictionary<string, long>(StringComparer.Ordinal);
 
+        /// <summary>
+        /// What the master actually got, per master order. Recorded the moment the master order
+        /// fills, so a follower fill arriving later has something to be compared against.
+        ///
+        /// This is what makes latency and slippage measurable at all: without the master's price
+        /// and instant kept somewhere, a follower fill is just a number with nothing to subtract
+        /// from it.
+        /// </summary>
+        private sealed class MasterFill
+        {
+            public long Ticks;
+            public double Price;
+            public OrderAction Action;
+        }
+
+        private readonly ConcurrentDictionary<long, MasterFill> _masterFills =
+            new ConcurrentDictionary<long, MasterFill>();
+        private readonly ConcurrentQueue<long> _masterFillOrder = new ConcurrentQueue<long>();
+
+        /// <summary>
+        /// Follower order id → master order id, written at SUBMIT time.
+        ///
+        /// Deliberately not read from the link maps: those are emptied as soon as an order goes
+        /// terminal, and NinjaTrader raises the execution and the terminal state close enough
+        /// together that the mapping could already be gone when the fill is journalled.
+        /// </summary>
+        private readonly ConcurrentDictionary<long, long> _copyOrigins =
+            new ConcurrentDictionary<long, long>();
+        private readonly ConcurrentQueue<long> _copyOriginOrder = new ConcurrentQueue<long>();
+
+        /// <summary>Both maps are bounded: a session must not grow them without end.</summary>
+        private const int MaxRemembered = 4000;
+
         private readonly object _submissionGate = new object();
         private readonly object _subscriptionLock = new object();
         private readonly HashSet<Account> _subscribed = new HashSet<Account>();
@@ -257,11 +296,13 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private int _copiedToday;
         private string _copiedTodayDate = string.Empty;
 
-        public CopyEngine(ContextResolver resolver, BridgeClient bridgeClient, GuardEnforcer enforcer)
+        public CopyEngine(ContextResolver resolver, BridgeClient bridgeClient, GuardEnforcer enforcer,
+            ExecutionRecorder recorder = null)
         {
             _resolver = resolver;
             _bridgeClient = bridgeClient;
             _enforcer = enforcer;
+            _recorder = recorder;
         }
 
         // =====================================================================================
@@ -492,6 +533,17 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             try
             {
                 account.OrderUpdate += OnOrderUpdate;
+
+                // ExecutionUpdate en plus, et sur TOUS les comptes du groupe : c'est le seul
+                // événement qui dit ce qui a réellement été exécuté — prix, quantité, commission.
+                // Sans lui, le journal ne contenait que le compte suivi, et rien ne permettait de
+                // comparer un compte lié à son maître.
+                //
+                // Le compte suivi est déjà abonné par OrderMonitor : le recouvrement est voulu, et
+                // c'est l'enregistreur qui dédoublonne par identifiant d'exécution. Coordonner les
+                // deux abonnements aurait demandé que chacun connaisse l'autre.
+                if (_recorder != null) account.ExecutionUpdate += _recorder.OnExecutionUpdate;
+
                 _subscribed.Add(account);
                 return true;
             }
@@ -506,7 +558,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         {
             foreach (var account in _subscribed)
             {
-                try { account.OrderUpdate -= OnOrderUpdate; }
+                try
+                {
+                    account.OrderUpdate -= OnOrderUpdate;
+                    if (_recorder != null) account.ExecutionUpdate -= _recorder.OnExecutionUpdate;
+                }
                 catch (Exception ex) { SdLogger.Fail("Copier", ex, "Could not unsubscribe from {0}", account.Name); }
             }
             _subscribed.Clear();
@@ -920,6 +976,11 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         private void HandleMasterOrderFilled(Order masterOrder, List<OrderLink> links)
         {
+            // Ce que le maître a obtenu, gardé pour que la copie ait un point de comparaison.
+            // Le prix moyen et non le prix d'une exécution : un ordre maître peut se remplir en
+            // plusieurs morceaux, et c'est bien le prix d'ensemble que le suiveur doit égaler.
+            RememberMasterFill(masterOrder);
+
             var masterOco = masterOrder.Oco;
             if (!string.IsNullOrEmpty(masterOco)) _masterOcoFillSeen[masterOco] = 1;
 
@@ -972,6 +1033,18 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 {
                     link.IsFilled = true;
                     link.IsTerminal = true;
+                }
+
+                // Le chiffre que personne ne pouvait obtenir jusqu'ici : de combien la copie est
+                // arrivée en retard, et ce qu'elle a payé de plus que le maître. Journalisé au
+                // fill parce que c'est le seul instant où les deux sont connus.
+                var ecart = Compare(order.Id, order.AverageFillPrice, link.Instrument);
+                if (ecart != null)
+                {
+                    SdLogger.Event("Copier",
+                        "Copy filled — master#{0} @{1} → {2} @{3} : {4}ms de retard, {5} tick(s) de glissement",
+                        ecart.MasterOrderId, ecart.MasterPrice, link.FollowerName, ecart.FollowerPrice,
+                        Math.Round(ecart.LatencyMs, 1), Math.Round(ecart.SlippageTicks, 2));
                 }
 
                 if (link.IsExit)
@@ -1292,6 +1365,14 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 lock (link.Gate) link.FollowerOrder = followerOrder;
                 _linksByFollowerOrderId[followerOrder.Id] = link;
 
+                // Corrélation ordre maître → ordre copié, écrite AVANT l'envoi et hors des cartes
+                // de liens : celles-ci se vident dès qu'un ordre devient terminal, et l'exécution
+                // peut arriver après. C'est elle qui rend une copie traçable d'un compte à l'autre.
+                RememberCopyOrigin(followerOrder.Id, link.MasterOrderId);
+                SdLogger.Event("Copier", "Copy submitted — master#{0} → {1} order#{2} {3} {4} qty={5} on {6}",
+                    link.MasterOrderId, link.FollowerName, followerOrder.Id,
+                    link.OrderAction, link.OrderType, quantity, link.Instrument.FullName);
+
                 // Told to the enforcer BEFORE the submit. It cancels external orders that grow
                 // exposure while the macro blocks, and a copy landing on the tracked account would
                 // otherwise look external to it — the master order already carried the verdict.
@@ -1569,6 +1650,131 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         // =====================================================================================
         // Helpers
         // =====================================================================================
+
+        // =====================================================================================
+        // Comparaison maître / copie — latence et glissement
+        // =====================================================================================
+
+        private void RememberMasterFill(Order masterOrder)
+        {
+            try
+            {
+                var fill = new MasterFill
+                {
+                    Ticks = Stopwatch.GetTimestamp(),
+                    Price = masterOrder.AverageFillPrice,
+                    Action = masterOrder.OrderAction,
+                };
+
+                if (_masterFills.TryAdd(masterOrder.Id, fill))
+                {
+                    _masterFillOrder.Enqueue(masterOrder.Id);
+                    long vieux;
+                    while (_masterFillOrder.Count > MaxRemembered && _masterFillOrder.TryDequeue(out vieux))
+                    {
+                        MasterFill parti;
+                        _masterFills.TryRemove(vieux, out parti);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Fail("Copier", ex, "Could not record the master fill for comparison");
+            }
+        }
+
+        private void RememberCopyOrigin(long followerOrderId, long masterOrderId)
+        {
+            if (!_copyOrigins.TryAdd(followerOrderId, masterOrderId)) return;
+
+            _copyOriginOrder.Enqueue(followerOrderId);
+            long vieux;
+            while (_copyOriginOrder.Count > MaxRemembered && _copyOriginOrder.TryDequeue(out vieux))
+            {
+                long parti;
+                _copyOrigins.TryRemove(vieux, out parti);
+            }
+        }
+
+        /// <summary>What separates a copy from the order it copied. Null when nothing to compare.</summary>
+        private sealed class CopyComparison
+        {
+            public long MasterOrderId;
+            public double MasterPrice;
+            public double FollowerPrice;
+            public double LatencyMs;
+            public double SlippageTicks;
+        }
+
+        /// <summary>
+        /// Compares a filled copy against the master fill it came from.
+        ///
+        /// The slippage is SIGNED so that positive always means "worse for the follower", whatever
+        /// the direction: paying more on a buy and receiving less on a sell are the same misfortune
+        /// and must not cancel each other out in an average.
+        ///
+        /// Returns null when the order is not a copy, or when the master fill is not known — a
+        /// copy submitted for an order that never reported a fill has nothing to be compared to,
+        /// and inventing a zero would read as a perfect copy.
+        /// </summary>
+        private CopyComparison Compare(long followerOrderId, double followerPrice, Instrument instrument)
+        {
+            long masterOrderId;
+            if (!_copyOrigins.TryGetValue(followerOrderId, out masterOrderId)) return null;
+
+            MasterFill master;
+            if (!_masterFills.TryGetValue(masterOrderId, out master)) return null;
+            if (followerPrice <= 0 || master.Price <= 0) return null;
+
+            var tickSize = instrument != null && instrument.MasterInstrument != null
+                ? instrument.MasterInstrument.TickSize
+                : 0;
+
+            var ecart = master.Action == OrderAction.Buy || master.Action == OrderAction.BuyToCover
+                ? followerPrice - master.Price      // acheter plus cher est défavorable
+                : master.Price - followerPrice;     // vendre moins cher l'est tout autant
+
+            return new CopyComparison
+            {
+                MasterOrderId = masterOrderId,
+                MasterPrice = master.Price,
+                FollowerPrice = followerPrice,
+                LatencyMs = TicksToMilliseconds(Stopwatch.GetTimestamp() - master.Ticks),
+                SlippageTicks = tickSize > 0 ? ecart / tickSize : 0,
+            };
+        }
+
+        /// <summary>
+        /// Extra journal fields for a fill that is a copy. Fed to <see cref="ExecutionRecorder"/>,
+        /// which merges them into the record it writes.
+        ///
+        /// Never throws and never blocks: it runs inside NinjaTrader's execution pipeline, and a
+        /// missing annotation must never cost the fill itself.
+        /// </summary>
+        public Dictionary<string, object> DescribeCopiedExecution(Execution exec)
+        {
+            try
+            {
+                if (exec == null || exec.Order == null) return null;
+
+                var comparison = Compare(exec.Order.Id, exec.Price, exec.Instrument);
+                if (comparison == null) return null;
+
+                var cfg = _config;
+                var champs = new Dictionary<string, object>();
+                champs["copyOf"] = comparison.MasterOrderId.ToString(CultureInfo.InvariantCulture);
+                champs["copyMaster"] = cfg.Master;
+                champs["copyMasterPrice"] = comparison.MasterPrice;
+                champs["copyLatencyMs"] = Math.Round(comparison.LatencyMs, 1);
+                champs["copySlippageTicks"] = Math.Round(comparison.SlippageTicks, 4);
+                return champs;
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Fail("Copier", ex, "Could not describe a copied execution");
+                return null;
+            }
+        }
 
         private void MarkCopyActivity(string followerName, string instrumentName)
         {

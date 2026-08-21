@@ -64,6 +64,39 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         /// </summary>
         private readonly JournalSeal _seal;
 
+        /// <summary>
+        /// Executions already written, so the same fill is never journalled twice.
+        ///
+        /// THE CASE THIS EXISTS FOR. Two components subscribe accounts to <c>ExecutionUpdate</c>:
+        /// <see cref="OrderMonitor"/> for the account being traded, and <see cref="CopyEngine"/>
+        /// for the master and every linked account. They overlap by design — the traded account is
+        /// usually the master — and NinjaTrader then raises the event once per subscription. A
+        /// duplicated fill does not merely clutter the file: the Bitlearn journal would count the
+        /// trade twice, and the P&amp;L it publishes would be twice what the trader made.
+        ///
+        /// Deduplicating here rather than coordinating the two subscriptions is deliberate. It
+        /// holds whatever anyone subscribes to next, and neither component has to know about the
+        /// other.
+        /// </summary>
+        private readonly HashSet<string> _seenExecutions = new HashSet<string>(StringComparer.Ordinal);
+        private readonly Queue<string> _seenOrder = new Queue<string>();
+
+        /// <summary>
+        /// Beyond this many remembered ids the oldest are forgotten. A fill that arrived more than
+        /// four thousand fills ago is not about to be re-raised.
+        /// </summary>
+        private const int MaxSeenExecutions = 4000;
+
+        /// <summary>
+        /// Extra fields describing a fill that is a COPY of an order placed on another account:
+        /// which master order it came from, how late it filled, and at what price difference.
+        /// Returns null for a fill that is not a copy — which is every fill on the master account.
+        ///
+        /// Supplied by <see cref="CopyEngine"/>, which is the only component that knows the
+        /// mapping. Optional: absent, fills are recorded exactly as before.
+        /// </summary>
+        public Func<Execution, Dictionary<string, object>> CopyContext { get; set; }
+
         public ExecutionRecorder(TrendMonitor trend = null, string directory = null)
         {
             _trend = trend;
@@ -84,12 +117,51 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             try
             {
                 if (_disposed || e == null || e.Execution == null) return;
-                Write(Describe(e.Execution, TrendAt(e.Execution)));
+                if (AlreadyRecorded(e.Execution)) return;
+
+                var record = Describe(e.Execution, TrendAt(e.Execution));
+
+                // Stamped here rather than inside Describe: only the copy engine can say whether a
+                // fill is a copy, and it must never be able to stop a fill being recorded.
+                try
+                {
+                    var copie = CopyContext != null ? CopyContext(e.Execution) : null;
+                    if (copie != null)
+                    {
+                        foreach (var pair in copie) record[pair.Key] = pair.Value;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SdLogger.Fail("Journal", ex, "Copy context could not be read — fill recorded without it");
+                }
+
+                Write(record);
                 WarnIfNoCommission(e.Execution);
             }
             catch (Exception ex)
             {
                 SdLogger.Fail("Journal", ex, "Execution not recorded");
+            }
+        }
+
+        /// <summary>
+        /// True when this exact fill has already been written — see <see cref="_seenExecutions"/>.
+        ///
+        /// A fill without an execution id is recorded rather than dropped: an id is what makes
+        /// deduplication possible, and its absence must not cost the line itself.
+        /// </summary>
+        private bool AlreadyRecorded(Execution exec)
+        {
+            var id = exec.ExecutionId;
+            if (string.IsNullOrEmpty(id)) return false;
+
+            lock (_sync)
+            {
+                if (!_seenExecutions.Add(id)) return true;
+                _seenOrder.Enqueue(id);
+                while (_seenOrder.Count > MaxSeenExecutions) _seenExecutions.Remove(_seenOrder.Dequeue());
+                return false;
             }
         }
 

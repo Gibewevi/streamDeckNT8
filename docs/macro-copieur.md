@@ -103,7 +103,7 @@ garde-fou.
 | Aucune surveillance de l'écart maître / suiveur | § [Dérive](#la-dérive--on-sarrête-on-ne-répare-pas) |
 | `Trace.WriteLine` | `SdLogger`, catégorie `Copier`, corrélé comme le reste |
 | Threads de travail jamais arrêtés | Arrêtés dans le `Shutdown()` de l'add-on — NinjaScript recharge l'add-on à chaque recompilation |
-| Sondes de latence dans un CSV à part | Mesures dans le journal existant |
+| Sondes de latence dans un CSV à part | Latence **et** glissement, sur chaque exécution copiée, dans le journal scellé — § [Comparer un compte lié à son maître](#comparer-un-compte-lié-à-son-maître) |
 
 ## Où vit le moteur
 
@@ -339,6 +339,67 @@ est le seul arbitre.
 ### `copierViolation` — add-on → bridge → hôte
 
 Même forme que `guardViolation`. Émis sur un rejet de suiveur et sur une entrée en dérive.
+
+## Ce que le journal dit, et ce qu'il ne dit pas
+
+Vingt-cinq lignes de journal couvrent le copieur, catégorie `Copier` dans
+`addon-AAAA-MM-JJ.log`. Elles décrivent **les décisions** :
+
+| Ligne | Ce qu'elle permet de vérifier |
+|---|---|
+| `Routes resolved — master=… followers=Sim101×1` | Quels comptes sont réellement armés. Un `!` devant un nom = non résolu |
+| `Copying Buy Market qty=2 on MNQ 09-26 to 2 follower(s)` | Un ordre maître a bien déclenché N copies |
+| `Entry not copied to X — account is in drift (…)` | Pourquoi un compte n'a rien reçu |
+| `Nothing copied to X — 1 × 0,3 rounds to zero contracts` | Idem, cas du dimensionnement |
+| `Entry not copied — the safety macro is blocking entries` | Idem, cas de Guard |
+| `COPY REJECTED on X — … That account did NOT take the trade.` | Un compte a refusé l'ordre |
+| `DRIFT on X / MNQ 09-26 — follower is -2 contract(s) off…` | L'écart mesuré, signé, par compte et instrument |
+| `Drift cleared on X — entry copies resume` | La reprise |
+
+S'y ajoute le bloc `copier` publié toutes les 500 ms — `resolved`, `drifted`, `drift`,
+`lastError` par compte — et l'événement `copierViolation` qui remonte jusqu'à l'hôte.
+
+### Comparer un compte lié à son maître
+
+Les décisions ne suffisent pas à savoir si un compte lié a **obtenu la même chose** que le maître.
+Pour ça, trois mécanismes.
+
+**Les exécutions des comptes liés sont enregistrées.** `ExecutionRecorder` n'était abonné qu'au
+compte suivi ; le moteur de copie l'abonne désormais au maître **et à chaque compte lié**. Prix,
+quantité, commission et P&L des comptes copiés entrent donc dans le journal scellé, et remontent à
+Bitlearn comme le reste.
+
+> Le recouvrement avec `OrderMonitor` est voulu — le compte suivi est en général le maître — et
+> c'est **l'enregistreur qui dédoublonne**, par identifiant d'exécution. Sans ce garde-fou, chaque
+> exécution du compte suivi serait écrite deux fois et **Bitlearn publierait un P&L double**.
+> Dédoublonner là plutôt que coordonner les deux abonnements tient quoi qu'on branche ensuite.
+
+**Chaque copie porte l'ordre dont elle vient.** La corrélation est écrite à l'envoi, hors des
+cartes de liens — celles-ci se vident dès qu'un ordre devient terminal, et l'exécution peut arriver
+après :
+
+```
+Copy submitted — master#1042 → Sim101 order#1043 Buy Market qty=2 on MNQ 09-26
+```
+
+**Latence et glissement sont mesurés au fill.** Le prix moyen du maître et l'instant de son
+exécution sont retenus quand il se remplit ; à l'arrivée du fill de la copie, deux soustractions :
+
+```
+Copy filled — master#1042 @20000,25 → Sim101 @20000,5 : 62,4ms de retard, 1 tick de glissement
+```
+
+Les mêmes chiffres sont estampillés sur la ligne de journal de l'exécution copiée :
+`copyOf`, `copyMaster`, `copyMasterPrice`, `copyLatencyMs`, `copySlippageTicks`.
+
+> **Le glissement est signé pour que positif veuille toujours dire « défavorable au compte lié »**,
+> quel que soit le sens : payer plus cher à l'achat et encaisser moins à la vente sont la même
+> infortune, et les laisser se compenser dans une moyenne aurait rendu la mesure inutile.
+> Convention vérifiée sur les quatre sens.
+
+Ce qui reste hors de portée : une copie dont l'ordre maître n'a jamais rapporté d'exécution n'a
+rien à quoi se comparer. Aucun champ n'est alors écrit — plutôt qu'un zéro, qui se lirait comme une
+copie parfaite.
 
 ## Hors périmètre, assumé
 
