@@ -125,13 +125,12 @@ public class TdStopPlacement : Indicator
         // Same bar-close discipline as TdSwingStructure, and for the same reason: the engine is a
         // state machine, and ATAS re-enters OnCalculate on every tick of the forming bar.
         //
-        // _lastBar is stamped only once this bar is actually about to reach _engine.Update (see
-        // below), not here at entry: if InstrumentInfo is briefly unavailable, the guards below
-        // return without stamping, so the next tick of this SAME forming bar retries the closed
-        // bar instead of losing it forever. Re-running the side-effect-free checks above on that
-        // retry is harmless, but the engine must only ever be fed once.
+        // The stamp stays HERE, at the entry, and must not be moved below the guards — same reason
+        // as TdSwingStructure: on entry it makes "at most one pass per bar" structurally true
+        // whatever anyone later inserts into this method.
         if (bar == _lastBar)
             return;
+        _lastBar = bar;
 
         if (bar == 0)
             return;
@@ -141,13 +140,11 @@ public class TdStopPlacement : Indicator
         if (closed < _atr.Period + 1)
             return;
 
+        // Defensive only: ATAS treats InstrumentInfo as present inside OnCalculate, and its own
+        // indicators dereference TickSize there unguarded.
         var tick = InstrumentInfo?.TickSize ?? 0m;
         if (tick <= 0m)
             return;
-
-        // Past this point the bar WILL be fed to the engine below, so it is safe — and necessary —
-        // to mark it consumed now.
-        _lastBar = bar;
 
         var atr = _atr[closed];
         if (atr < tick)

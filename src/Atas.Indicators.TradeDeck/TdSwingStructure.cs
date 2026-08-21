@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
@@ -142,13 +142,13 @@ public class TdSwingStructure : Indicator
         // Side effect, and a welcome one: the historical pass feeds bars 0..CurrentBar-1 and leaves
         // the forming bar alone — exactly NinjaTrader's behaviour, for free.
         //
-        // _lastBar is stamped only once this bar is actually about to reach _engine.Update (see
-        // below), not here at entry: if InstrumentInfo is briefly unavailable, the guards below
-        // return without stamping, so the next tick of this SAME forming bar retries the closed
-        // bar instead of losing it forever. Re-running the side-effect-free checks above on that
-        // retry is harmless — they are idempotent — but the engine must only ever be fed once.
+        // The stamp stays HERE, at the entry, and must not be moved below the guards. Stamping on
+        // entry makes "at most one pass per bar" structurally true whatever anyone later inserts
+        // into this method; deferring it would make that invariant depend on nobody adding a
+        // side-effecting line above the stamp — an error nothing would report.
         if (bar == _lastBar)
             return;
+        _lastBar = bar;
 
         if (bar == 0)
             return;
@@ -156,9 +156,7 @@ public class TdSwingStructure : Indicator
         var closed = bar - 1;
 
         // The EMA is drawn from the first bar, before the ATR warm-up gate below — matching the
-        // NinjaTrader version, which set the EMA plot before its own early return. Writing the
-        // same value again on a retried tick is harmless: it is a plain assignment, not an
-        // accumulation.
+        // NinjaTrader version, which set the EMA plot before its own early return.
         _emaSeries[closed] = _showEma ? _ema[closed] : 0m;
 
         // The ATR needs its window before the threshold means anything. Seeding the engine earlier
@@ -166,13 +164,11 @@ public class TdSwingStructure : Indicator
         if (closed < _atr.Period + 1)
             return;
 
+        // Defensive only: ATAS treats InstrumentInfo as present inside OnCalculate, and its own
+        // indicators dereference TickSize there unguarded.
         var tick = InstrumentInfo?.TickSize ?? 0m;
         if (tick <= 0m)
             return;
-
-        // Past this point the bar WILL be fed to the engine below, so it is safe — and necessary —
-        // to mark it consumed now.
-        _lastBar = bar;
 
         var unit = _atr[closed];
         if (unit < tick)
