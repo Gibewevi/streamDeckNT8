@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Xml.Serialization;
 using NinjaTrader.Gui;
 using NinjaTrader.Data;
+using TradeDeck.Analytics;
 #endregion
 
 // This namespace holds Indicators in this folder and is required. Do not change it.
@@ -58,8 +59,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         private EMA _ema;
         private TdSwingEngine _engine;
 
-        /// <summary>Reused per bar so the selection does not allocate on every candidate scan.</summary>
-        private readonly List<TdSwingPivot> _candidates = new List<TdSwingPivot>();
+        private readonly TdStopSelector _selector = new TdStopSelector();
 
         private readonly List<PendingEntry> _pending = new List<PendingEntry>();
         private readonly List<double> _distanceTicks = new List<double>();
@@ -141,7 +141,10 @@ namespace NinjaTrader.NinjaScript.Indicators
             double anchor;
             double stop;
 
-            if (TrySelectAnchor(isLong, entry, atr, out anchor))
+            if (_selector.TrySelectAnchor(
+                    _engine.Pivots, CurrentBar, isLong, entry,
+                    MinDistanceAtr * atr, MaxDistanceAtr * atr,
+                    LookbackPivots, SkipMostRecentPivot, out anchor))
             {
                 stop = isLong
                     ? anchor - BufferTicks * TickSize
@@ -184,70 +187,6 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (PreviewDirection == TdStopPreviewDirection.Achat) return true;
             if (PreviewDirection == TdStopPreviewDirection.Vente) return false;
             return Close[0] >= _ema[0];
-        }
-
-        /// <summary>
-        /// Builds the candidate levels and applies the corridor. Returns false when nothing valid
-        /// was found, which is the caller's cue to fall back.
-        /// </summary>
-        private bool TrySelectAnchor(bool isLong, double entry, double atr, out double anchor)
-        {
-            anchor = 0.0;
-
-            double min = MinDistanceAtr * atr;
-            double max = MaxDistanceAtr * atr;
-
-            _candidates.Clear();
-
-            var pivots = _engine.Pivots;
-            int inspected = 0;
-
-            // Backwards, so index 0 of _candidates is the most recent qualifying level.
-            for (int i = pivots.Count - 1; i >= 0 && inspected < LookbackPivots; i--)
-            {
-                var pivot = pivots[i];
-
-                // A long is protected by a swing LOW, a short by a swing HIGH.
-                if (pivot.IsHigh == isLong)
-                    continue;
-
-                inspected++;
-
-                // Only levels already knowable at this bar. The engine appends on confirmation, so
-                // this holds by construction — the test guards against a future change of order.
-                if (pivot.ConfirmationBar > CurrentBar)
-                    continue;
-
-                double distance = isLong ? entry - pivot.Price : pivot.Price - entry;
-                if (distance <= 0.0)
-                    continue;
-                if (distance < min || distance > max)
-                    continue;
-
-                _candidates.Add(pivot);
-            }
-
-            if (_candidates.Count == 0)
-                return false;
-
-            // Step past the obvious level only when there is somewhere else to go.
-            int start = SkipMostRecentPivot && _candidates.Count >= 2 ? 1 : 0;
-
-            double best = 0.0;
-            double bestDistance = double.MaxValue;
-            for (int i = start; i < _candidates.Count; i++)
-            {
-                var pivot = _candidates[i];
-                double distance = isLong ? entry - pivot.Price : pivot.Price - entry;
-                if (distance < bestDistance)
-                {
-                    bestDistance = distance;
-                    best = pivot.Price;
-                }
-            }
-
-            anchor = best;
-            return true;
         }
 
         /// <summary>

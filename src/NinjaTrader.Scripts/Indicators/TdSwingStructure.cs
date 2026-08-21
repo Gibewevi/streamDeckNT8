@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Xml.Serialization;
 using NinjaTrader.Gui;
 using NinjaTrader.Data;
+using TradeDeck.Analytics;
 #endregion
 
 // This namespace holds Indicators in this folder and is required. Do not change it.

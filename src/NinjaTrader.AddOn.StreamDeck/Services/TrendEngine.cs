@@ -1,5 +1,6 @@
 using System;
 using NinjaTrader.NinjaScript.Indicators;
+using TradeDeck.Analytics;
 
 namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 {

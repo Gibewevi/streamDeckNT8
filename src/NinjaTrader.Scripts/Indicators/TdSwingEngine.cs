@@ -2,8 +2,12 @@
 using System.Collections.Generic;
 #endregion
 
-// This namespace holds Indicators in this folder and is required. Do not change it.
-namespace NinjaTrader.NinjaScript.Indicators
+// Deliberately NOT NinjaTrader.NinjaScript.Indicators. This file is compiled by BOTH NinjaScript
+// and the ATAS project (see src/Atas.Indicators.TradeDeck), and a NinjaTrader.* namespace inside an
+// ATAS assembly makes the next reader doubt what they are looking at. NinjaScript compiles every
+// .cs under bin\Custom into one assembly and places no constraint on the namespace of a plain
+// class — only indicators need theirs.
+namespace TradeDeck.Analytics
 {
     /// <summary>
     /// One confirmed swing pivot.
