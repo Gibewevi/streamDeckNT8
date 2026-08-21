@@ -95,7 +95,21 @@ VPS=debian@vps-a7e6d37c.vps.ovh.ca
 DEST=/home/bitlearn/bitlearn_dev/private/tradedeck
 
 scp -P 50000 build/$EXE $VPS:/tmp/
-ssh -p 50000 $VPS "sudo -u bitlearn bash -c 'rm -f $DEST/*.exe && mv /tmp/$EXE $DEST/'"
+ssh -p 50000 $VPS "sudo -u bitlearn bash -c 'cp /tmp/$EXE $DEST/ && chmod 755 $DEST/$EXE && rm -f \$(ls $DEST/*.exe | grep -v $EXE)'"
+ssh -p 50000 $VPS "rm -f /tmp/$EXE"
+```
+
+**`cp` et non `mv`, et l'ancien ne part qu'APRÈS.** Le fichier déposé par `scp` appartient à
+`debian`, `/tmp` porte le sticky bit, et `mv` exécuté en `bitlearn` ne peut donc pas le retirer de
+`/tmp` : la commande échoue. Écrite comme `rm -f $DEST/*.exe && mv …`, elle supprime l'ancien
+installateur d'abord, puis échoue — et laisse le dossier **vide**, donc la page de téléchargement
+sans rien à servir. Vécu le 21/08/2026 sur dev.
+
+Vérifier l'empreinte plutôt que la taille, un `scp` interrompu produisant un fichier plausible :
+
+```bash
+sha256sum build/$EXE
+ssh -p 50000 $VPS "sudo -u bitlearn sha256sum $DEST/$EXE"
 ```
 
 **Changer de serveur désapparie le poste.** Le jeton d'appareil ne vaut que pour le serveur qui l'a
