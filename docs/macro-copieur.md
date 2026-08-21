@@ -273,6 +273,17 @@ pouvoir configurer parce que NinjaTrader est fermé serait un défaut, pas une p
 
 ### `configureCopier` — hôte → bridge
 
+> **Quand elle part, et pourquoi ça compte.** À la connexion du bridge, à chaque édition du layout,
+> et **à chaque changement de compte sélectionné** — y compris quand ce n'est pas la touche qui l'a
+> changé : NinjaTrader en choisit un tout seul quand le compte suivi disparaît.
+>
+> Elle ne part **pas** tant que le compte est inconnu. La liste envoyée est le groupe moins le
+> compte sélectionné : sans lui, le groupe partirait entier, maître compris, et le bridge
+> refuserait tout en `COPIER_MASTER_IS_FOLLOWER` — pour ensuite continuer sur la configuration
+> qu'il avait persistée, donc potentiellement sur une liste calculée pour un autre compte. C'est
+> exactement ce qui se produisait à chaque reconnexion avant l'audit du 20/08/2026 : `syncConfig`
+> partait à la connexion, alors que l'état venait d'être remis à zéro.
+
 Le maître n'est pas transmis : le bridge le connaît déjà, c'est le compte sélectionné.
 
 ```json

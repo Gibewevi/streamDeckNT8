@@ -30,7 +30,7 @@ import { etatAddOn, journaliserEtat, localiserNinjaScript } from './ninjatrader.
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.26.3';
+const VERSION = '0.26.4';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -1000,6 +1000,19 @@ async function syncCopierConfig(): Promise<void> {
   const groupe = parseFollowers(cfg.settings?.followers);
   const maitre = (lastState?.account ?? '').toUpperCase();
 
+  // Sans compte connu, la soustraction est impossible : le groupe partirait entier, maître compris,
+  // et le bridge refuserait TOUTE la configuration en `COPIER_MASTER_IS_FOLLOWER` — pour ensuite
+  // continuer sur celle qu'il avait persistée, donc éventuellement sur une liste périmée.
+  //
+  // On ne pousse donc rien et on attend le premier état. `onStateUpdate` rappelle cette fonction
+  // dès que le compte est connu, et le cas ne dure que quelques centaines de millisecondes.
+  if (!maitre && groupe.length > 0) {
+    log.event('Copier', 'Configuration non poussée — compte sélectionné encore inconnu', {
+      groupe: groupe.length, correction: 'renvoi automatique dès la première publication d\'état',
+    });
+    return;
+  }
+
   // Le réglage décrit le GROUPE de copie, maître compris. Les suiveurs effectifs s'en déduisent
   // à l'exécution : groupe moins le compte sélectionné.
   //
@@ -1381,8 +1394,31 @@ device.onConnectionChange((connected) => {
 /** Dernière empreinte connue, pour ne journaliser que les changements. */
 let empreinte: Empreinte | null = null;
 
+/**
+ * Compte sur lequel la configuration de copie a été calculée pour la dernière fois.
+ *
+ * La liste envoyée au bridge est le groupe MOINS le compte sélectionné : elle dépend donc du
+ * compte, et doit être recalculée dès qu'il change — y compris quand ce n'est pas la touche qui
+ * l'a changé. NinjaTrader en choisit un tout seul quand le compte suivi disparaît, et ce chemin
+ * ne passe par aucun appui.
+ */
+let compteCopieurPousse: string | null = null;
+
 bridge.onStateUpdate((state) => {
   lastState = state;
+
+  // Le compte a changé : la liste des comptes liés n'est plus la bonne.
+  //
+  // C'est aussi ce qui rattrape la reconnexion du bridge. `syncConfig` y part immédiatement, alors
+  // que `lastState` vient d'être remis à null : le maître était alors inconnu, donc non soustrait,
+  // et le groupe partait tel quel — maître compris. Le bridge refusait toute la configuration en
+  // `COPIER_MASTER_IS_FOLLOWER` et continuait sur celle qu'il avait persistée, sans que le deck
+  // ne montre quoi que ce soit d'anormal.
+  if (state.account && state.account !== compteCopieurPousse) {
+    compteCopieurPousse = state.account;
+    void syncCopierConfig();
+  }
+
   // Avant tout traitement : c'est ce qui donne le contexte de tout ce qui suit dans le journal.
   const nouvelle = empreinteDe(state);
   journaliserTransitions(empreinte, nouvelle);
@@ -1412,7 +1448,14 @@ bridge.onStateUpdate((state) => {
 
 bridge.onConnectionChange((connected) => {
   log.event('Connection', connected ? 'Bridge connecté' : 'Bridge déconnecté', { url: BRIDGE_URL });
-  if (!connected) lastState = null;
+  if (!connected) {
+    lastState = null;
+    // Sans cette remise à zéro, la configuration de copie ne repartirait jamais après une
+    // reconnexion : `syncConfig` la saute faute de compte connu, et la publication d'état qui suit
+    // trouve un compte INCHANGÉ, donc ne déclenche pas le renvoi. Le bridge resterait sur ce qu'il
+    // avait persisté, une liste calculée pour un autre compte sélectionné.
+    compteCopieurPousse = null;
+  }
   // Le bridge redémarre sans mémoire de nos réglages : les repousser à chaque reconnexion.
   if (connected) void syncConfig();
   void paintAll();

@@ -520,7 +520,7 @@ sélectionné. Détail complet dans [macro-copieur.md](macro-copieur.md).
 | Champ | Description |
 |-------|-------------|
 | `enabled` | Le réglage « Copier les positions » de la touche Compte |
-| `followers` | **Une chaîne**, une ligne par compte lié : `nom\|multiplicateur\|plafond` |
+| `followers` | **Une chaîne**, une ligne par compte lié : `nom\|multiplicateur\|plafond`. L'hôte n'émet aujourd'hui que `nom\|1\|0` |
 
 Le compte maître **n'est pas transmis** : le bridge le connaît déjà. Un second endroit où le
 déclarer aurait été un second endroit où il peut diverger.
@@ -743,7 +743,7 @@ Le bridge y ajoute aussi le bloc `copier`, dont il possède la moitié configura
 | `master` | **Bridge.** Le compte sélectionné ; il n'existe pas de réglage séparé |
 | `masterResolved` | Add-on. Le nom correspond à un compte NinjaTrader actif |
 | `entriesBlocked` | **Bridge.** Guard refuse les entrées : leurs copies s'arrêtent, **les sorties continuent** |
-| `multiplier` / `maxContracts` | **Bridge.** Les réglages du suiveur. `0` de multiplicateur le désactive ; `0` de plafond veut dire « sans plafond » |
+| `multiplier` / `maxContracts` | **Bridge.** Toujours `1` et `0` aujourd'hui : un compte lié reçoit exactement la quantité du maître. Le moteur sait dimensionner par compte, mais aucun réglage ne l'expose — l'hôte normalise donc avant d'envoyer |
 | `resolved` | Add-on. Le compte existe et sa connexion est active **en ce moment** |
 | `drifted` | Add-on. Écart installé — les entrées ne partent plus vers ce compte, **rien n'est envoyé pour corriger** |
 | `drift` | Add-on. Écart signé en contrats, `réel − attendu` |

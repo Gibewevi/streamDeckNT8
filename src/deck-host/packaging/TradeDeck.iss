@@ -32,7 +32,7 @@
 #define AppUrl BitlearnUrl + "/tradedeck"
 
 #ifndef AppVersion
-  #define AppVersion "0.26.3"
+  #define AppVersion "0.26.4"
 #endif
 
 #ifndef Payload

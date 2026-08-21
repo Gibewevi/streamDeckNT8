@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("StreamDeckBridge")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+45e0f224145a5a3332672edd6f03df0b0420ef22")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+abe34961273733fc3cd8f56123376e6a96bd87c3")]
 [assembly: System.Reflection.AssemblyProductAttribute("StreamDeckBridge")]
 [assembly: System.Reflection.AssemblyTitleAttribute("StreamDeckBridge")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
