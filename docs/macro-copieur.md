@@ -23,15 +23,17 @@ Touche Compte
   ● Copier les positions
 
   COMPTES LIÉS                       ← n'apparaît que si la copie est activée
-   ☑ Sim101  maître                   ← dans le groupe, pas copié tant qu'il est maître
    ☑ Sim102
    ☐ Sim103
    ☑ APEX-4471
 ```
 
-La liste décrit un **groupe**, maître compris. On copie donc vers Sim102 et APEX-4471. Sélectionner
-Sim102 sur la touche ferait copier vers Sim101 et APEX-4471 — les rôles s'échangent, rien d'autre
-ne bouge.
+**Le compte maître n'y figure jamais** — on ne se copie pas vers soi-même. On copie donc vers
+Sim102 et APEX-4471, chacun recevant **exactement la quantité envoyée sur Sim101** : un contrat sur
+le maître, un contrat sur chaque compte lié ; deux sur le maître, deux sur chacun.
+
+Sélectionner Sim102 sur la touche ferait copier vers Sim101 et APEX-4471 : Sim102 quitte la liste
+puisqu'il devient maître, Sim101 y apparaît coché. Les rôles s'échangent, rien d'autre ne bouge.
 
 Les comptes sont **proposés, jamais saisis** : la liste est celle que NinjaTrader publie, et il n'y
 a qu'à cocher. Taper un nom de compte à la main est la façon la plus simple de configurer une copie
@@ -49,8 +51,13 @@ est une pastille sur une touche du boîtier, là où personne ne la cherche.
 Il n'existe pas de réglage « compte maître » : c'est le compte que la touche Compte a sélectionné,
 celui sur lequel le deck envoie déjà ses ordres. Deux conséquences, toutes deux voulues.
 
-**Le réglage décrit un GROUPE, pas des suiveurs.** Le maître en fait partie. Les suiveurs
-effectifs s'en déduisent au moment d'envoyer : *groupe moins compte sélectionné*.
+**Le réglage décrit un GROUPE, pas des suiveurs.** Le maître en est membre — sans jamais être
+affiché. Les suiveurs effectifs s'en déduisent au moment d'envoyer : *groupe moins compte
+sélectionné*.
+
+Cette appartenance invisible n'agit jamais en silence, et c'est ce qui la rend acceptable : tant
+que le compte est maître elle ne produit aucune copie, et à l'instant où elle en produirait, il est
+redevenu visible et coché dans la liste.
 
 **Changer de compte échange donc les rôles, tout seul.** Groupe `{A, B, C}`, maître `A` → on copie
 vers `B` et `C`. La touche passe à `B` → on copie vers `A` et `C`. Le compte qu'on prend quitte les
@@ -119,7 +126,8 @@ C'est ce qui fait qu'une recompilation NinjaScript en pleine séance ne perd pas
 
 ## Dimensionnement
 
-**Chaque compte lié reçoit exactement la quantité du maître.** Il n'y a rien à régler : pour
+**Chaque compte lié reçoit exactement la quantité du maître.** Un contrat sur le maître, un
+contrat sur chaque compte lié ; deux sur le maître, deux sur chacun. Il n'y a rien à régler : pour
 délier un compte, on le décoche.
 
 Le moteur sait pourtant dimensionner par compte — multiplicateur et plafond par ordre, arrondi à

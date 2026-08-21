@@ -758,6 +758,15 @@ function renderInsp() {
         .map(c => c.dataset.flNom || '')
         .filter(Boolean);
 
+      // Le maître n'est affiché nulle part : le reconstruire à partir des seules lignes
+      // visibles l'effacerait du groupe à la première case cochée, et il cesserait de
+      // redevenir suiveur au changement de compte — ce que le groupe sert à garantir.
+      const maitreCourant = (snap && snap.state && snap.state.account) || '';
+      const groupe = parseFl(cur.settings?.[key]);
+      if (maitreCourant && groupe.some(g => g.name.toUpperCase() === maitreCourant.toUpperCase())) {
+        noms.unshift(maitreCourant);
+      }
+
       (cur.settings ||= {})[key] = noms.map(n => `${n}|1|0`).join('\n');
       save();
       if (redessiner) renderInsp();
@@ -843,27 +852,29 @@ function parseFl(v) {
  */
 function followerField(f, v) {
   const configures = parseFl(v);
-  // Le compte sélectionné FAIT PARTIE de la liste : elle décrit un GROUPE, pas des suiveurs. Les
-  // suiveurs effectifs sont le groupe moins le compte sélectionné, soustraits par l'hôte au moment
-  // d'envoyer. C'est ce qui fait basculer les rôles quand on change de compte, sans rien réécrire.
-  const proposes = (snap && snap.state && snap.state.availableAccounts) || [];
+  // Le compte sélectionné N'APPARAÎT JAMAIS ici : on ne se copie pas vers soi-même.
+  //
+  // Il reste pourtant MEMBRE du groupe en mémoire, et c'est ce qui fait basculer les rôles. Le
+  // réglage décrit un groupe ; les suiveurs effectifs sont le groupe moins le compte sélectionné,
+  // soustraits par l'hôte au moment d'envoyer. La touche passe de A à B : B quitte la liste
+  // puisqu'il est maître, A y apparaît coché puisqu'il était resté dans le groupe.
   const maitre = ((snap && snap.state && snap.state.account) || '').toUpperCase();
+  const proposes = ((snap && snap.state && snap.state.availableAccounts) || [])
+    .filter(a => a.toUpperCase() !== maitre);
 
   const parNom = new Map(configures.map(l => [l.name.toUpperCase(), l]));
   const publies = new Set(proposes.map(a => a.toUpperCase()));
-  const absents = configures.filter(l => !publies.has(l.name.toUpperCase()));
+  const absents = configures.filter(
+    l => !publies.has(l.name.toUpperCase()) && l.name.toUpperCase() !== maitre);
 
   const rangs = [
-    ...proposes.map(nom => ({
-      nom, publie: true, estMaitre: nom.toUpperCase() === maitre,
-      ligne: parNom.get(nom.toUpperCase()) || null,
-    })),
-    ...absents.map(l => ({
-      nom: l.name, publie: false, estMaitre: l.name.toUpperCase() === maitre, ligne: l,
-    })),
+    ...proposes.map(nom => ({ nom, publie: true, ligne: parNom.get(nom.toUpperCase()) || null })),
+    ...absents.map(l => ({ nom: l.name, publie: false, ligne: l })),
   ];
 
-  const plein = configures.length >= 8;
+  // Compté sur les comptes VISIBLES : le maître est membre du groupe mais ne reçoit aucune copie,
+  // et l'inclure aurait plafonné le trader à sept comptes liés au lieu de huit.
+  const plein = rangs.filter(r => r.ligne).length >= 8;
 
   const corps = rangs.length === 0
     // Une liste vide se lirait « aucun compte n'existe ». La cause réelle se dit, avec le geste
@@ -883,7 +894,6 @@ function followerField(f, v) {
                    stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
             </span>
             <span class="fl-nom">${esc(r.nom)}</span>
-            ${r.estMaitre ? `<span class="fl-maitre" title="Compte sélectionné : il ne reçoit pas de copie tant qu'il est maître, mais il en recevra dès que la touche passera à un autre compte du groupe">maître</span>` : ''}
             ${r.publie ? '' : `<span class="fl-absent" title="Compte non publié par NinjaTrader en ce moment">hors ligne</span>`}
         </label>`;
       }).join('');
