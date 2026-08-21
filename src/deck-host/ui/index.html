@@ -263,17 +263,31 @@
   .sw .txt { font-size:12.5px; color:var(--dim); }
   .sw input:checked ~ .txt { color:var(--txt); font-weight:500; }
   .field { margin-top:16px; }
-  /* Liste de comptes suiveurs : une ligne par compte, compte / multiplicateur / plafond. */
-  .fl-row { display:grid; grid-template-columns:1fr 62px 62px 28px; gap:6px; margin-top:6px; align-items:center; }
-  .fl-row input, .fl-row select { margin:0; }
-  .fl-head { display:grid; grid-template-columns:1fr 62px 62px 28px; gap:6px; margin-top:8px;
-             font-size:10.5px; letter-spacing:.04em; text-transform:uppercase; color:var(--dim); }
-  .fl-del, .fl-add { border:1px solid var(--edge-2); background:transparent; color:var(--dim);
-                     border-radius:7px; cursor:pointer; height:32px; font-size:13px; }
-  .fl-del:hover { border-color:var(--refuse,#D13B3B); color:var(--refuse,#D13B3B); }
-  .fl-add { width:100%; margin-top:8px; height:30px; font-size:12px; }
-  .fl-add:hover, .fl-del:hover { background:rgba(255,255,255,.03); }
-  .fl-empty { margin-top:8px; font-size:12px; color:var(--dim); }
+  /* Le compte maître, en tête du tiroir de la touche Compte. */
+  .maitre { margin:14px 0 4px; padding:11px 13px; border:1px solid var(--edge);
+            border-radius:var(--r-sm); background:var(--card); }
+  .maitre .k { display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:1.1px;
+               color:var(--faint); font-weight:600; }
+  .maitre .v { display:block; margin-top:3px; font-family:var(--mono); font-size:15px;
+               color:var(--accent); font-weight:600; }
+  .maitre .n { display:block; margin-top:5px; font-size:11px; color:var(--faint); line-height:1.45; }
+
+  /* Comptes suiveurs : ceux que NinjaTrader publie, à cocher. */
+  .fl-liste { display:flex; flex-direction:column; gap:6px; }
+  .fl-compte { border:1px solid var(--edge); border-radius:var(--r-sm); padding:8px 10px; }
+  .fl-actif { border-color:var(--accent); background:var(--accent-soft); }
+  .fl-tete { display:flex; align-items:center; gap:9px; cursor:pointer; margin:0; }
+  .fl-tete input[type=checkbox] { width:15px; height:15px; margin:0; flex:none; cursor:pointer; accent-color:var(--accent); }
+  .fl-tete input[type=checkbox]:disabled { cursor:not-allowed; opacity:.4; }
+  .fl-nom { font-family:var(--mono); font-size:13px; color:var(--txt); }
+  .fl-absent { margin-left:auto; font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+               color:var(--dim); border:1px solid var(--edge-2); border-radius:999px; padding:1px 7px; }
+  /* Les deux réglages n'apparaissent qu'une fois le compte activé : proposer un multiplicateur
+     pour un compte qu'on ne copie pas encombre sans rien dire. */
+  .fl-reglages { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:9px; }
+  .fl-reglages label { display:block; font-size:10.5px; color:var(--dim); margin-bottom:4px; }
+  .fl-reglages input { height:31px; }
+  .fl-empty { margin-top:8px; font-size:12px; color:var(--dim); line-height:1.45; }
   label { display:block; font-size:11.5px; color:var(--dim); margin-bottom:6px; font-weight:500; }
   input[type=text], input[type=number], select, textarea {
     width:100%; height:35px; padding:0 11px; background:var(--card); color:var(--txt);
@@ -688,6 +702,7 @@ function renderInsp() {
       <span>${esc(def?.name ?? a.actionId)}<div class="sub">Touche ${sel + 1}</div></span>
     </div>
     ${def?.description ? `<div class="insp-desc">${esc(def.description)}</div>` : ''}
+    ${a.actionId === 'com.trader.ninjatrader.account' ? blocMaitre() : ''}
     ${propres.map(f => field(f, a.settings[f.key])).join('')}
     ${universal.length ? `<div class="sect lbl">Sécurité</div>${def?.instant
       // Proposer un champ que l'hôte ignore serait pire que de ne rien proposer.
@@ -726,54 +741,32 @@ function renderInsp() {
       const cur = sel === null ? null : page().slots[String(sel)];
       if (!cur || cur.actionId !== a.actionId) return;
 
-      const lignes = [...liste.querySelectorAll('.fl-row')].map(r => {
-        const nom = (r.querySelector('.fl-name')?.value || '').trim();
-        const mult = Number.parseFloat(r.querySelector('.fl-mult')?.value);
-        const cap = Number.parseInt(r.querySelector('.fl-cap')?.value, 10);
-        return {
-          nom,
-          mult: Number.isFinite(mult) && mult >= 0 ? Math.min(100, mult) : 1,
-          cap: Number.isFinite(cap) && cap > 0 ? Math.min(1000, cap) : 0,
-        };
-      }).filter(r => r.nom);
+      // Reconstruit dans l'ordre affiché : ce qui est enregistré suit ce que l'écran montre.
+      const lignes = [...liste.querySelectorAll('.fl-compte')]
+        .filter(c => c.querySelector('.fl-on')?.checked)
+        .map(c => {
+          const mult = Number.parseFloat(c.querySelector('.fl-mult')?.value);
+          const cap = Number.parseInt(c.querySelector('.fl-cap')?.value, 10);
+          return {
+            nom: c.dataset.flNom || '',
+            mult: Number.isFinite(mult) && mult >= 0 ? Math.min(100, mult) : 1,
+            cap: Number.isFinite(cap) && cap > 0 ? Math.min(1000, cap) : 0,
+          };
+        })
+        .filter(r => r.nom);
 
       (cur.settings ||= {})[key] = lignes.map(r => `${r.nom}|${r.mult}|${r.cap}`).join('\n');
       save();
-      // Redessiner à chaque frappe ferait perdre le focus : réservé aux ajouts et retraits, qui
-      // changent le nombre de lignes.
+      // Redessiner à chaque frappe ferait perdre le focus d'un champ nombre : réservé à
+      // l'activation, qui fait apparaître ou disparaître les deux réglages du compte.
       if (redessiner) renderInsp();
     };
 
-    liste.addEventListener('input', () => commit(false));
-    liste.addEventListener('change', () => commit(false));
-
-    liste.addEventListener('click', (e) => {
-      if (e.target.closest('[data-fl-del]')) {
-        e.target.closest('.fl-row').remove();
-        commit(true);
-        return;
-      }
-      if (!e.target.closest('[data-fl-add]')) return;
-
-      const cur = sel === null ? null : page().slots[String(sel)];
-      if (!cur || cur.actionId !== a.actionId) return;
-
-      // Le premier compte encore libre, pour que la ligne ajoutée soit utilisable telle quelle.
-      const deja = new Set(parseFl(cur.settings?.[key]).map(r => r.name.toUpperCase()));
-      const maitre = ((snap && snap.state && snap.state.account) || '').toUpperCase();
-      const dispo = ((snap && snap.state && snap.state.availableAccounts) || [])
-        .filter(x => x.toUpperCase() !== maitre && !deja.has(x.toUpperCase()));
-
-      const actuel = typeof cur.settings?.[key] === 'string' ? cur.settings[key] : '';
-      // Un nom vide serait filtré à la relecture et la ligne disparaîtrait aussitôt ajoutée —
-      // exactement ce qui arrive quand NinjaTrader est fermé et ne publie aucun compte. Le
-      // gabarit tient la ligne le temps qu'on la remplisse, et s'il reste tel quel il se voit :
-      // le compte ne résoudra pas, et la touche l'affiche.
-      const ajout = `${dispo[0] || 'Nom du compte'}|1|0`;
-      (cur.settings ||= {})[key] = actuel ? `${actuel}\n${ajout}` : ajout;
-      save();
-      renderInsp();
+    liste.addEventListener('input', (e) => {
+      if (e.target.classList.contains('fl-on')) return;
+      commit(false);
     });
+    liste.addEventListener('change', (e) => commit(e.target.classList.contains('fl-on')));
   }
 }
 
@@ -801,6 +794,26 @@ function optionsFor(f) {
  * volontairement trivial pour que ce doublon ne puisse pas dériver — s'il devait se compliquer,
  * c'est le signe qu'il faut servir le module partagé plutôt que le recopier.
  */
+/**
+ * Le compte maître, en tête du tiroir de la touche Compte.
+ *
+ * Il n'existe pas de réglage « compte maître » : c'est le compte que cette touche a sélectionné,
+ * celui sur lequel le deck envoie déjà ses ordres. Ne le montrer nulle part obligeait à le déduire
+ * du seul exemple visible — le texte de substitution « Sim101 / Sim102 » —, qui ressemble à un
+ * réglage sans en être un : on paramétrait une copie sans savoir depuis quel compte elle partait.
+ */
+function blocMaitre() {
+  const nom = (snap && snap.state && snap.state.account) || '';
+  return `<div class="maitre">
+    <span class="k">Compte maître</span>
+    ${nom
+      ? `<span class="v">${esc(nom)}</span>
+         <span class="n">Le compte sélectionné sur cette touche. C'est de lui que partent les
+         ordres, et c'est lui qui est copié.</span>`
+      : `<span class="n">Inconnu — NinjaTrader n'est pas connecté.</span>`}
+  </div>`;
+}
+
 function parseFl(v) {
   if (typeof v !== 'string' || !v.trim()) return [];
   const out = [], seen = new Set();
@@ -823,47 +836,59 @@ function parseFl(v) {
 /**
  * Liste des comptes suiveurs.
  *
- * Le compte sélectionné est retiré des propositions : il est le maître, et se copier vers
- * soi-même doublerait chaque ordre sur un seul compte. Un suiveur déjà configuré que NinjaTrader
- * ne publie pas reste dans sa liste — hors ligne, on doit pouvoir régler sans rien perdre.
+ * **Les comptes sont PROPOSÉS, jamais saisis.** Une faute de frappe donne un suiveur qui ne résout
+ * pas, et le seul signe en est une pastille sur une touche du boîtier — là où personne ne la
+ * cherche. Le compte sélectionné est retiré des propositions : il est le maître, et se copier vers
+ * soi-même doublerait chaque ordre sur un seul compte.
+ *
+ * Un suiveur déjà configuré que NinjaTrader ne publie plus reste affiché et marqué : une
+ * déconnexion passagère ne doit pas effacer un réglage.
  */
 function followerField(f, v) {
-  const rows = parseFl(v);
+  const configures = parseFl(v);
   const dispo = (snap && snap.state && snap.state.availableAccounts) || [];
   const maitre = ((snap && snap.state && snap.state.account) || '').toUpperCase();
-  const proposables = dispo.filter(a => a.toUpperCase() !== maitre);
+  const proposes = dispo.filter(a => a.toUpperCase() !== maitre);
 
-  const nameCtl = (nom) => {
-    if (proposables.length === 0) {
-      // NinjaTrader est fermé : saisie libre plutôt qu'une liste vide. Ne pas pouvoir configurer
-      // parce que la plateforme n'est pas lancée serait un défaut, pas une protection.
-      return `<input type="text" class="fl-name" value="${esc(nom)}" placeholder="Nom du compte">`;
-    }
-    const connus = proposables.slice();
-    if (nom && !connus.some(a => a.toUpperCase() === nom.toUpperCase())) connus.push(nom);
-    return `<select class="fl-name">
-      <option value=""${nom ? '' : ' selected'}>—</option>
-      ${connus.map(a => `<option value="${esc(a)}"${a.toUpperCase() === nom.toUpperCase() ? ' selected' : ''}>${esc(a)}</option>`).join('')}
-    </select>`;
-  };
+  const parNom = new Map(configures.map(l => [l.name.toUpperCase(), l]));
+  const publies = new Set(proposes.map(a => a.toUpperCase()));
+  const absents = configures.filter(l => !publies.has(l.name.toUpperCase()));
 
-  const corps = rows.length === 0
-    ? `<div class="fl-empty">Aucun compte suiveur. La copie ne fera rien tant que cette liste est vide.</div>`
-    : `<div class="fl-head"><span>Compte</span><span>×</span><span>Plaf.</span><span></span></div>
-       ${rows.map(r => `<div class="fl-row">
-         ${nameCtl(r.name)}
-         <input type="number" class="fl-mult" min="0" max="100" step="0.1" value="${esc(r.multiplier)}">
-         <input type="number" class="fl-cap" min="0" max="1000" step="1" value="${esc(r.maxContracts)}">
-         <button type="button" class="fl-del" data-fl-del title="Retirer ce suiveur">×</button>
-       </div>`).join('')}`;
+  const rangs = [
+    ...proposes.map(nom => ({ nom, publie: true, ligne: parNom.get(nom.toUpperCase()) || null })),
+    ...absents.map(l => ({ nom: l.name, publie: false, ligne: l })),
+  ];
 
-  const plein = rows.length >= 8;
+  const plein = configures.length >= 8;
+
+  const corps = rangs.length === 0
+    // Une liste vide se lirait « aucun compte n'existe ». La cause réelle se dit, avec le geste
+    // qui la corrige.
+    ? `<div class="fl-empty">Aucun compte à proposer — NinjaTrader n'est pas connecté.
+       Ouvrez-le, puis rechargez cette page : vos comptes apparaîtront ici et il n'y aura
+       qu'à les cocher.</div>`
+    : rangs.map(r => {
+        const actif = !!r.ligne;
+        const bloque = !actif && plein;
+        return `<div class="fl-compte${actif ? ' fl-actif' : ''}" data-fl-nom="${esc(r.nom)}">
+          <label class="fl-tete">
+            <input type="checkbox" class="fl-on"${actif ? ' checked' : ''}${bloque ? ' disabled' : ''}>
+            <span class="fl-nom">${esc(r.nom)}</span>
+            ${r.publie ? '' : `<span class="fl-absent" title="Compte non publié par NinjaTrader en ce moment">hors ligne</span>`}
+          </label>
+          ${actif ? `<div class="fl-reglages">
+            <div><label>Multiplicateur</label>
+              <input type="number" class="fl-mult" min="0" max="100" step="0.1" value="${esc(r.ligne.multiplier)}"></div>
+            <div><label>Plafond (contrats)</label>
+              <input type="number" class="fl-cap" min="0" max="1000" step="1" value="${esc(r.ligne.maxContracts)}"></div>
+          </div>` : ''}
+        </div>`;
+      }).join('');
+
   return `<div class="field"><label>${esc(f.label)}</label>
-    <div data-fl="${esc(f.key)}">
+    <div data-fl="${esc(f.key)}" class="fl-liste">
       ${corps}
-      ${plein
-        ? `<div class="fl-empty">Huit suiveurs au maximum : chacun multiplie l'exposition d'un appui.</div>`
-        : `<button type="button" class="fl-add" data-fl-add>+ Ajouter un compte suiveur</button>`}
+      ${plein ? `<div class="fl-empty">Huit suiveurs au maximum : chacun multiplie l'exposition d'un appui.</div>` : ''}
     </div>
     ${f.help ? `<div class="help">${esc(f.help)}</div>` : ''}</div>`;
 }
