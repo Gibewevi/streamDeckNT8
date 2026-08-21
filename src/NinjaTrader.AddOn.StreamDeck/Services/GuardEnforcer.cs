@@ -49,6 +49,23 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private string _reason = string.Empty;
         private int _maxContracts;
 
+        /// <summary>
+        /// The macro's contract cap, readable from outside.
+        ///
+        /// <see cref="CopyEngine"/> needs it before it submits: a copied order is exempt from the
+        /// cancellation below on purpose, so the cap has to be honoured at the submit or not at all.
+        /// </summary>
+        public int MaxContracts
+        {
+            get { lock (_lock) { return _maxContracts; } }
+        }
+
+        /// <summary>True while the macro is refusing entries.</summary>
+        public bool IsBlocking
+        {
+            get { lock (_lock) { return _blocked; } }
+        }
+
         /// <summary>Orders already acted upon, so a second OrderUpdate does not cancel twice.</summary>
         private readonly HashSet<string> _handled = new HashSet<string>();
 

@@ -487,12 +487,16 @@ export function computeVisual(
         const resolved = copier.followers.filter((f) => f.resolved).length;
         const drifted = copier.followers.some((f) => f.drifted);
         const rejected = copier.followers.some((f) => f.lastError);
+        // Un dépassement de plafond arrête la copie comme une dérive, mais ce n'est pas la même
+        // chose à corriger : afficher DERIVE envoie chercher une divergence qui n'existe pas.
+        const overCap = copier.followers.some((f) => f.drifted && f.overCap);
 
         // Un suiveur en dérive ou en rejet : ce compte-là ne suit plus, et le trader doit
         // l'apprendre du boîtier plutôt que du journal.
         if (drifted || rejected) {
           return {
-            title, subtitle: 'COPY STOP', detail: drifted ? 'DERIVE' : 'REJET',
+            title, subtitle: 'COPY STOP',
+            detail: overCap ? 'PLAFOND' : drifted ? 'DERIVE' : 'REJET',
             bgColor: Colors.refuse, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
           };
         }

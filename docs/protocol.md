@@ -447,6 +447,24 @@ L'état publié distingue les deux notions : `cooldownSeconds` est la durée **c
 
 ### Tendance
 
+#### Ce que le bridge retient d'une session à l'autre
+
+`%APPDATA%\StreamDeckTrader\session.json` conserve **l'instrument et le compte** sélectionnés :
+
+```json
+{ "instrument": "MNQ", "account": "APEX-346280-35" }
+```
+
+À la connexion de l'add-on, le bridge repousse les deux — `setAccount` **d'abord**, puis
+`setInstrument`. L'ordre compte : sans compte, l'add-on suit le premier que NinjaTrader liste, et
+deux règles de sécurité suivent ce défaut en silence — `GuardEnforcer` surveille le compte suivi, et
+le **maître du copieur est le compte sélectionné**. Le 21/08/2026 un redémarrage a ainsi pointé
+l'enforcement sur un compte que personne ne tradait et interverti le maître avec son suiveur,
+pendant que le boîtier affichait la macro armée.
+
+Si aucun compte n'a jamais été choisi, le bridge journalise un avertissement et laisse le défaut de
+l'add-on : rien à restaurer, mais tout ce qui suit repose alors sur un compte arbitraire.
+
 #### `configureTrend`
 Règle la macro Tendance. **Chemin double** : le bridge valide et accuse réception, puis transmet à
 l'add-on — seul à pouvoir agir, puisque c'est lui qui détient les barres. Même mécanique que
@@ -730,7 +748,7 @@ Le bridge y ajoute aussi le bloc `copier`, dont il possède la moitié configura
     "entriesBlocked": false,
     "followers": [
       { "name": "Sim102", "multiplier": 1, "maxContracts": 0,
-        "resolved": true, "drifted": false, "drift": 0, "lastError": "" }
+        "resolved": true, "drifted": false, "overCap": false, "drift": 0, "lastError": "" }
     ],
     "copiedToday": 14
   }
@@ -745,8 +763,9 @@ Le bridge y ajoute aussi le bloc `copier`, dont il possède la moitié configura
 | `entriesBlocked` | **Bridge.** Guard refuse les entrées : leurs copies s'arrêtent, **les sorties continuent** |
 | `multiplier` / `maxContracts` | **Bridge.** Toujours `1` et `0` aujourd'hui : un compte lié reçoit exactement la quantité du maître. Le moteur sait dimensionner par compte, mais aucun réglage ne l'expose — l'hôte normalise donc avant d'envoyer |
 | `resolved` | Add-on. Le compte existe et sa connexion est active **en ce moment** |
-| `drifted` | Add-on. Écart installé — les entrées ne partent plus vers ce compte, **rien n'est envoyé pour corriger** |
-| `drift` | Add-on. Écart signé en contrats, `réel − attendu` |
+| `drifted` | Add-on. Le compte ne reçoit plus d'entrées — écart installé **ou** dépassement de plafond. **Rien n'est envoyé pour corriger** |
+| `overCap` | Add-on. Précise le motif : `drifted` vient d'une position **au-dessus du plafond**, pas d'une divergence avec le maître. La touche affiche `PLAFOND` au lieu de `DERIVE` |
+| `drift` | Add-on. Écart signé en contrats : `réel − attendu` pour une dérive, contrats **au-dessus du plafond** quand `overCap` est vrai — le maître pouvant lui aussi le dépasser, l'écart entre les deux ne dirait rien |
 | `lastError` | Add-on. Dernier refus sur ce suiveur, vide sinon |
 
 Même partage que `trend` : ce que l'add-on publie ne peut pas écraser la configuration, que le
@@ -778,7 +797,12 @@ dérive.
                "instrument": "MNQ 09-26", "drift": -2 } }
 ```
 
-`reason` vaut `"drift"`, `"rejected"` ou `"submitFailed"`.
+`reason` vaut `"drift"`, `"maxContracts"`, `"rejected"` ou `"submitFailed"`.
+
+`"maxContracts"` est émis à deux moments : quand une copie d'entrée est **refusée ou rabotée** parce
+que le suiveur atteindrait son plafond, et quand un suiveur est constaté **au-dessus** de ce
+plafond. Le plafond retenu est le plus serré des deux : celui du suiveur et celui de la macro de
+sécurité.
 
 ### `setGuardPolicy` — bridge → add-on
 
@@ -792,6 +816,17 @@ aux ordres qui **ne traversent jamais le bridge** : SuperDOM, Chart Trader, DOM.
 
 Envoyé à la connexion de l'add-on (forcé) puis **uniquement au changement** — la boucle de
 diffusion tourne à 5 Hz, un envoi inconditionnel noierait l'add-on et son journal.
+
+**Portée : le compte suivi ET tout le groupe de copie.** L'add-on inspecte les ordres du compte
+suivi (`OrderMonitor`) et, quand la copie tourne, ceux du maître et de chaque suiveur résolu
+(`CopyEngine`). Ce n'était pas le cas avant le 21/08/2026 : l'enforcement ne voyait qu'un compte,
+et un compte lié restait joignable à la souris sans qu'aucune règle ne le regarde. Un compte
+NinjaTrader **hors** du groupe reste hors de portée — c'est le périmètre que le deck gouverne.
+
+Le plafond `maxContracts` s'applique aussi **avant** l'envoi d'une copie, contre la position que
+cette copie produirait sur le suiveur. Une copie est volontairement exemptée de l'annulation de
+`GuardEnforcer` (pour ne pas appliquer deux fois, et asymétriquement, la règle déjà passée sur le
+maître) : le plafond l'atteint donc à la soumission, ou jamais.
 
 ### `guardViolation` — add-on → bridge → hôte
 

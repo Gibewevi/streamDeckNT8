@@ -56,7 +56,16 @@ public sealed class CopierFollowerStatus
     /// </summary>
     public bool Drifted { get; set; }
 
-    /// <summary>Add-on: signed gap in contracts, <c>actual − expected</c>.</summary>
+    /// <summary>
+    /// Add-on: <see cref="Drifted"/> is set because the account sits ABOVE its contract cap, not
+    /// because it diverged from the master. The deck labels the two differently.
+    /// </summary>
+    public bool OverCap { get; set; }
+
+    /// <summary>
+    /// Add-on: signed gap in contracts. <c>actual − expected</c> for a drift; contracts above the
+    /// cap when <see cref="OverCap"/> is set, the master being possibly over the cap too.
+    /// </summary>
     public int Drift { get; set; }
 
     /// <summary>Add-on: last refusal seen on this follower, empty when none.</summary>

@@ -117,6 +117,8 @@ export interface CopierFollower {
    * copiées vers ce compte ; les sorties, si. **Rien n'est jamais envoyé pour corriger.**
    */
   drifted: boolean;
+  /** `drifted` vient d'un dépassement de plafond, pas d'une divergence avec le maître. */
+  overCap: boolean;
   /** Écart signé en contrats : `réel − attendu`. */
   drift: number;
   /** Dernier refus rencontré sur ce suiveur, vide sinon. */
@@ -179,6 +181,7 @@ export function parseFollowers(value: unknown): CopierFollower[] {
       maxContracts: Number.isFinite(maxContracts) && maxContracts > 0 ? maxContracts : 0,
       resolved: false,
       drifted: false,
+      overCap: false,
       drift: 0,
       lastError: '',
     });
