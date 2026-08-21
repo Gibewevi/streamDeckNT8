@@ -760,12 +760,12 @@ function renderInsp() {
 
       // Le maître n'est affiché nulle part : le reconstruire à partir des seules lignes
       // visibles l'effacerait du groupe à la première case cochée, et il cesserait de
-      // redevenir suiveur au changement de compte — ce que le groupe sert à garantir.
+      // redevenir compte lié au changement de compte — ce que le groupe sert à garantir.
+      //
+      // Toujours réinjecté, et pas « s'il y était déjà » : sa ligne étant invisible, aucun
+      // geste ne permet de l'en retirer, donc aucune intention à respecter.
       const maitreCourant = (snap && snap.state && snap.state.account) || '';
-      const groupe = parseFl(cur.settings?.[key]);
-      if (maitreCourant && groupe.some(g => g.name.toUpperCase() === maitreCourant.toUpperCase())) {
-        noms.unshift(maitreCourant);
-      }
+      if (maitreCourant) noms.unshift(maitreCourant);
 
       (cur.settings ||= {})[key] = noms.map(n => `${n}|1|0`).join('\n');
       save();

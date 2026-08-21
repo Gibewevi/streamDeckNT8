@@ -30,7 +30,7 @@ import { etatAddOn, journaliserEtat, localiserNinjaScript } from './ninjatrader.
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.26.2';
+const VERSION = '0.26.3';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
