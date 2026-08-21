@@ -223,7 +223,7 @@ export interface SafetyStatus {
   pnlAvailable: boolean;
   /** True when the bridge is currently refusing position-opening actions. */
   entriesBlocked: boolean;
-  blockReason: '' | 'dailyLoss' | 'tradeLimit' | 'mandatoryPause';
+  blockReason: '' | 'dailyLoss' | 'tradeLimit' | 'mandatoryPause' | 'beforeSessionStart';
   tradingDay: string;
 
   // --- Pause obligatoire ---
@@ -246,6 +246,19 @@ export interface SafetyStatus {
    * compter comme armée.
    */
   pauseAfterMinutes: number;
+
+  // --- Heure de début de séance ---
+  //
+  // Règle d'horloge murale, en heure LOCALE du poste. Le décompte est publié pour la même raison
+  // que celui de la pause : une touche qui dit « refusé » sans dire « jusqu'à quand » se lit
+  // comme une panne.
+
+  /** La règle « pas d'entrée avant l'heure » est-elle active ? */
+  sessionStartEnabled: boolean;
+  /** L'heure réglée, `HH:mm` en heure locale. Vide si la règle est coupée. */
+  sessionStartTime: string;
+  /** Secondes avant l'ouverture des entrées. 0 si la règle est coupée ou l'heure passée. */
+  sessionStartInSeconds: number;
 
   // --- Liquidation automatique sur perte journalière ---
   //
@@ -307,6 +320,9 @@ export const DEFAULT_SAFETY_STATUS: SafetyStatus = {
   pauseSecondsRemaining: 0,
   pauseDueInSeconds: 0,
   pauseAfterMinutes: 0,
+  sessionStartEnabled: false,
+  sessionStartTime: '',
+  sessionStartInSeconds: 0,
   autoFlattenEnabled: false,
   autoFlattenPending: false,
   autoFlattenSecondsRemaining: 0,

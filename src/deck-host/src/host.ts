@@ -30,7 +30,7 @@ import { etatAddOn, journaliserEtat, localiserNinjaScript } from './ninjatrader.
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.28.0';
+const VERSION = '0.29.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -317,9 +317,19 @@ async function pushSafetyConfig(settings: Record<string, unknown>): Promise<void
   }
   // Les bascules ne sont transmises que si elles existent dans le layout : une absence doit laisser
   // le défaut du bridge en place, et non être lue comme un « false » que personne n'a demandé.
-  for (const key of ['antiTiltEnabled', 'tiltAveragingAllowed', 'tiltAdvanced', 'autoFlattenOnDailyLoss']) {
+  for (const key of ['antiTiltEnabled', 'tiltAveragingAllowed', 'tiltAdvanced', 'autoFlattenOnDailyLoss', 'sessionStartEnabled']) {
     const value = settings[key];
     if (typeof value === 'boolean') payload[key] = value;
+  }
+
+  // L'heure part AVEC la bascule, dans la même charge, et seulement quand la règle est allumée.
+  //
+  // Le bridge refuse d'allumer la règle sans heure à faire respecter — une bascule qui se lit
+  // comme armée alors que rien ne peut refuser une entrée est le pire défaut de ce projet. Les
+  // envoyer séparément produirait ce refus à chaque fois : la bascule arriverait seule.
+  if (settings.sessionStartEnabled === true) {
+    const heure = settings.sessionStartTime;
+    if (typeof heure === 'string' && heure.trim().length > 0) payload.sessionStartTime = heure.trim();
   }
 
   // La tolérance n'a de sens qu'avec la liquidation active. Hors de là, ne pas la transmettre
@@ -342,7 +352,17 @@ async function pushSafetyConfig(settings: Record<string, unknown>): Promise<void
 
   const resp = await bridge.sendCommand(createCommand('configureSafety', payload));
   if (resp.error) {
-    log.event('Safety', 'configureSafety refusé par le bridge', { code: resp.error.code, reason: resp.error.message, requested: payload });
+    // Une heure de début illisible ou manquante mérite plus qu'une ligne d'information : le
+    // trader croit avoir armé une protection qui n'est pas partie, et rien sur le boîtier ne le
+    // dira — la touche affichera simplement Guard sans cette règle.
+    const heureEnCause = resp.error.code === 'SAFETY_INVALID_START_TIME'
+                      || resp.error.code === 'SAFETY_START_TIME_MISSING';
+    if (heureEnCause) {
+      log.eventWarn('Sécurité', 'Heure de début REFUSÉE — la règle n\'est PAS active', {
+        code: resp.error.code, raison: resp.error.message, saisie: settings.sessionStartTime,
+      });
+    }
+    else log.event('Safety', 'configureSafety refusé par le bridge', { code: resp.error.code, reason: resp.error.message, requested: payload });
   } else {
     log.event('Safety', 'Limites de sécurité poussées vers le bridge', { requested: payload });
   }

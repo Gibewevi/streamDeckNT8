@@ -635,6 +635,8 @@ public sealed class MessageRouter
                 TiltEpisodeMinutes = GetPayloadDouble(message, "tiltEpisodeMinutes"),
                 PauseAfterMinutes = GetPayloadDouble(message, "pauseAfterMinutes"),
                 PauseDurationMinutes = GetPayloadDouble(message, "pauseDurationMinutes"),
+                SessionStartEnabled = GetPayloadBoolOrNull(message, "sessionStartEnabled"),
+                SessionStartTime = GetPayloadString(message, "sessionStartTime"),
                 AutoFlattenOnDailyLoss = GetPayloadBoolOrNull(message, "autoFlattenOnDailyLoss"),
                 AutoFlattenGraceSeconds = GetPayloadDouble(message, "autoFlattenGraceSeconds")
             })

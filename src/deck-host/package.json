@@ -1,6 +1,6 @@
 {
   "name": "deck-host",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Hôte propriétaire du cockpit NinjaTrader — remplace l'application Stream Deck d'Elgato",
   "type": "module",
   "private": true,

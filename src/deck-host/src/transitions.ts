@@ -58,6 +58,7 @@ export interface Empreinte {
   maxTradesWhenLosing: number;
   maxContracts: number;
   pauseAfterMinutes: number;
+  sessionStartTime: string;
 }
 
 export function empreinteDe(s: TradingState): Empreinte {
@@ -90,6 +91,9 @@ export function empreinteDe(s: TradingState): Empreinte {
     maxTradesWhenLosing: s.safety?.maxTradesWhenLosing ?? 0,
     maxContracts: s.safety?.maxContracts ?? 0,
     pauseAfterMinutes: s.safety?.pauseAfterMinutes ?? 0,
+    // Vide quand la règle est coupée : le bridge n'publie l'heure que si elle s'applique, ce qui
+    // rend « armée » et « réglée mais éteinte » distinguables dans le journal.
+    sessionStartTime: s.safety?.sessionStartTime ?? '',
   };
 }
 

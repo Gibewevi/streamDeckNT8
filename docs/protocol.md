@@ -376,6 +376,8 @@ requis, les champs absents sont laissés inchangés.
 | `maxContracts` | 0–1000 | Contrats que le compte peut détenir. Une entrée qui porterait la position au-delà est **refusée** (`SAFETY_MAX_CONTRACTS`). `0` = règle désactivée, et c'est le défaut |
 | `dailyLossLimit` | 0–1 000 000 | Perte de session max (nombre positif). `0` = règle désactivée |
 | `lockDurationHours` | 0.05–24 | Durée du verrou après armement. Défaut `6` |
+| `sessionStartEnabled` | booléen | Refuse toute ouverture avant `sessionStartTime`. Défaut `false` |
+| `sessionStartTime` | `HH:mm` | Heure **locale** du poste avant laquelle les entrées sont refusées. Doit accompagner l'allumage : allumer sans heure est refusé (`SAFETY_START_TIME_MISSING`), une valeur illisible aussi (`SAFETY_INVALID_START_TIME`). Normalisée en `HH:mm` — `9:45` est accepté et enregistré `09:45` |
 | `antiTiltEnabled` | booléen | Autorise la friction Anti-Tilt. Défaut `false` |
 | `tiltAveragingAllowed` | booléen | `false` met sous friction tout renfort d'une position perdante. Défaut `true` |
 | `tiltAdvanced` | booléen | Active les deux durées ci-dessous. À `false`, elles sont ignorées et les valeurs par défaut s'appliquent — sans effacer ce qui avait été saisi |
@@ -444,6 +446,28 @@ limites de sécurité. Sans envoi, le bridge applique `DefaultCooldownSeconds` (
 
 L'état publié distingue les deux notions : `cooldownSeconds` est la durée **configurée**,
 `cooldownSecondsRemaining` le **décompte** de la temporisation en cours.
+
+#### Blocage avant une heure
+
+Règle d'horloge, et la seule de Guard qui ne regarde rien de ce qui s'est passé dans la séance :
+elle refuse toute **ouverture** de position avant une heure fixée à l'avance, et se retire d'
+elle-même à l'heure dite. Elle vise l'heure où rien n'est encore décidé — l'ouverture, où l'on
+prend une position par impatience plutôt que par plan.
+
+- **Gardée par l'armement.** Comme les autres règles de séance, elle n'agit que si Guard est armé.
+- **Entrées seulement.** `buyMarket`, `sellMarket`, `buyLimit`, `sellLimit`, `reverse`. Clôturer et
+  réduire restent toujours possibles — enfermer le trader dans une position est le seul résultat
+  qu'aucune règle de ce protocole ne peut produire.
+- **Elle atteint aussi la souris.** Le refus passe dans `setGuardPolicy`
+  (`blocked: true, reason: "beforeSessionStart"`), donc `GuardEnforcer` annule dans NinjaTrader un
+  ordre saisi au SuperDOM avant l'heure. Une règle qui ne tiendrait que sur le boîtier serait une
+  décoration.
+- **Heure LOCALE du poste**, pas une heure de bourse : c'est celle que le trader lit sur son
+  horloge, et la seule qu'il puisse vérifier d'un coup d'œil pendant que la touche est rouge.
+- **Elle ne referme pas la séance le soir.** La comparaison porte sur l'heure du jour, pas sur le
+  jour de bourse : à 20:00 un réglage `09:45` laisse passer. C'est assumé — une règle sur le début
+  de la journée n'a pas à décider de sa fin. Une session overnight qui ouvre à 18:00 n'est donc pas
+  contrainte par un réglage du matin.
 
 ### Tendance
 
@@ -707,6 +731,9 @@ macro de sécurité :
     "entriesBlocked": false,
     "blockReason": "",
     "tradingDay": "2026-07-29",
+    "sessionStartEnabled": true,
+    "sessionStartTime": "09:45",
+    "sessionStartInSeconds": 0,
     "tiltEnabled": true,
     "tiltActive": true,
     "tiltSecondsRemaining": 742,
@@ -726,7 +753,10 @@ macro de sécurité :
 | `sessionPnl` | PnL depuis le PnL de début de journée (réalisé + latent) |
 | `pnlAvailable` | `false` si NT8 n'expose pas le PnL du compte — les règles PnL sont alors inertes |
 | `entriesBlocked` | Les ouvertures de position sont actuellement refusées |
-| `blockReason` | `""`, `"dailyLoss"`, `"tradeLimit"` ou `"maxContracts"` |
+| `blockReason` | `""`, `"dailyLoss"`, `"tradeLimit"`, `"maxContracts"`, `"mandatoryPause"` ou `"beforeSessionStart"` |
+| `sessionStartEnabled` | La règle « pas d'entrée avant l'heure » est active |
+| `sessionStartTime` | Heure locale réglée, `HH:mm`. **Vide quand la règle est coupée** — ce qui distingue « armée » de « réglée mais éteinte » dans le journal |
+| `sessionStartInSeconds` | Secondes avant l'ouverture des entrées. `0` si la règle est coupée ou l'heure passée |
 | `maxContracts` | Plafond de contrats en vigueur. `0` = règle désactivée |
 | `tiltEnabled` | La friction Anti-Tilt est autorisée |
 | `tiltActive` | Les entrées doivent être maintenues avant de partir. **Jamais un refus** |
@@ -924,6 +954,9 @@ Le plugin affiche `REJECTED` pendant 5 s sur les touches d'entrée et déclenche
 | `SAFETY_DAILY_LOSS_REACHED` | Perte journalière max atteinte — ouverture refusée par la macro |
 | `SAFETY_TRADE_LIMIT_REACHED` | Nombre max de trades en perte atteint — ouverture refusée par la macro |
 | `SAFETY_MAX_CONTRACTS` | L'ordre porterait la position au-delà du plafond de contrats. Seuls les ordres qui augmentent l'exposition sont refusés : réduire reste toujours possible. **Seule règle Guard qui s'applique même macro désarmée** — c'est une limite de risque permanente, pas une règle de séance |
+| `SAFETY_BEFORE_SESSION_START` | L'heure de début de séance n'est pas atteinte — ouverture refusée. Seules les entrées : clôturer et réduire restent possibles. La règle se retire **seule** à l'heure dite |
+| `SAFETY_INVALID_START_TIME` | `sessionStartTime` illisible. Attendu `HH:mm` local, `00:00`–`23:59`. **Refusé plutôt qu'ignoré** : une heure que personne ne sait lire donnerait une protection que le trader croit avoir armée |
+| `SAFETY_START_TIME_MISSING` | `sessionStartEnabled: true` sans heure à faire respecter, ni dans la charge ni déjà enregistrée |
 | `SAFETY_MACRO_LOCKED` | Désarmement / reconfiguration impossible avant la fin du verrou |
 | `COOLDOWN_ACTIVE` | Cooldown actif après un trade perdant |
 | `TREND_AGAINST` | La macro Tendance est armée et l'ordre irait à contre-sens. Seuls les ordres qui **créent** de l'exposition sont refusés : clôturer et réduire restent toujours possibles |
