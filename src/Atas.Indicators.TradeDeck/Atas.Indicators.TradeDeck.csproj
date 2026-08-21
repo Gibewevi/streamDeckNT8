@@ -1,0 +1,73 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ATAS X uniquement. Son runtimeconfig.json annonce net10.0, et son dossier d'installation est
+    `C:\Program Files\ATAS X` — a ne pas confondre avec l'ATAS classique, en `Program Files (x86)`,
+    qui est en net10.0-windows et WPF. Ajouter la cible classique plus tard sera un changement de
+    ce fichier et non de code, A CONDITION de n'introduire aucun type WPF : ATAS X ne sait pas
+    convertir un editeur WPF personnalise.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>annotations</Nullable>
+    <UseWPF>false</UseWPF>
+    <RootNamespace>TradeDeck.Atas.Indicators</RootNamespace>
+    <AssemblyName>TradeDeck.Indicators</AssemblyName>
+    <!-- Les indicateurs ATAS dessinent via System.Drawing : CA1416 est attendu, comme chez eux. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ATAS_BASE Condition="'$(ATAS_BASE)' == ''">C:\Program Files\ATAS X</ATAS_BASE>
+  </PropertyGroup>
+
+  <!--
+    LES ALGORITHMES NE SONT PAS COPIES ICI, ILS SONT LUS LA-BAS.
+    Un seul fichier sur le disque, deux compilateurs. Ces fichiers sont aussi compiles par
+    NinjaScript chez le trader : ils doivent rester en C# 9 / net48. Une construction plus recente
+    compile ici et casse la compilation NinjaScript ENTIERE chez lui, indicateurs personnels
+    compris. Le garde-fou est `dotnet build src/NinjaTrader.Scripts` : les deux passent, ou aucun.
+  -->
+  <ItemGroup>
+    <Compile Include="..\NinjaTrader.Scripts\Indicators\TdSwingEngine.cs"  Link="Shared\TdSwingEngine.cs" />
+    <Compile Include="..\NinjaTrader.Scripts\Indicators\TdStopSelector.cs" Link="Shared\TdStopSelector.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="ATAS.Indicators">
+      <HintPath>$(ATAS_BASE)\ATAS.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!--
+      DEVIATION (tache 2) : EMA vit dans ATAS.Indicators.Technical.dll, pas dans ATAS.Indicators.dll.
+      Le brief ne listait que six references ; celle-ci est un septieme DLL constate en inspectant
+      les assemblies reelles (voir rapport de tache), pas une invention.
+    -->
+    <Reference Include="ATAS.Indicators.Technical">
+      <HintPath>$(ATAS_BASE)\ATAS.Indicators.Technical.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ATAS.DataFeedsCore">
+      <HintPath>$(ATAS_BASE)\ATAS.DataFeedsCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Rendering">
+      <HintPath>$(ATAS_BASE)\OFT.Rendering.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Attributes">
+      <HintPath>$(ATAS_BASE)\OFT.Attributes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Localization">
+      <HintPath>$(ATAS_BASE)\OFT.Localization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Utils.Common">
+      <HintPath>$(ATAS_BASE)\Utils.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
