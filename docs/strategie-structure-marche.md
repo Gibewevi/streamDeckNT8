@@ -308,3 +308,43 @@ des entrées.
 Rien n'est décidé tant que le placement du stop n'est pas jugé bon. Ensuite seulement : conditions
 d'entrée, take profit, puis gestion de position (template ATM ou `SetStopLoss`/`SetProfitTarget`),
 puis exposition de la stratégie au deck.
+
+---
+
+# Sur ATAS X
+
+Les mêmes deux indicateurs existent sur ATAS X, dans `src/Atas.Indicators.TradeDeck/`. **Ils ne
+dupliquent pas l'algorithme** : `TdSwingEngine.cs` et `TdStopSelector.cs` restent dans
+`src/NinjaTrader.Scripts/Indicators/` et sont compilés par les deux projets, liés par
+`<Compile Include>`. Un seul fichier sur le disque, deux compilateurs.
+
+**Conséquence à connaître avant de toucher un fichier partagé.** Ils doivent rester en C# 9 /
+`net48`, la contrainte de NinjaScript. Une construction plus moderne compile côté ATAS et casse la
+compilation NinjaScript **entière** chez le trader — ses propres indicateurs compris. Le garde-fou
+est `dotnet build src/NinjaTrader.Scripts` : les deux builds passent, ou aucun.
+
+```bash
+dotnet build src/NinjaTrader.Scripts/NinjaTrader.Scripts.csproj -c Release
+dotnet build src/Atas.Indicators.TradeDeck/Atas.Indicators.TradeDeck.csproj -c Release
+```
+
+Déploiement : le DLL dans `%APPDATA%\ATAS X\Indicators\`, ou le bouton « ajouter un indicateur
+personnalisé », qui charge sans redémarrer. Le portage a demandé deux références d'assembly de
+plus que prévu : `ATAS.Indicators.Technical` (où vivent `ATR`/`EMA`, absents d'`ATAS.Indicators`)
+et `System.Drawing.Common` (que `RenderPen` expose dans sa surface publique, et que le framework
+partagé d'un `net10.0` nu ne fournit pas) — un lecteur qui déplace le projet ou met à jour ATAS X
+doit s'attendre à les retrouver dans le `.csproj`.
+
+Trois différences de plateforme valent d'être connues :
+
+- **La barre close se gère à la main.** ATAS rappelle `OnCalculate` à chaque tick de la barre en
+  formation, là où `Calculate.OnBarClose` ne l'appelait qu'une fois par barre close. Le moteur est
+  une machine à états : on n'avance que lorsque l'index bouge, et on lui donne `bar - 1`.
+- **`MaximumBarsLookBack` n'existe plus comme problème.** L'indexation est absolue, l'écriture
+  rétroactive d'un pivot est triviale.
+- **`decimal` n'a pas de `NaN`.** `ShowZeroValue = false` remplace la remise à `double.NaN` par
+  barre, et rend inutile la remise à zéro elle-même.
+
+Les statistiques de calibration ne passent plus par `Print` — ATAS n'a pas de fenêtre de sortie —
+mais par un encart dessiné sur le graphique. Elles servent aussi de recette : mêmes réglages, même
+session, les nombres des deux plateformes doivent concorder.

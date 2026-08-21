@@ -193,6 +193,12 @@ Règles en ajoutant un log :
   qui est régénérable et volumineux — `src/deck-host/node_modules/`, `dist/` et `bridge/` de
   l'hôte, et les dossiers `publish/`. Il ne s'applique pas aux fichiers déjà suivis, d'où la note
   explicite dans le fichier.
+- **`TdSwingEngine.cs` et `TdStopSelector.cs` sont compilés par TROIS chaînes** : NinjaScript chez le
+  trader, `NinjaTrader.Scripts.csproj`, et le projet ATAS `src/Atas.Indicators.TradeDeck/` qui les
+  lie par `<Compile Include>`. Ils doivent donc rester en **C# 9 / `net48`** — namespace à portée de
+  fichier, `record` ou `required` compilent côté ATAS et cassent la compilation NinjaScript
+  **entière** chez le trader, indicateurs personnels compris. Après toute modification de l'un
+  d'eux : `dotnet build src/NinjaTrader.Scripts` **et** le build ATAS, les deux ou aucun.
 
 ## Conventions
 
