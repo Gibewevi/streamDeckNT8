@@ -1,13 +1,15 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 
 using ATAS.Indicators;
 using ATAS.Indicators.Drawing;
 using ATAS.Indicators.Technical;
 
 using OFT.Attributes;
+using OFT.Rendering.Context;
 
 // DEVIATION (tache 2) : ATAS.Indicators et OFT.Attributes definissent chacun un ParameterAttribute
 // (le premier derive du second) ; les importer tous les deux rend [Parameter] ambigu (CS0104).
@@ -80,6 +82,12 @@ public class TdStopPlacement : Indicator
     private decimal _fallbackAtrMultiple = 2.0m;
     private TdStopPreviewDirection _previewDirection = TdStopPreviewDirection.SuivreEma;
 
+    private readonly List<PendingEntry> _pending = new();
+    private int _resolved;
+    private int _swept;
+    private int _sweepHorizonBars = 20;
+    private bool _showStatistics = true;
+
     public TdStopPlacement() : base(true)
     {
         DataSeries[0] = _structural;
@@ -98,6 +106,9 @@ public class TdStopPlacement : Indicator
         _distanceAtr.Clear();
         _structuralCount = 0;
         _fallbackCount = 0;
+        _pending.Clear();
+        _resolved = 0;
+        _swept = 0;
         DataSeries.ForEach(x => x.Clear());
     }
 
@@ -169,6 +180,9 @@ public class TdStopPlacement : Indicator
         var distance = Math.Abs(entry - stop);
         _distanceTicks.Add((double)(distance / tick));
         _distanceAtr.Add((double)(distance / atr));
+
+        _pending.Add(new PendingEntry { Bar = closed, Stop = stop, IsLong = isLong });
+        ResolvePending(closed, candle);
     }
 
     private bool ResolveDirection(int closed)
@@ -179,6 +193,38 @@ public class TdStopPlacement : Indicator
     }
 
     /// <summary>
+    /// Scores past previews once enough bars have elapsed. Resolution is always backward-looking: a
+    /// pending entry is only ever tested against bars that have already printed.
+    /// </summary>
+    private void ResolvePending(int closed, IndicatorCandle candle)
+    {
+        for (var i = _pending.Count - 1; i >= 0; i--)
+        {
+            var pending = _pending[i];
+
+            // The entry is taken at this bar's close, so this bar cannot stop it out.
+            if (pending.Bar == closed)
+                continue;
+
+            if (!pending.Hit)
+            {
+                var breached = pending.IsLong ? candle.Low <= pending.Stop : candle.High >= pending.Stop;
+                if (breached)
+                    pending.Hit = true;
+            }
+
+            if (closed - pending.Bar < _sweepHorizonBars)
+                continue;
+
+            _resolved++;
+            if (pending.Hit)
+                _swept++;
+
+            _pending.RemoveAt(i);
+        }
+    }
+
+    /// <summary>
     /// NinjaTrader had Instrument.MasterInstrument.RoundToTickSize. ATAS has no equivalent, but it
     /// does not need one: rounding in decimal is exact, where the NinjaTrader version worked in
     /// double and could land a hair off a tick boundary.
@@ -186,6 +232,50 @@ public class TdStopPlacement : Indicator
     private static decimal RoundToTick(decimal price, decimal tick)
     {
         return tick <= 0m ? price : Math.Round(price / tick) * tick;
+    }
+
+    protected override void OnRender(RenderContext context, DrawingLayouts layout)
+    {
+        if (!_showStatistics || ChartInfo == null || Container == null)
+            return;
+
+        var evaluated = _structuralCount + _fallbackCount;
+        if (evaluated == 0)
+            return;
+
+        var lines = new List<string>
+        {
+            string.Format(CultureInfo.InvariantCulture,
+                "{0} barres evaluees : {1:F1} % structurel, {2:F1} % repli ATR",
+                evaluated,
+                100.0 * _structuralCount / evaluated,
+                100.0 * _fallbackCount / evaluated)
+        };
+
+        if (_distanceTicks.Count > 0)
+        {
+            lines.Add(string.Format(CultureInfo.InvariantCulture,
+                "largeur du stop : moy. {0:F1} ticks ({1:F2} ATR), med. {2:F1} ticks",
+                StatsBox.Mean(_distanceTicks), StatsBox.Mean(_distanceAtr), StatsBox.MedianOf(_distanceTicks)));
+        }
+
+        if (_resolved > 0)
+        {
+            lines.Add(string.Format(CultureInfo.InvariantCulture,
+                "balayage a {0} barres : {1:F1} % ({2} touches sur {3})",
+                _sweepHorizonBars, 100.0 * _swept / _resolved, _swept, _resolved));
+        }
+
+        StatsBox.Draw(context, Container, lines);
+    }
+
+    /// <summary>A preview awaiting its verdict.</summary>
+    private sealed class PendingEntry
+    {
+        public int Bar;
+        public decimal Stop;
+        public bool IsLong;
+        public bool Hit;
     }
 
     #region Reglages
@@ -294,6 +384,27 @@ public class TdStopPlacement : Indicator
     {
         get => _ema.Period;
         set { _ema.Period = value; RecalculateValues(); }
+    }
+
+    [Parameter]
+    [Display(Name = "Horizon de balayage (barres)", Description = "Fenetre sur laquelle on mesure si le stop aurait ete touche.", GroupName = "Apercu", Order = 22)]
+    [Range(1, 10000)]
+    public int SweepHorizonBars
+    {
+        get => _sweepHorizonBars;
+        set { _sweepHorizonBars = value; RecalculateValues(); }
+    }
+
+    [Parameter]
+    [Display(Name = "Afficher les statistiques", Description = "Encart de calibration : part structurelle, largeur du stop, taux de balayage.", GroupName = "Apercu", Order = 23)]
+    public bool ShowStatistics
+    {
+        get => _showStatistics;
+        // RedrawChart() and not RecalculateValues(): this toggle changes nothing that is computed,
+        // only whether OnRender draws. A full recalculation would replay the engine, the selector
+        // and the whole pending/resolution machinery over the entire history to flip a boolean.
+        // Same idiom as TdSwingStructure.ShowStatistics.
+        set { _showStatistics = value; RedrawChart(); }
     }
 
     #endregion
