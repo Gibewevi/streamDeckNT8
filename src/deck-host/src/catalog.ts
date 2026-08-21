@@ -195,8 +195,8 @@ export const CATALOG: ActionDef[] = [
         // La liste ne copie rien tant que la bascule est éteinte : l'hôte pousse alors
         // `enabled: false`, et le moteur n'ouvre aucune souscription.
         inertWhenHidden: true,
-        help: 'Huit au maximum. Multiplicateur 0 met un compte en pause sans le délier ; '
-            + 'plafond 0 = sans plafond.',
+        help: 'Huit au maximum. Chaque compte lié reçoit exactement la quantité du maître ; '
+            + 'pour délier un compte, décochez-le.',
       },
     ],
   },

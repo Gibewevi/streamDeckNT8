@@ -24,9 +24,9 @@ Touche Compte
 
   COMPTES LIÉS                       ← n'apparaît que si la copie est activée
    ☑ Sim101  maître                   ← dans le groupe, pas copié tant qu'il est maître
-   ☑ Sim102        Multiplicateur 1   Plafond (contrats) 0
+   ☑ Sim102
    ☐ Sim103
-   ☑ APEX-4471     Multiplicateur 2   Plafond (contrats) 5
+   ☑ APEX-4471
 ```
 
 La liste décrit un **groupe**, maître compris. On copie donc vers Sim102 et APEX-4471. Sélectionner
@@ -39,7 +39,7 @@ qui ne partira jamais — une faute de frappe donne un compte qui ne résout pas
 est une pastille sur une touche du boîtier, là où personne ne la cherche.
 
 - recopie des entrées, des sorties, des déplacements de stop/target et des annulations ;
-- **multiplicateur et plafond de contrats par suiveur**, arrondi entier ;
+- **chaque compte lié reçoit exactement la quantité du maître** ;
 - **OCO reconstruit côté suiveur**, si bien que le courtier tient le bracket même si le copieur
   décroche ;
 - **contrôle de dérive qui arrête un suiveur, sans jamais tenter de le corriger.**
@@ -89,7 +89,7 @@ garde-fou.
 
 | Défaut d'origine | Ce qui est fait ici |
 |---|---|
-| Quantité suiveur = quantité maître, sans réglage | Multiplicateur et plafond **par suiveur** (§ [Dimensionnement](#dimensionnement)) |
+| Quantité suiveur = quantité maître, sans réglage possible | Le moteur sait dimensionner par compte ; le réglage n'est pas exposé aujourd'hui (§ [Dimensionnement](#dimensionnement)) |
 | Comptes découverts **une seule fois**, à l'ouverture de la fenêtre : un compte reconnecté n'était plus jamais copié, et l'écran le montrait quand même configuré | Résolution refaite à chaque publication d'état, et `resolved: false` remonté par suiveur — un suiveur non résolu se voit |
 | Indicateur d'activation `bool` non `volatile`, lu depuis les threads d'événements | Un objet de configuration immuable, échangé atomiquement |
 | Rejet d'un ordre suiveur traité comme une annulation : lien supprimé, rien remonté | Événement `copierViolation` → bridge → hôte, touche rouge, ligne de journal |
@@ -119,20 +119,25 @@ C'est ce qui fait qu'une recompilation NinjaScript en pleine séance ne perd pas
 
 ## Dimensionnement
 
-Pour chaque suiveur, avec **son** multiplicateur et **son** plafond :
+**Chaque compte lié reçoit exactement la quantité du maître.** Il n'y a rien à régler : pour
+délier un compte, on le décoche.
 
-```
-quantité = arrondi( quantité_maître × multiplicateur )
-quantité = min( quantité, plafondContrats )      si plafondContrats > 0
-```
+Le moteur sait pourtant dimensionner par compte — multiplicateur et plafond par ordre, arrondi à
+l'entier le plus proche, `0` n'envoyant rien plutôt que d'arrondir à 1. Ce code **reste**, pour le
+jour où le réglage reviendra, et le format de stockage le porte toujours
+(`nom|multiplicateur|plafond`).
 
-- **arrondi entier**, à l'entier le plus proche. Un contrat est indivisible ;
-- un résultat de **0 n'envoie rien** et se journalise : c'est le cas d'un multiplicateur de 0,3 sur
-  un ordre d'un contrat. Ne pas arrondir à 1 en douce — un suiveur réglé pour prendre un tiers du
-  risque ne doit pas se retrouver à en prendre la totalité ;
-- **`multiplicateur = 0` désactive le suiveur** sans le retirer de la liste ;
-- le plafond est un plafond **par ordre**, pas une limite de position. La limite de position reste
-  celle de Guard (`maxContracts`), qui s'applique compte par compte.
+Mais **plus aucun contrôle ne le règle**, et l'hôte le normalise donc à `×1` sans plafond avant
+d'envoyer, en journalisant ce qu'il a ignoré. Une valeur héritée d'un layout ancien doublerait
+sinon une taille sans que rien à l'écran ne le dise — c'est le réglage invisible qui agit, le pire
+mode de défaillance de ce projet.
+
+> Si le plafond revient un jour comme garde-fou, **sa valeur par défaut sera la quantité du
+> maître** : un compte lié qui se met à recevoir moins que ce qu'on croit est aussi trompeur qu'un
+> compte qui reçoit plus.
+
+La limite de position, elle, reste celle de Guard (`maxContracts`), qui s'applique compte par
+compte et n'a jamais dépendu de ce réglage.
 
 ## La dérive — on s'arrête, on ne répare pas
 
@@ -145,7 +150,7 @@ REPEATER9000 ne le remarque jamais.
 Ici, à chaque publication d'état, on compare pour chaque couple (suiveur, instrument) :
 
 ```
-position attendue = position nette du maître × multiplicateur   (arrondie)
+position attendue = position nette du maître        (multiplicateur 1)
 position réelle   = position nette du suiveur
 ```
 
@@ -154,7 +159,7 @@ Deux natures d'écart, jugées différemment :
 | Écart | Jugé ? |
 |---|---|
 | **Sens opposé**, maître à plat et suiveur non plat, ou l'inverse | **Toujours.** C'est le cas dangereux : une exposition que personne n'a voulue |
-| **Taille seule**, même sens | Seulement si **aucun plafond n'est actif** sur ce suiveur — un plafond crée un écart légitime et attendu, le signaler serait une fausse alerte permanente |
+| **Taille seule**, même sens | Toujours, tant qu'aucun plafond n'est en vigueur — et il n'y en a plus. Un plafond créerait un écart légitime et permanent, dont l'alerte n'apprendrait rien ; la règle reste écrite pour le jour où il reviendrait |
 
 Un écart **persistant au-delà du délai de stabilisation** (aucun ordre copié en vol depuis 3 s
 pour ce couple) déclare le suiveur **en dérive**. Alors, et seulement alors :
@@ -225,7 +230,7 @@ c'est le compte sélectionné), *Journaliser ce compte*, *Copier les positions*,
 |---|---|---|
 | `journal` | `toggle` | *(existant)* Journaliser ce compte vers Bitlearn |
 | `copyEnabled` | `toggle` | Copier les positions vers les comptes liés |
-| `followers` | `followerList` | Les comptes liés, leur multiplicateur et leur plafond |
+| `followers` | `followerList` | Les comptes du groupe. Case cochée = lié, décochée = délié |
 
 > **Le réglage `accounts` a été retiré** — une liste de comptes à saisir, un par ligne, qui
 > filtrait et ordonnait le défilement. Il obligeait à retaper des noms que NinjaTrader publie
@@ -335,7 +340,7 @@ comptes Sim au minimum.
 | 1 | Entrée sur le maître | Copiée, quantité multipliée et plafonnée, **par suiveur** |
 | 2 | Stop déplacé sur le maître | Suit chez le suiveur, par `Change`, sans recréer l'ordre |
 | 3 | Take profit maître exécuté | Stop suiveur annulé par son propre OCO |
-| 4 | Multiplicateur 0,3 sur 1 contrat | Rien envoyé, ligne de journal |
+| 4 | Layout ancien portant `×2` ou un plafond | Ignoré, ramené à la quantité du maître, ligne de journal |
 | 5 | Appui sur la touche Compte | Tous les comptes défilent, groupe compris |
 | 6 | Bascule A → B (groupe A, B, C) | On copie vers A et C ; B n'est plus copié. Aucune écriture du layout |
 | 7 | Suiveur déconnecté puis reconnecté | `resolved` passe à faux puis à vrai, copie reprise |

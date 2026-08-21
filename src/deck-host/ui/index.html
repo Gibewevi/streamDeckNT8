@@ -273,42 +273,29 @@
   .maitre .n { display:block; margin-top:5px; font-size:11px; color:var(--faint); line-height:1.45; }
 
   /* Comptes suiveurs : ceux que NinjaTrader publie, à cocher. */
-  /* Une ligne par compte, sobre au repos. Le cadre ne s'allume que sur le compte retenu :
-     encadrer les huit d'un trait plein transformait une liste de trois comptes en mur de boîtes. */
-  .fl-liste { display:flex; flex-direction:column; gap:2px; }
-  .fl-compte { border:1px solid transparent; border-radius:var(--r-sm); transition:.14s var(--ease); }
+  /* Comptes liés : une case et un nom, rien d'autre. Le tiroir est une colonne étroite —
+     chaque pixel vertical dépensé ici est un compte de moins visible sans défiler. */
+  .fl-liste { display:flex; flex-direction:column; gap:1px; }
+  .fl-compte { display:flex; align-items:center; gap:11px; margin:0; padding:7px 9px;
+               border:1px solid transparent; border-radius:var(--r-sm); cursor:pointer;
+               transition:.14s var(--ease); }
   .fl-compte:hover { background:rgba(255,255,255,.03); }
   .fl-actif { border-color:var(--edge); background:var(--card); }
   .fl-actif:hover { background:var(--card); }
-
-  /* La ligne entière est la cible de clic : 40 px de haut, pas un carré de 19. */
-  .fl-tete { display:flex; align-items:center; gap:13px; cursor:pointer; margin:0; padding:10px 11px; }
-  /* Case native masquée mais toujours présente : c'est elle qui porte l'état et le focus clavier.
-     La pastille n'en est que le reflet. */
+  /* Case native masquée mais toujours présente : c'est elle qui porte l'état et le focus
+     clavier. La pastille n'en est que le reflet. */
   .fl-on { position:absolute; opacity:0; width:0; height:0; margin:0; pointer-events:none; }
-  .fl-puce { width:19px; height:19px; flex:none; border-radius:6px; border:1.5px solid var(--edge-2);
+  .fl-puce { width:17px; height:17px; flex:none; border-radius:5px; border:1.5px solid var(--edge-2);
              display:grid; place-items:center; background:var(--bg); transition:.14s var(--ease); }
-  .fl-puce svg { width:12px; height:12px; color:#fff; opacity:0; transform:scale(.7); transition:.14s var(--ease); }
+  .fl-puce svg { width:11px; height:11px; color:#fff; opacity:0; transform:scale(.7); transition:.14s var(--ease); }
   .fl-on:checked + .fl-puce { background:var(--accent); border-color:var(--accent); }
   .fl-on:checked + .fl-puce svg { opacity:1; transform:scale(1); }
   .fl-on:focus-visible + .fl-puce { box-shadow:0 0 0 3px var(--accent-soft); }
   .fl-on:disabled + .fl-puce { opacity:.35; }
   .fl-on:disabled ~ .fl-nom { opacity:.45; }
-  .fl-tete:hover .fl-puce { border-color:var(--accent); }
-
-  .fl-nom { font-family:var(--mono); font-size:13.5px; color:var(--txt); letter-spacing:-.01em; }
-  .fl-absent, .fl-maitre { margin-left:auto; font-size:10px; text-transform:uppercase;
-                          letter-spacing:.04em; border-radius:999px; padding:1px 7px; }
-  .fl-absent { color:var(--dim); border:1px solid var(--edge-2); }
-  /* Le compte sélectionné : dans le groupe, mais pas copié tant qu'il est maître. Accentué plutôt
-     que grisé — ce n'est pas une anomalie, c'est le rôle qu'il tient en ce moment. */
-  .fl-maitre { color:var(--accent); border:1px solid var(--accent); }
-  .fl-absent + .fl-maitre, .fl-maitre + .fl-absent { margin-left:6px; }
-  /* Les deux réglages n'apparaissent qu'une fois le compte retenu : proposer un multiplicateur
-     pour un compte qu'on ne copie pas encombre sans rien dire. */
-  .fl-reglages { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 11px 11px 43px; }
-  .fl-reglages label { display:block; font-size:10.5px; color:var(--dim); margin-bottom:4px; }
-  .fl-reglages input { height:30px; }
+  .fl-compte:hover .fl-puce { border-color:var(--accent); }
+  .fl-nom { font-family:var(--mono); font-size:12.5px; color:var(--txt); letter-spacing:-.01em;
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .fl-empty { margin-top:8px; font-size:12px; color:var(--dim); line-height:1.45; }
   label { display:block; font-size:11.5px; color:var(--dim); margin-bottom:6px; font-weight:500; }
   input[type=text], input[type=number], select, textarea {
@@ -764,31 +751,19 @@ function renderInsp() {
       if (!cur || cur.actionId !== a.actionId) return;
 
       // Reconstruit dans l'ordre affiché : ce qui est enregistré suit ce que l'écran montre.
-      const lignes = [...liste.querySelectorAll('.fl-compte')]
+      // `|1|0` toujours — un compte lié reçoit exactement la quantité du maître, et une valeur
+      // héritée d'un layout ancien ne survit pas à la première modification de la liste.
+      const noms = [...liste.querySelectorAll('.fl-compte')]
         .filter(c => c.querySelector('.fl-on')?.checked)
-        .map(c => {
-          const mult = Number.parseFloat(c.querySelector('.fl-mult')?.value);
-          const cap = Number.parseInt(c.querySelector('.fl-cap')?.value, 10);
-          return {
-            nom: c.dataset.flNom || '',
-            mult: Number.isFinite(mult) && mult >= 0 ? Math.min(100, mult) : 1,
-            cap: Number.isFinite(cap) && cap > 0 ? Math.min(1000, cap) : 0,
-          };
-        })
-        .filter(r => r.nom);
+        .map(c => c.dataset.flNom || '')
+        .filter(Boolean);
 
-      (cur.settings ||= {})[key] = lignes.map(r => `${r.nom}|${r.mult}|${r.cap}`).join('\n');
+      (cur.settings ||= {})[key] = noms.map(n => `${n}|1|0`).join('\n');
       save();
-      // Redessiner à chaque frappe ferait perdre le focus d'un champ nombre : réservé à
-      // l'activation, qui fait apparaître ou disparaître les deux réglages du compte.
       if (redessiner) renderInsp();
     };
 
-    liste.addEventListener('input', (e) => {
-      if (e.target.classList.contains('fl-on')) return;
-      commit(false);
-    });
-    liste.addEventListener('change', (e) => commit(e.target.classList.contains('fl-on')));
+    liste.addEventListener('change', () => commit(true));
   }
 }
 
@@ -901,8 +876,7 @@ function followerField(f, v) {
         const bloque = !actif && plein;
         // Toute la ligne est cliquable, pas seulement la case : viser un carré de 19 px est le
         // geste le plus raté d'un formulaire, et il n'y a rien d'autre à cliquer sur cette ligne.
-        return `<div class="fl-compte${actif ? ' fl-actif' : ''}" data-fl-nom="${esc(r.nom)}">
-          <label class="fl-tete">
+        return `<label class="fl-compte${actif ? ' fl-actif' : ''}" data-fl-nom="${esc(r.nom)}">
             <input type="checkbox" class="fl-on"${actif ? ' checked' : ''}${bloque ? ' disabled' : ''}>
             <span class="fl-puce" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
@@ -911,14 +885,7 @@ function followerField(f, v) {
             <span class="fl-nom">${esc(r.nom)}</span>
             ${r.estMaitre ? `<span class="fl-maitre" title="Compte sélectionné : il ne reçoit pas de copie tant qu'il est maître, mais il en recevra dès que la touche passera à un autre compte du groupe">maître</span>` : ''}
             ${r.publie ? '' : `<span class="fl-absent" title="Compte non publié par NinjaTrader en ce moment">hors ligne</span>`}
-          </label>
-          ${actif ? `<div class="fl-reglages">
-            <div><label>Multiplicateur</label>
-              <input type="number" class="fl-mult" min="0" max="100" step="0.1" value="${esc(r.ligne.multiplier)}"></div>
-            <div><label>Plafond (contrats)</label>
-              <input type="number" class="fl-cap" min="0" max="1000" step="1" value="${esc(r.ligne.maxContracts)}"></div>
-          </div>` : ''}
-        </div>`;
+        </label>`;
       }).join('');
 
   return `<div class="field"><label>${esc(f.label)}</label>

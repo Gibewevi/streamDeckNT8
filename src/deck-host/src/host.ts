@@ -30,7 +30,7 @@ import { etatAddOn, journaliserEtat, localiserNinjaScript } from './ninjatrader.
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.26.0';
+const VERSION = '0.26.1';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -1011,7 +1011,24 @@ async function syncCopierConfig(): Promise<void> {
   // liste localement aurait divergé du site en silence, jusqu'à la prochaine édition qui l'aurait
   // écrasée sans prévenir.
   const suiveurs = groupe.filter((f) => f.name.toUpperCase() !== maitre);
-  const followers = formatFollowers(suiveurs);
+
+  // Chaque compte lié reçoit EXACTEMENT la quantité du maître : multiplicateur 1, aucun plafond.
+  //
+  // Normalisé ici, et pas seulement à l'écriture dans l'éditeur. Le moteur sait toujours
+  // dimensionner par compte — c'est du code utile, gardé pour le jour où le réglage reviendra —
+  // mais il n'existe plus aucun contrôle pour le régler. Une valeur héritée d'un layout ancien
+  // continuerait donc de doubler ou de plafonner une taille sans que rien à l'écran ne le dise :
+  // c'est le réglage invisible qui agit, le pire mode de défaillance de ce projet.
+  const deviants = suiveurs.filter((f) => f.multiplier !== 1 || f.maxContracts !== 0);
+  if (deviants.length > 0) {
+    log.eventWarn('Copier', 'Dimensionnement hérité ignoré — chaque compte lié suit la quantité du maître', {
+      comptes: deviants.map((f) => `${f.name}×${f.multiplier}/${f.maxContracts}`).join(' '),
+    });
+  }
+
+  const followers = formatFollowers(
+    suiveurs.map((f) => ({ name: f.name, multiplier: 1, maxContracts: 0 })),
+  );
 
   const resp = await bridge.sendCommand(createCommand('configureCopier', { enabled, followers }));
   if (resp.error) {
