@@ -35,6 +35,9 @@ public sealed class BridgeConfig
     /// <summary>Override for the session file (selected instrument). Empty = %APPDATA%\StreamDeckTrader\session.json.</summary>
     public string SessionStatePath { get; set; } = "";
 
+    /// <summary>Override for the account copier's configuration. Empty = %APPDATA%\StreamDeckTrader\copier.json.</summary>
+    public string CopierStatePath { get; set; } = "";
+
     /// <summary>
     /// Override for the behavioural journal spool. Empty = %APPDATA%\StreamDeckTrader\journal.
     /// Must match the host's, which is where the uploader reads from — the bridge writes its own

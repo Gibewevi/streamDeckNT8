@@ -18,6 +18,7 @@ public sealed class BridgeServer : BackgroundService
     private readonly BridgeConfig _config;
     private readonly MessageRouter _router;
     private readonly StateManager _stateManager;
+    private readonly CopierPolicy _copier;
     private readonly SecurityJournal _journal;
     private readonly ILogger<BridgeServer> _logger;
 
@@ -29,6 +30,9 @@ public sealed class BridgeServer : BackgroundService
     /// <summary>Last guard policy sent to the add-on, so the 5 Hz loop only speaks on a change.</summary>
     private string _lastGuardPolicy = string.Empty;
 
+    /// <summary>Same idea for the copier configuration: pushed on change, never on every tick.</summary>
+    private string _lastCopierConfig = string.Empty;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -39,12 +43,14 @@ public sealed class BridgeServer : BackgroundService
         BridgeConfig config,
         MessageRouter router,
         StateManager stateManager,
+        CopierPolicy copier,
         SecurityJournal journal,
         ILogger<BridgeServer> logger)
     {
         _config = config;
         _router = router;
         _stateManager = stateManager;
+        _copier = copier;
         _journal = journal;
         _logger = logger;
     }
@@ -170,6 +176,10 @@ public sealed class BridgeServer : BackgroundService
                 // Forced: a reconnecting add-on knows nothing, and until it is told it would let
                 // through exactly the orders the macro is refusing on the deck.
                 await PushGuardPolicy(ct, force: true);
+                // Forced for the mirror reason: an add-on that has just been recompiled has no
+                // copier configuration at all, and would silently stop mirroring the account
+                // while the deck still shows copying as on.
+                await PushCopierConfig(ct, force: true);
                 await HandleAddonSession(_addonSocket, ct);
             }
             catch (OperationCanceledException) { break; }
@@ -432,6 +442,7 @@ public sealed class BridgeServer : BackgroundService
         // Kept ahead of the plugin check: the add-on must learn about a new refusal even when no
         // deck is connected, or closing the deck would be a way to switch enforcement off.
         await PushGuardPolicy(ct);
+        await PushCopierConfig(ct);
 
         var socket = _pluginSocket;
         if (socket?.State != WebSocketState.Open) return;
@@ -477,6 +488,62 @@ public sealed class BridgeServer : BackgroundService
 
         _logger.LogWarning("Guard policy → NT8: blocked={Blocked} reason={Reason} maxContracts={Max}",
             blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts);
+
+        await SendToAddon(msg, ct);
+    }
+
+    /// <summary>
+    /// Tells the add-on what to mirror and where.
+    ///
+    /// This is also where a change of master account is noticed. Deliberately here and not in the
+    /// <c>setAccount</c> handler: NinjaTrader picks an account on its own when the tracked one
+    /// disappears, and that path never goes through a command. Watching the value about to be
+    /// published catches every route to a changed master, including the ones nobody asked for.
+    ///
+    /// Like the guard policy, it only speaks on a change — this runs five times a second.
+    /// </summary>
+    private async Task PushCopierConfig(CancellationToken ct, bool force = false)
+    {
+        var state = _stateManager.GetSnapshot();
+        var master = state.Account ?? string.Empty;
+
+        // Returns true when this very call is what held copying. Push it immediately: the add-on
+        // must stop mirroring before the next order, not at the next configuration edit.
+        if (_copier.NoteMaster(master)) force = true;
+
+        var enabled = _copier.IsEffectivelyEnabled;
+        var entriesBlocked = state.Safety.EntriesBlocked;
+        var followers = _copier.Followers;
+
+        var signature = $"{enabled}|{master}|{entriesBlocked}|" +
+            string.Join(",", followers.Select(f => $"{f.Name}:{f.Multiplier}:{f.MaxContracts}"));
+        if (!force && signature == _lastCopierConfig) return;
+        _lastCopierConfig = signature;
+
+        var msg = new BridgeMessage
+        {
+            Type = "command",
+            Version = "1.0",
+            RequestId = Guid.NewGuid().ToString(),
+            Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+            Source = "bridge",
+            Action = "setCopierConfig",
+            Payload = JsonSerializer.SerializeToElement(new
+            {
+                enabled,
+                master,
+                entriesBlocked,
+                followers = followers.Select(f => new
+                {
+                    name = f.Name,
+                    multiplier = f.Multiplier,
+                    maxContracts = f.MaxContracts
+                }).ToArray()
+            })
+        };
+
+        _logger.LogInformation("Copier config → NT8: enabled={Enabled} master={Master} followers={Count} entriesBlocked={Blocked}",
+            enabled, string.IsNullOrEmpty(master) ? "-" : master, followers.Count, entriesBlocked);
 
         await SendToAddon(msg, ct);
     }

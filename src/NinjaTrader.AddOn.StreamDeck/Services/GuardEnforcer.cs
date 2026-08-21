@@ -53,6 +53,23 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private readonly HashSet<string> _handled = new HashSet<string>();
 
         /// <summary>
+        /// Beyond this many remembered copies the oldest are forgotten. A copied order that lived
+        /// longer than two thousand later copies has long since reached a terminal state.
+        /// </summary>
+        private const int MaxTrackedCopies = 2000;
+
+        /// <summary>
+        /// Orders the copy engine created. Tracked BY ID rather than by <c>Order.Name</c>: the name
+        /// is a free string that a trader can type into a SuperDOM ticket, so trusting it would
+        /// hand anyone a one-word bypass of every rule this class enforces. An id is assigned by
+        /// NinjaTrader and cannot be claimed.
+        /// </summary>
+        private readonly HashSet<long> _copiedOrders = new HashSet<long>();
+
+        /// <summary>Insertion order for <see cref="_copiedOrders"/>, so the set stays bounded.</summary>
+        private readonly Queue<long> _copiedOrderRing = new Queue<long>();
+
+        /// <summary>
         /// Orders a cancel was requested for, waiting to find out whether it worked.
         /// Order id → violation reason. Emptied by <see cref="ResolveOutcome"/>.
         /// </summary>
@@ -68,6 +85,35 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         {
             _resolver = resolver;
             _bridgeClient = bridgeClient;
+        }
+
+        /// <summary>
+        /// Declares an order created by <see cref="CopyEngine"/>, so this class does not treat it
+        /// as an order placed outside the deck.
+        ///
+        /// Called BEFORE the submit, deliberately: registering afterwards leaves a window in which
+        /// NinjaTrader has already reported the order and the enforcer would cancel it.
+        /// </summary>
+        public void RegisterCopiedOrder(Order order)
+        {
+            if (order == null) return;
+
+            lock (_lock)
+            {
+                if (!_copiedOrders.Add(order.Id)) return;
+                _copiedOrderRing.Enqueue(order.Id);
+
+                while (_copiedOrderRing.Count > MaxTrackedCopies)
+                    _copiedOrders.Remove(_copiedOrderRing.Dequeue());
+            }
+        }
+
+        private bool IsCopiedOrder(Order order)
+        {
+            lock (_lock)
+            {
+                return _copiedOrders.Contains(order.Id);
+            }
         }
 
         /// <summary>Adopts the policy the bridge publishes whenever it changes.</summary>
@@ -125,6 +171,14 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
             // The bridge already ran every rule against this one before it was sent.
             if (string.Equals(order.Name, DeckOrderName, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // A copy of a master order the bridge already vetted. Cancelling it here would be
+            // enforcing the same rule twice — and worse, asymmetrically: the master's entry would
+            // stand while its copies were killed, leaving the follower accounts out of step with
+            // an account that did take the trade. The copy engine stops copying entries by itself
+            // when the macro blocks; this branch is about the orders already in flight.
+            if (IsCopiedOrder(order))
                 return false;
 
             if (!IsCancellable(order)) return false;

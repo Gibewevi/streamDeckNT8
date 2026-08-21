@@ -30,15 +30,23 @@ public sealed class MessageValidator
         "autoFlattenOnDailyLoss", "autoFlattenGraceSeconds",
     };
 
+    /// <summary>
+    /// Distance maximale d'une jambe du bracket, en ticks. Bornée pour la même raison que les
+    /// autres plages : un chiffre saisi de travers dans l'éditeur doit être refusé avec un message,
+    /// pas envoyé à NinjaTrader qui le rejettera avec le sien.
+    /// </summary>
+    public const int MaxBracketTicks = 10000;
+
     private static readonly HashSet<string> KnownActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "buyMarket", "sellMarket", "buyLimit", "sellLimit",
         "flatten", "cancelOrders", "cancelWorkingOrders", "reverse",
-        "breakeven", "moveStop", "moveTarget",
+        "breakeven", "moveStop", "moveTarget", "attachBracket",
         "qtySet", "qtyAdjust", "qtyReset",
         "setInstrument", "setAccount", "getState", "toggleCooldown", "configureCooldown",
         "armSafety", "disarmSafety", "toggleSafety", "configureSafety",
-        "configureTrend", "toggleTrend"
+        "configureTrend", "toggleTrend",
+        "configureCopier", "copierPanic"
     };
 
     /// <summary>
@@ -97,8 +105,15 @@ public sealed class MessageValidator
             return ValidateRequiredPayloadString(message, "account", "account is required for setAccount.");
 
         if (message.Action is "getState" or "toggleCooldown" or "armSafety" or "disarmSafety" or "toggleSafety"
-            or "toggleTrend")
+            or "toggleTrend" or "copierPanic")
             return (true, null, null);
+
+        // Branche dédiée, indispensable pour la raison écrite plus bas sur `configureTrend` : sans
+        // elle `configureCopier` tomberait dans `ValidateTradingAction`, qui exige `account` ET
+        // `instrument`, et serait refusé à chaque démarrage. C'est exactement ce qui est arrivé à
+        // la macro Pause, puis à la Tendance.
+        if (message.Action == "configureCopier")
+            return ValidateCopierConfig(message);
 
         if (message.Action == "configureSafety")
             return ValidateSafetyConfig(message);
@@ -158,6 +173,29 @@ public sealed class MessageValidator
             var qty = GetPayloadInt(message, "quantity");
             if (qty == null || qty < 1)
                 return (false, "INVALID_QUANTITY", "quantity must be a positive integer for order actions.");
+        }
+
+        // Distances du bracket. Vérifiées ICI et pas seulement côté add-on : une décimale y est lue
+        // comme ABSENTE — donc comme 0, donc comme « pas de stop ». Une protection désactivée en
+        // silence par une virgule est le pire mode de défaillance que cette macro puisse produire,
+        // et c'est exactement ce qu'un refus explicite empêche.
+        if (message.Action == "attachBracket")
+        {
+            foreach (var key in new[] { "stopLossTicks", "takeProfitTicks" })
+            {
+                var ticks = GetPayloadInt(message, key);
+                if (ticks == null && HasNumericProperty(message, key))
+                {
+                    return (false, "INVALID_PAYLOAD",
+                        $"{key} must be a whole number of ticks between 0 and {MaxBracketTicks} (0 disables the leg).");
+                }
+
+                if (ticks is < 0 or > MaxBracketTicks)
+                {
+                    return (false, "INVALID_PAYLOAD",
+                        $"{key} must be between 0 and {MaxBracketTicks} (0 disables the leg).");
+                }
+            }
         }
 
         return (true, null, null);
@@ -283,6 +321,30 @@ public sealed class MessageValidator
         var threshold = GetPayloadDouble(message, "thresholdAtr");
         if (threshold is <= 0 or > 10)
             return (false, "INVALID_PAYLOAD", "thresholdAtr must be between 0 (exclusive) and 10.");
+
+        return (true, null, null);
+    }
+
+    /// <summary>
+    /// Shape only. The follower list itself is parsed and judged by <see cref="CopierPolicy"/>,
+    /// which is where the account rules live — duplicating them here would give two places to keep
+    /// in step, and the deeper one is the one that decides.
+    /// </summary>
+    private static (bool, string?, string?) ValidateCopierConfig(BridgeMessage message)
+    {
+        var hasEnabled = HasProperty(message, "enabled");
+        var hasFollowers = HasProperty(message, "followers");
+
+        if (!hasEnabled && !hasFollowers)
+            return (false, "INVALID_PAYLOAD", "configureCopier requires 'enabled' and/or 'followers'.");
+
+        if (hasFollowers && GetPayloadString(message, "followers") == null)
+        {
+            // The follower list crosses the wire as text, one account per line. An array would be
+            // dropped by Bitlearn's layout sanitiser on the way through the site, so anything but
+            // a string here means a caller built the payload against the wrong shape.
+            return (false, "INVALID_PAYLOAD", "followers must be a string — one 'name|multiplier|cap' per line.");
+        }
 
         return (true, null, null);
     }

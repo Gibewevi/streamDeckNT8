@@ -42,7 +42,7 @@ propre interface de configuration, et **lance le bridge** (`BridgeSupervisor`) �
 
 | Décision | Composant | Fichier |
 |----------|-----------|---------|
-| Rendu des touches, appuis, layout, Auto BE | Hôte | `src/deck-host/src/host.ts`, `visual-engine.ts` |
+| Rendu des touches, appuis, layout, Auto BE, Auto TP/SL | Hôte | `src/deck-host/src/host.ts`, `visual-engine.ts` |
 | Rendu des touches, appuis, réglages (ancien plugin) | Plugin | `src/plugin.ts` (tout y est, voir plus bas) |
 | Validation, doublons, quantité, instrument/compte sélectionnés | Bridge | `MessageValidator`, `DuplicateGuard`, `StateManager` |
 | Macro de sécurité, cooldown — **refus avant tout envoi d'ordre** | Bridge | `SafetyMacro`, `StateManager.IsOrderBlocked` |

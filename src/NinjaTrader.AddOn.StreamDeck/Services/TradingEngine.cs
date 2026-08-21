@@ -505,6 +505,334 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         #endregion
 
+        #region Bracket — Take Profit / Stop Loss
+
+        /// <summary>
+        /// Names carried by the two protective orders this macro owns.
+        ///
+        /// They are what separates "the stop this macro placed for this position" from "a stop the
+        /// trader put there himself" — an ATM strategy, a stop dragged on the chart, a break-even.
+        /// Only the first kind is ever repriced or resized here: silently moving a stop the trader
+        /// placed with his own hands would take away the protection he chose.
+        /// </summary>
+        private const string BracketStopName = "StreamDeck_SL";
+        private const string BracketTargetName = "StreamDeck_TP";
+
+        /// <summary>
+        /// Places the take profit and/or the stop loss of the open position, computed in ticks from
+        /// its AVERAGE PRICE and in the direction of the position.
+        ///
+        /// Sent by the host's Auto TP/SL automatism once the position actually exists, never
+        /// alongside the entry order: Account.Submit is asynchronous and returns long before the
+        /// fill, so an entry price read at submit time would be a guess. The average price of the
+        /// position is the only value that is true — and it is what makes a scale-in work, since
+        /// resending the same command is enough for both legs to follow the new average.
+        ///
+        /// 0 disables a leg, on either side. It means "do not place this one", never "cancel what
+        /// is already there": a trader who sets his take profit back to 0 is saying the macro
+        /// should stop managing it, not that the protection currently working should vanish.
+        ///
+        /// Both legs go out under the same OCO id. Without it, a filled take profit leaves the stop
+        /// working on a flat position — and a stop on a flat position is an ENTRY the moment it
+        /// triggers, opening the reverse of the trade that was just closed.
+        /// </summary>
+        public BridgeMessage AttachBracket(BridgeMessage cmd)
+        {
+            var ctx = ResolveContext(cmd);
+            if (ctx.Error != null) return ctx.Error;
+
+            var position = _resolver.FindPosition(ctx.Account, ctx.Instrument);
+            if (position == null)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_POSITION",
+                    "No open position to attach a bracket to.");
+
+            var stopTicks = cmd.GetPayloadInt("stopLossTicks") ?? 0;
+            var targetTicks = cmd.GetPayloadInt("takeProfitTicks") ?? 0;
+
+            // A negative distance would put the stop on the profit side and the target on the loss
+            // side: two instantly marketable orders, both closing the trade by surprise.
+            if (stopTicks < 0 || targetTicks < 0)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_PAYLOAD",
+                    "stopLossTicks and takeProfitTicks must be zero (leg disabled) or positive.");
+
+            if (stopTicks == 0 && targetTicks == 0)
+            {
+                return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
+                {
+                    legsPlaced = 0,
+                    message = "Both legs disabled (0) — nothing to place."
+                });
+            }
+
+            double tickSize = ctx.Instrument.MasterInstrument.TickSize;
+            if (tickSize <= 0)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                    $"Invalid tick size for {ctx.Instrument.FullName} — cannot compute a bracket.");
+
+            int qty = (int)Math.Abs(position.Quantity);
+            if (qty < 1)
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "NO_POSITION",
+                    "Position quantity is zero — nothing to protect.");
+
+            bool isLong = position.MarketPosition == MarketPosition.Long;
+            double avgPrice = position.AveragePrice;
+
+            // Both legs LEAVE the position, so both go the opposite way to it. Same convention as
+            // the break-even stop above: a long is protected by a Sell, a short by a Buy.
+            var exitAction = isLong ? OrderAction.Sell : OrderAction.Buy;
+
+            // 0 when there is no market data subscription. Every side test below is then skipped
+            // rather than guessed — same posture as break-even: not knowing the market is not a
+            // reason to leave a position unprotected.
+            double marketPrice = GetLastPrice(ctx.Instrument);
+
+            double stopPrice = RoundToTick(isLong ? avgPrice - (stopTicks * tickSize)
+                                                  : avgPrice + (stopTicks * tickSize), tickSize);
+            double targetPrice = RoundToTick(isLong ? avgPrice + (targetTicks * tickSize)
+                                                    : avgPrice - (targetTicks * tickSize), tickSize);
+
+            // Une jambe laissée par une position de sens OPPOSÉ est le seul ordre que cette macro
+            // puisse produire capable d'OUVRIR un trade : le stop d'un long est un Sell, et sur le
+            // short qui a suivi il ajoute à la position au lieu d'en sortir. Le cas arrive dès
+            // qu'on retourne au marché sans passer par la touche Inverser, qui annule d'abord.
+            // Seuls nos propres ordres sont annulés — rien de ce que le trader a posé lui-même.
+            CancelStaleBracketOrders(ctx.Account, ctx.Instrument, position.MarketPosition, cmd.RequestId);
+
+            var existingStops = FindExitOrders(ctx.Account, ctx.Instrument, position.MarketPosition, true);
+            var existingTargets = FindExitOrders(ctx.Account, ctx.Instrument, position.MarketPosition, false);
+            var ourStop = FindOrderNamed(existingStops, BracketStopName);
+            var ourTarget = FindOrderNamed(existingTargets, BracketTargetName);
+
+            // Reuse the OCO group of a leg this macro already owns, so the pair survives a
+            // scale-in: Account.Change cannot rewrite an OCO id, and creating the second leg in a
+            // group of its own would leave the two unlinked. A fresh group when we own neither.
+            string oco;
+            if (ourStop != null && !string.IsNullOrEmpty(ourStop.Oco)) oco = ourStop.Oco;
+            else if (ourTarget != null && !string.IsNullOrEmpty(ourTarget.Oco)) oco = ourTarget.Oco;
+            else oco = Guid.NewGuid().ToString("N");
+
+            var created = new List<Order>();
+            var changed = new List<Order>();
+            string stopOutcome = "disabled";
+            string targetOutcome = "disabled";
+            int placed = 0;
+            int refused = 0;
+
+            try
+            {
+                if (stopTicks > 0)
+                {
+                    // A stop for a long sits BELOW the market, a stop for a short ABOVE it. Past
+                    // that line the order is marketable: it would not protect the trade, it would
+                    // close it on the spot at whatever price is there. Refusing the leg and saying
+                    // so beats closing a position nobody asked to close.
+                    bool wrongSide = marketPrice > 0 && (isLong ? stopPrice >= marketPrice : stopPrice <= marketPrice);
+                    if (wrongSide)
+                    {
+                        stopOutcome = "refused:pastMarket";
+                        refused++;
+                        SdLogger.EventWarn("Bracket",
+                            "[REQ:{0}] Stop loss NOT placed on {1}: {2} is already past the market ({3}) — the trade is beyond its stop",
+                            cmd.RequestId, ctx.Instrument.FullName, stopPrice, marketPrice);
+                    }
+                    else if (ourStop != null)
+                    {
+                        ourStop.StopPriceChanged = stopPrice;
+                        // Set explicitly rather than left alone: a scale-in grew the position, and
+                        // a stop still sized for the first entry protects only part of it.
+                        ourStop.QuantityChanged = qty;
+                        if (ourStop.OrderType == OrderType.StopLimit)
+                        {
+                            // Keep the original distance between trigger and limit, as break-even does.
+                            double limitOffset = ourStop.LimitPrice - ourStop.StopPrice;
+                            ourStop.LimitPriceChanged = stopPrice + limitOffset;
+                        }
+                        changed.Add(ourStop);
+                        stopOutcome = "modified";
+                        placed++;
+                    }
+                    else if (existingStops.Count > 0)
+                    {
+                        // Someone else already protects this position — an ATM strategy, a manual
+                        // stop, a break-even. That it is protected is the whole point: adding a
+                        // second stop would exit twice the size and open the reverse trade.
+                        stopOutcome = "kept:foreign";
+                    }
+                    else
+                    {
+                        created.Add(ctx.Account.CreateOrder(
+                            ctx.Instrument, exitAction, OrderType.StopMarket, TimeInForce.Day,
+                            qty, 0, stopPrice, oco, BracketStopName, null));
+                        stopOutcome = "created";
+                        placed++;
+                    }
+                }
+
+                if (targetTicks > 0)
+                {
+                    // Mirror of the stop test. A take profit the market has already crossed is a
+                    // marketable limit: submitting it would close the position immediately, which
+                    // is exactly the surprise this macro must never produce.
+                    bool wrongSide = marketPrice > 0 && (isLong ? targetPrice <= marketPrice : targetPrice >= marketPrice);
+                    if (wrongSide)
+                    {
+                        targetOutcome = "refused:pastMarket";
+                        refused++;
+                        SdLogger.EventWarn("Bracket",
+                            "[REQ:{0}] Take profit NOT placed on {1}: {2} is already past the market ({3}) — it would fill at once",
+                            cmd.RequestId, ctx.Instrument.FullName, targetPrice, marketPrice);
+                    }
+                    else if (ourTarget != null)
+                    {
+                        ourTarget.LimitPriceChanged = targetPrice;
+                        ourTarget.QuantityChanged = qty;
+                        changed.Add(ourTarget);
+                        targetOutcome = "modified";
+                        placed++;
+                    }
+                    else if (existingTargets.Count > 0)
+                    {
+                        targetOutcome = "kept:foreign";
+                    }
+                    else
+                    {
+                        created.Add(ctx.Account.CreateOrder(
+                            ctx.Instrument, exitAction, OrderType.Limit, TimeInForce.Day,
+                            qty, targetPrice, 0, oco, BracketTargetName, null));
+                        targetOutcome = "created";
+                        placed++;
+                    }
+                }
+
+                if (changed.Count > 0) ctx.Account.Change(changed);
+                // Submitted in ONE call so NinjaTrader forms the OCO group from the batch. Two
+                // separate submits would race the fill of the first leg.
+                if (created.Count > 0) ctx.Account.Submit(created);
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Fail("Bracket", ex, "[REQ:{0}] Could not attach the bracket on {1}",
+                    cmd.RequestId, ctx.Instrument.FullName);
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "ORDER_REJECTED", ex.Message);
+            }
+
+            // Nothing placed and the market is the reason: a real refusal, and the deck must show
+            // it. A leg left to a protection the trader already had is NOT a failure — the position
+            // is covered, which is all the macro was ever asked for.
+            if (placed == 0 && refused > 0)
+            {
+                return BridgeMessage.CreateError(cmd.RequestId, cmd.Action, "INVALID_STOP_PRICE",
+                    $"Bracket not placed on {ctx.Instrument.FullName}: the market ({marketPrice}) is already past "
+                    + $"the levels computed from the average price ({avgPrice}).");
+            }
+
+            SdLogger.Event("Bracket",
+                "[REQ:{0}] Bracket on {1} {2} x{3} @ {4} — stop={5} ({6}), target={7} ({8}), oco={9}",
+                cmd.RequestId, ctx.Instrument.FullName, position.MarketPosition, qty, avgPrice,
+                stopTicks > 0 ? stopPrice.ToString() : "-", stopOutcome,
+                targetTicks > 0 ? targetPrice.ToString() : "-", targetOutcome,
+                oco);
+
+            // Submit is asynchronous: a rejection (margin, closed market) arrives later through
+            // OrderMonitor. This reply says the orders left, not that they were accepted.
+            return BridgeMessage.CreateResponse(cmd.RequestId, cmd.Action, true, new
+            {
+                avgPrice,
+                quantity = qty,
+                direction = position.MarketPosition.ToString(),
+                stopPrice = stopTicks > 0 ? stopPrice : 0,
+                targetPrice = targetTicks > 0 ? targetPrice : 0,
+                stopLossTicks = stopTicks,
+                takeProfitTicks = targetTicks,
+                stopOutcome,
+                targetOutcome,
+                legsPlaced = placed,
+                oco,
+                message = $"Bracket on {ctx.Instrument.FullName}: stop {stopOutcome}, target {targetOutcome}"
+            });
+        }
+
+        /// <summary>
+        /// Working orders of the given type that would CLOSE the position — entries excluded.
+        ///
+        /// The direction test is not decoration. <see cref="ContextResolver.FindTargetOrders"/>
+        /// returns every working limit order on the instrument, and a resting buy limit under a
+        /// long position is an ENTRY, not a target. Counting it as one would convince the macro
+        /// that the trade already had a take profit, and leave it with none.
+        /// </summary>
+        private List<Order> FindExitOrders(Account account, Instrument instrument, MarketPosition side, bool stops)
+        {
+            var candidates = stops
+                ? _resolver.FindStopOrders(account, instrument)
+                : _resolver.FindTargetOrders(account, instrument);
+
+            var exits = new List<Order>();
+            foreach (var order in candidates)
+            {
+                bool closes = side == MarketPosition.Long
+                    ? order.OrderAction == OrderAction.Sell || order.OrderAction == OrderAction.SellShort
+                    : order.OrderAction == OrderAction.Buy || order.OrderAction == OrderAction.BuyToCover;
+                if (closes) exits.Add(order);
+            }
+            return exits;
+        }
+
+        /// <summary>
+        /// Cancels the bracket legs THIS macro left behind that would now grow the position instead
+        /// of closing it — what remains of a bracket after the position flipped side.
+        ///
+        /// Scoped to our own two order names on purpose. The macro is allowed to clean up after
+        /// itself; it is never allowed to cancel a protection the trader placed, and a failure here
+        /// must not stop the new bracket from going out — an orphan order is bad, an unprotected
+        /// position is worse.
+        /// </summary>
+        private void CancelStaleBracketOrders(Account account, Instrument instrument, MarketPosition side, string requestId)
+        {
+            try
+            {
+                var stale = new List<Order>();
+                foreach (var order in _resolver.FindActiveOrders(account, instrument))
+                {
+                    bool ours = string.Equals(order.Name, BracketStopName, StringComparison.OrdinalIgnoreCase)
+                             || string.Equals(order.Name, BracketTargetName, StringComparison.OrdinalIgnoreCase);
+                    if (!ours) continue;
+
+                    bool grows = side == MarketPosition.Long
+                        ? order.OrderAction == OrderAction.Buy
+                        : order.OrderAction == OrderAction.SellShort || order.OrderAction == OrderAction.Sell;
+                    if (grows) stale.Add(order);
+                }
+
+                if (stale.Count == 0) return;
+
+                account.Cancel(stale);
+                SdLogger.EventWarn("Bracket",
+                    "[REQ:{0}] {1} stale bracket leg(s) cancelled on {2}: they were left by a position of the opposite side and would have ADDED to the current {3}",
+                    requestId, stale.Count, instrument.FullName, side);
+            }
+            catch (Exception ex)
+            {
+                SdLogger.Fail("Bracket", ex, "[REQ:{0}] Could not cancel the stale bracket legs on {1}",
+                    requestId, instrument.FullName);
+            }
+        }
+
+        private static Order FindOrderNamed(List<Order> orders, string name)
+        {
+            foreach (var order in orders)
+            {
+                if (string.Equals(order.Name, name, StringComparison.OrdinalIgnoreCase)) return order;
+            }
+            return null;
+        }
+
+        private static double RoundToTick(double price, double tickSize)
+        {
+            return Math.Round(price / tickSize) * tickSize;
+        }
+
+        #endregion
+
         #region Stop/Target Management
 
         public BridgeMessage MoveStop(BridgeMessage cmd)

@@ -13,7 +13,15 @@
 export interface SettingField {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'select' | 'textarea' | 'toggle';
+  /**
+   * `followerList` est rendu par un composant dédié : une ligne par compte suiveur, avec un
+   * sélecteur alimenté par les comptes que NinjaTrader publie, un multiplicateur et un plafond.
+   *
+   * Il **enregistre une chaîne**, `nom|multiplicateur|plafond` par ligne (voir `parseFollowers`).
+   * Un tableau serait écarté en silence par `sanitizeSettings` en traversant Bitlearn, et la
+   * sélection du trader disparaîtrait sans message.
+   */
+  type: 'text' | 'number' | 'select' | 'textarea' | 'toggle' | 'followerList';
   placeholder?: string;
   min?: number;
   max?: number;
@@ -159,6 +167,21 @@ export const CATALOG: ActionDef[] = [
         help: 'Remonte les sessions de ce compte vers Bitlearn : trades, statistiques et '
             + 'comportement. Le journal créé est privé, publiable comme les autres. '
             + 'Désactivé, rien ne quitte ce PC.',
+      },
+      // La copie vit ICI plutôt que sur une touche à elle : le compte maître est le compte
+      // sélectionné, et une seconde macro aurait dupliqué toute la logique de sélection.
+      {
+        key: 'copyEnabled', label: 'Copier les positions', type: 'toggle',
+        help: 'Recopie les ordres du compte sélectionné vers les comptes suiveurs ci-dessous. '
+            + 'Les suiveurs sortent du défilement de cette touche tant que la copie est active — '
+            + 'sans quoi un appui suffirait à promouvoir un suiveur au rang de maître.',
+      },
+      {
+        key: 'followers', label: 'Comptes suiveurs', type: 'followerList',
+        showIf: { key: 'copyEnabled', equals: true },
+        help: 'Huit au maximum. Le multiplicateur s\'applique à la quantité du maître et arrondit '
+            + 'à l\'entier : 0,3 sur 1 contrat n\'envoie RIEN plutôt que d\'arrondir à 1. '
+            + 'Multiplicateur 0 désactive un suiveur sans le retirer. Plafond 0 = sans plafond.',
       },
     ],
   },
@@ -380,6 +403,37 @@ export const CATALOG: ActionDef[] = [
             + 'de l\'entrée en long, et 4 ticks EN DESSOUS en short. 0 = point mort exact. '
             + 'Doit rester INFÉRIEUR au déclenchement, sinon le break-even est refusé à chaque fois. '
             + 'ATTENTION, négatif place le stop EN PERTE — ce n\'est plus un break-even.',
+      },
+    ],
+  },
+
+  // Seconde macro qui envoie des ordres sans appui de touche, après l'Auto BE. La distinction avec
+  // lui tient en une phrase : l'Auto BE ATTEND un gain avant de protéger, celui-ci protège tout de
+  // suite. Les deux cohabitent — l'Auto BE reprendra le stop posé ici et le remontera au point mort.
+  //
+  // Les deux jambes sont calculées depuis le PRIX MOYEN de la position, jamais depuis le prix
+  // d'envoi de l'ordre d'entrée : `Account.Submit` rend la main avant l'exécution, et un prix lu à
+  // cet instant serait une supposition. C'est aussi ce qui fait suivre les protections à chaque
+  // renfort, sans rien de particulier à écrire pour ce cas.
+  {
+    id: 'host.autotpsl', name: 'Auto TP/SL', group: 'Position',
+    description: 'Pose le take profit et le stop loss dès qu\'une position s\'ouvre, dans le sens '
+               + 'de celle-ci. Les deux jambes partent liées : l\'une exécutée annule l\'autre.',
+    settings: [
+      // 0 par défaut sur les deux, et c'est délibéré : une macro qui poserait des protections
+      // inventées dès qu'on la pose sur une touche enverrait des ordres que personne n'a réglés.
+      // Tant que les deux valent 0, la touche l'affiche et n'envoie rien.
+      {
+        key: 'takeProfitTicks', label: 'Take Profit (ticks)', type: 'number',
+        min: 0, max: 10000, step: 1, default: 0,
+        help: 'Distance depuis le prix moyen, comptée dans le sens de la position : au-DESSUS de '
+            + 'votre entrée en long, en DESSOUS en short. 0 = aucun take profit.',
+      },
+      {
+        key: 'stopLossTicks', label: 'Stop Loss (ticks)', type: 'number',
+        min: 0, max: 10000, step: 1, default: 0,
+        help: 'Distance depuis le prix moyen, du côté de la perte : en DESSOUS de votre entrée en '
+            + 'long, au-DESSUS en short. 0 = aucun stop loss.',
       },
     ],
   },

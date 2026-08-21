@@ -11,6 +11,7 @@
 import { BridgeClient } from './bridge-client.js';
 import {
   DEFAULT_GLOBAL_SETTINGS, DEFAULT_SAFETY_STATUS, DISCONNECTED_STATE, TradingState, OrderUpdate, GuardViolation, SafetyStatus, createCommand,
+  parseFollowers,
 } from './messages.js';
 import { DeckDevice } from './device.js';
 import { DEFAULT_DATA_DIR, LayoutStore, SlotAssignment } from './layout.js';
@@ -29,7 +30,7 @@ import { etatAddOn, journaliserEtat, localiserNinjaScript } from './ninjatrader.
 import { hostname } from 'os';
 import * as log from './logger.js';
 
-const VERSION = '0.23.0';
+const VERSION = '0.25.0';
 const UI_PORT = Number(process.env.DECKHOST_UiPort ?? 8220);
 const BRIDGE_URL = process.env.DECKHOST_BridgeUrl ?? DEFAULT_GLOBAL_SETTINGS.bridgeUrl;
 const BRIDGE_PORT = Number(new URL(BRIDGE_URL).port || 8218);
@@ -98,6 +99,7 @@ function ctx(): VisualContext {
     lastViolationAt,
     defaultQuantity: DEFAULT_GLOBAL_SETTINGS.defaultQuantity,
     autoBe: { actif: autoBe.actif, pose: autoBe.pose !== null },
+    autoTpSl: { actif: autoTpSl.actif, pose: autoTpSl.pose !== null },
   };
 }
 
@@ -283,11 +285,27 @@ function getAccountCycleList(settings: Record<string, unknown>, state: TradingSt
   const available = normalizeAccountList(state?.availableAccounts ?? []);
   if (available.length === 0) return [];
   const configured = normalizeAccountList(settings.accounts);
-  if (configured.length === 0) return available;
+  const base = configured.length === 0 ? available : (() => {
+    const byName = new Map(available.map((a) => [a.toUpperCase(), a]));
+    const kept = configured.map((a) => byName.get(a.toUpperCase())).filter((a): a is string => Boolean(a));
+    return kept.length > 0 ? kept : available;
+  })();
 
-  const byName = new Map(available.map((a) => [a.toUpperCase(), a]));
-  const kept = configured.map((a) => byName.get(a.toUpperCase())).filter((a): a is string => Boolean(a));
-  return kept.length > 0 ? kept : available;
+  // Les comptes suiveurs sortent du défilement tant que la copie est active. Sans ça, un appui
+  // suffisait à sélectionner un suiveur — qui devenait maître de lui-même et se copiait vers ses
+  // propres pairs. C'est le seul piège qu'a introduit le rattachement de la copie à cette touche,
+  // et il se referme ici.
+  if (settings.copyEnabled !== true) return base;
+
+  const followers = new Set(parseFollowers(settings.followers).map((f) => f.name.toUpperCase()));
+  if (followers.size === 0) return base;
+
+  const filtered = base.filter((a) => !followers.has(a.toUpperCase()));
+
+  // Tout retirer laisserait une touche qui ne fait plus rien. Mieux vaut rendre la liste
+  // complète : le trader verra le compte changer, ce qui est réparable, plutôt qu'une touche
+  // muette qu'il croira cassée.
+  return filtered.length > 0 ? filtered : base;
 }
 
 /**
@@ -358,6 +376,32 @@ async function runAction(assignment: SlotAssignment): Promise<void> {
     });
     persisterArmementAutoBe();
     if (autoBe.actif && lastState) evaluerAutoBe(lastState);
+    return;
+  }
+
+  // Auto TP/SL : même nature que l'Auto BE — bascule d'un automatisme local, aucun ordre à l'appui.
+  if (id === 'host.autotpsl') {
+    const { tp, sl } = distancesTpSl(s);
+
+    // Armer une macro qui n'a aucune distance à poser produirait une touche orange annonçant une
+    // protection qui n'existe pas. Le refus est le service rendu : c'est le même piège que la
+    // Tendance armable sans autorisation de blocage.
+    if (!autoTpSl.actif && tp === 0 && sl === 0) {
+      log.eventWarn('AutoTPSL', 'Armement refusé — aucune distance réglée sur la touche', {
+        correction: 'renseigner un Take Profit et/ou un Stop Loss dans les réglages de la touche',
+      });
+      return;
+    }
+
+    autoTpSl.actif = !autoTpSl.actif;
+    // Réarmer à l'activation : un bracket posé lors d'une position précédente ne doit pas empêcher
+    // la pose sur celle en cours.
+    reinitialiserAutoTpSl();
+    log.event('AutoTPSL', autoTpSl.actif ? 'Automatisme ARMÉ' : 'Automatisme DÉSARMÉ', {
+      takeProfitTicks: tp, stopLossTicks: sl,
+    });
+    persisterArmementAutoTpSl();
+    if (autoTpSl.actif && lastState) evaluerAutoTpSl(lastState);
     return;
   }
 
@@ -711,6 +755,203 @@ function evaluerAutoBe(state: TradingState): void {
     });
 }
 
+// --- Auto TP/SL : pose le take profit et le stop loss dès qu'une position s'ouvre ---
+//
+// Second automatisme capable d'émettre un ordre sans appui de touche, et il reprend les trois
+// précautions de l'Auto BE : une seule pose par prix moyen, abandon après quelques échecs plutôt
+// qu'un martèlement, armement visible en permanence sur la touche.
+//
+// La différence avec l'Auto BE tient au moment : celui-ci n'attend aucun gain, il protège dès que
+// la position existe. « Dès qu'elle existe » et non « avec l'ordre d'entrée » : `Account.Submit`
+// rend la main avant l'exécution, et un prix de déclenchement lu à cet instant serait une
+// supposition. Le prix moyen publié par NinjaTrader est le seul qui soit vrai — et le suivre est
+// aussi ce qui fait recalculer les deux jambes à chaque renfort, sans cas particulier à écrire.
+const autoTpSl = {
+  /** Armement. Persisté dans l'état du poste, jamais dans le layout — voir `persisterArmementAutoBe`. */
+  actif: false,
+  /** Prix moyen pour lequel le bracket a déjà été posé. */
+  pose: null as number | null,
+  /**
+   * Distances avec lesquelles cette pose a été faite.
+   *
+   * Mémorisées en plus du prix moyen pour que MODIFIER un réglage en séance prenne effet sur la
+   * position en cours. Sans elles, le trader corrigeait son stop dans l'éditeur, voyait la touche
+   * annoncer « POSE », et ne découvrait qu'au trade suivant que l'ancienne valeur s'appliquait
+   * toujours.
+   */
+  poseTp: 0,
+  poseSl: 0,
+  envoiEnCours: false,
+  echecs: 0,
+  dernierEssai: 0,
+  /** Limite la fréquence de l'avertissement de tick manquant — l'évaluation tourne à 5 Hz. */
+  dernierAvert: 0,
+};
+
+/** Oublie la pose en cours : la prochaine évaluation reposera le bracket. */
+function reinitialiserAutoTpSl(): void {
+  autoTpSl.pose = null;
+  autoTpSl.poseTp = 0;
+  autoTpSl.poseSl = 0;
+  autoTpSl.echecs = 0;
+}
+
+const AUTOTPSL_MAX_ECHECS = 5;
+const AUTOTPSL_DELAI_RETENTE_MS = 2000;
+
+const AUTOTPSL_STATE_PATH = join(DEFAULT_DATA_DIR, 'autotpsl.json');
+
+/**
+ * Les deux distances, en ticks, telles que l'add-on les attend.
+ *
+ * Arrondies ici et pas seulement dans l'éditeur : le bridge refuse une décimale en `INVALID_PAYLOAD`
+ * — à raison, puisque l'add-on la lirait comme absente, c'est-à-dire comme « pas de protection ».
+ * Poser 20 quand 20,4 a été saisi vaut mieux que ne rien poser du tout.
+ *
+ * Toute valeur négative ou illisible vaut 0, c'est-à-dire « jambe non posée » : c'est le sens que
+ * la touche affiche et celui que l'add-on applique.
+ */
+function distancesTpSl(settings: Record<string, unknown>): { tp: number; sl: number } {
+  const lire = (valeur: unknown): number => {
+    const n = Number(valeur);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+  };
+  return { tp: lire(settings.takeProfitTicks), sl: lire(settings.stopLossTicks) };
+}
+
+function persisterArmementAutoTpSl(): void {
+  try {
+    mkdirSync(dirname(AUTOTPSL_STATE_PATH), { recursive: true });
+    writeFileSync(AUTOTPSL_STATE_PATH, JSON.stringify({ armed: autoTpSl.actif }, null, 2), 'utf8');
+  } catch (err) {
+    // Comme pour l'Auto BE : jamais faire échouer un appui pour un défaut d'écriture. L'armement
+    // reste valable pour cette session, il ne survivra simplement pas au redémarrage.
+    log.fail('AutoTPSL', err, 'Armement non persisté — il sera perdu au prochain démarrage');
+  }
+}
+
+function restaurerArmementAutoTpSl(): void {
+  let arme = false;
+  try {
+    if (existsSync(AUTOTPSL_STATE_PATH)) {
+      arme = JSON.parse(readFileSync(AUTOTPSL_STATE_PATH, 'utf8'))?.armed === true;
+    }
+  } catch (err) {
+    log.fail('AutoTPSL', err, 'État d\'armement illisible — automatisme considéré désarmé');
+  }
+
+  if (!arme) return;
+
+  autoTpSl.actif = true;
+  const cfg = trouverTouche('host.autotpsl');
+  const { tp, sl } = distancesTpSl(cfg?.settings ?? {});
+  log.event('AutoTPSL', 'Automatisme repris ARMÉ au démarrage', { takeProfitTicks: tp, stopLossTicks: sl });
+
+  // Une macro reprise armée alors que ses distances sont revenues à 0 ne posera rien. La touche le
+  // dit (« REGLER »), mais le journal doit le dire aussi : c'est le genre d'écart qu'on ne
+  // découvre autrement qu'en constatant l'absence de stop sur une position déjà ouverte.
+  if (tp === 0 && sl === 0) {
+    log.eventWarn('AutoTPSL', 'Macro armée mais aucune distance réglée — rien ne sera posé', {
+      correction: 'renseigner un Take Profit et/ou un Stop Loss dans les réglages de la touche',
+    });
+  }
+}
+
+function evaluerAutoTpSl(state: TradingState): void {
+  if (!autoTpSl.actif || autoTpSl.envoiEnCours) return;
+
+  const cfg = trouverTouche('host.autotpsl');
+  if (!cfg) return;
+
+  const pos = state.position;
+  if (!pos?.exists) {
+    // Position fermée : on réarme pour la suivante. Rien à annuler ici — les deux jambes partent
+    // liées en OCO, celle qui reste est annulée par NinjaTrader quand l'autre s'exécute.
+    if (autoTpSl.pose !== null || autoTpSl.echecs) {
+      log.event('AutoTPSL', 'Position fermée — automatisme réarmé');
+      reinitialiserAutoTpSl();
+    }
+    return;
+  }
+
+  const { tp, sl } = distancesTpSl(cfg.settings ?? {});
+  // Les deux jambes désactivées : il n'y a rien à envoyer. La touche affiche « REGLER » ; inutile
+  // d'en journaliser davantage, l'évaluation tourne cinq fois par seconde.
+  if (tp === 0 && sl === 0) return;
+
+  const info = state.instrumentInfo;
+  if (!info || info.tickSize <= 0) {
+    // Sans taille de tick, aucune distance n'est convertible en prix. Le PRIX du marché, lui, n'est
+    // pas exigé : l'add-on s'en sert seulement pour vérifier de quel côté tombe chaque jambe, et
+    // ne pas connaître le marché ne doit jamais être une raison de laisser une position nue.
+    if (Date.now() - autoTpSl.dernierAvert > 60_000) {
+      autoTpSl.dernierAvert = Date.now();
+      log.eventWarn('AutoTPSL', 'Taille de tick indisponible — protections non calculables', {
+        instrument: state.instrument, tickSize: info?.tickSize ?? 0,
+      });
+    }
+    return;
+  }
+
+  // Rien à refaire tant que le prix moyen ET les distances sont ceux de la dernière pose. Le prix
+  // moyen se compare à un demi-tick près : ce sont des flottants, et l'égalité stricte finirait
+  // par reposer en boucle un bracket déjà posé.
+  if (autoTpSl.pose !== null) {
+    const memePrix = Math.abs(autoTpSl.pose - pos.averagePrice) < info.tickSize / 2;
+    const memesDistances = autoTpSl.poseTp === tp && autoTpSl.poseSl === sl;
+    if (memePrix && memesDistances) return;
+
+    log.event('AutoTPSL', memePrix
+      ? 'Distances modifiées — protections repositionnées sur la position en cours'
+      : 'Prix moyen modifié — protections recalculées pour le renfort', {
+      ancienPrixMoyen: autoTpSl.pose, nouveauPrixMoyen: pos.averagePrice, quantite: pos.quantity,
+      takeProfitTicks: tp, stopLossTicks: sl,
+    });
+    reinitialiserAutoTpSl();
+  }
+
+  if (autoTpSl.echecs >= AUTOTPSL_MAX_ECHECS) return;
+  if (Date.now() - autoTpSl.dernierEssai < AUTOTPSL_DELAI_RETENTE_MS) return;
+
+  const prixMoyen = pos.averagePrice;
+  autoTpSl.envoiEnCours = true;
+  autoTpSl.dernierEssai = Date.now();
+
+  log.event('AutoTPSL', 'Position ouverte — pose du take profit et du stop loss', {
+    takeProfitTicks: tp, stopLossTicks: sl,
+    prixMoyen, direction: pos.direction, quantite: pos.quantity,
+  });
+
+  // L'add-on recalcule les deux prix depuis le prix moyen courant et adopte le sens de la position :
+  // sur un renfort, il suffit de renvoyer la même commande pour que les protections suivent.
+  void sendCmd('attachBracket', { takeProfitTicks: tp, stopLossTicks: sl }, cfg.settings ?? {})
+    .then(() => {
+      autoTpSl.pose = prixMoyen;
+      autoTpSl.poseTp = tp;
+      autoTpSl.poseSl = sl;
+      autoTpSl.echecs = 0;
+      log.event('AutoTPSL', 'Protections posées', { prixMoyen, takeProfitTicks: tp, stopLossTicks: sl });
+    })
+    .catch((err) => {
+      autoTpSl.echecs++;
+      log.fail('AutoTPSL', err, 'Pose des protections refusée', {
+        essai: autoTpSl.echecs, sur: AUTOTPSL_MAX_ECHECS, prixMoyen,
+      });
+      if (autoTpSl.echecs >= AUTOTPSL_MAX_ECHECS) {
+        // Le pire état possible pour cette macro : une position ouverte que la touche annonce
+        // protégée et qui ne l'est pas. Il doit rester une ligne explicite dans le journal du jour.
+        log.eventWarn('AutoTPSL', 'Abandon après échecs répétés — POSITION SANS PROTECTION AUTOMATIQUE', {
+          prixMoyen, direction: pos.direction, quantite: pos.quantity,
+        });
+      }
+    })
+    .finally(() => {
+      autoTpSl.envoiEnCours = false;
+      void paintAll();
+      server.broadcastSnapshot();
+    });
+}
+
 /**
  * Pousse la durée de temporisation vers le bridge, qui la possède et l'applique.
  *
@@ -740,6 +981,42 @@ async function syncConfig(): Promise<void> {
   await syncPauseConfig();
   await pushCooldownConfig();
   await syncTrendConfig();
+  await syncCopierConfig();
+}
+
+/**
+ * Pousse la configuration de la copie de comptes, portée par la touche Compte.
+ *
+ * Le compte MAÎTRE n'est pas transmis : le bridge le connaît déjà, c'est le compte sélectionné.
+ * Un second endroit où le déclarer aurait été un second endroit où il peut diverger.
+ *
+ * Sans touche Compte dans le layout, rien n'est transmis et le bridge garde ce qu'il avait —
+ * même posture que la pause : retirer une touche ne doit pas effacer en silence un réglage.
+ * En revanche la touche PRÉSENTE avec la copie éteinte transmet bien `enabled: false`, et c'est
+ * ce qui libère une copie retenue après un changement de compte maître.
+ */
+async function syncCopierConfig(): Promise<void> {
+  const cfg = trouverTouche('com.trader.ninjatrader.account');
+  if (!cfg || !bridge.isConnected) return;
+
+  const enabled = cfg.settings?.copyEnabled === true;
+  const followers = typeof cfg.settings?.followers === 'string' ? cfg.settings.followers : '';
+
+  const resp = await bridge.sendCommand(createCommand('configureCopier', { enabled, followers }));
+  if (resp.error) {
+    // Un refus ici n'est pas anodin : il veut dire que la copie que le trader croit configurée ne
+    // tourne PAS. Compte réel interdit en mode sûr, suiveur égal au maître, liste trop longue.
+    log.eventWarn('Copier', 'configureCopier refusé par le bridge', {
+      code: resp.error.code, reason: resp.error.message, enabled, followers,
+    });
+    return;
+  }
+
+  const result = resp.result as { enabled?: boolean; suspendedReason?: string; followers?: number } | undefined;
+  log.event('Copier', 'Configuration de copie poussée vers le bridge', {
+    demande: enabled, effectif: result?.enabled, suiveurs: result?.followers,
+    retenue: result?.suspendedReason || undefined,
+  });
 }
 
 /**
@@ -1098,6 +1375,9 @@ bridge.onStateUpdate((state) => {
   // Évalué à chaque état, soit cinq fois par seconde : c'est ce qui permet à l'automatisme de
   // suivre le prix et de réagir à un renfort de position sans attendre.
   evaluerAutoBe(state);
+  // Même cadence, et elle compte davantage ici : entre l'exécution de l'entrée et la pose des
+  // protections, la position est nue. Deux cents millisecondes sont ce qui sépare les deux.
+  evaluerAutoTpSl(state);
   void paintAll();
   server.broadcastSnapshot();
 });
@@ -1170,6 +1450,7 @@ async function main(): Promise<void> {
   // étaient posées sans avoir à retrouver le layout de l'époque.
   journaliserConfiguration(store.layout);
   restaurerArmementAutoBe();
+  restaurerArmementAutoTpSl();
 
   // Constat, pas action : l'installateur dépose l'add-on, l'hôte se contente de dire s'il est
   // là. Sans cette ligne, un voyant NinjaTrader rouge n'a aucune trace exploitable — l'add-on
@@ -1229,7 +1510,12 @@ async function main(): Promise<void> {
     // `lastState` est null tant que le bridge n'a rien publié — on n'envoie alors rien plutôt
     // qu'un état par défaut, qui se lirait comme « tout est au repos ».
     etat: lastState
-      ? { capturedAt: Date.now(), state: lastState, autoBe: { actif: autoBe.actif, pose: autoBe.pose !== null } }
+      ? {
+        capturedAt: Date.now(),
+        state: lastState,
+        autoBe: { actif: autoBe.actif, pose: autoBe.pose !== null },
+        autoTpSl: { actif: autoTpSl.actif, pose: autoTpSl.pose !== null },
+      }
       : undefined,
   });
 

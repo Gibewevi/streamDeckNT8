@@ -189,6 +189,78 @@ position resterait actif et viendrait s'ajouter à la nouvelle au lieu de la pro
 }
 ```
 
+#### `attachBracket` — pose le take profit et le stop loss
+Calcule les deux niveaux depuis le **prix moyen** de la position ouverte, dans son sens, et les
+soumet **liés en OCO** : l'un exécuté annule l'autre. Sans ce lien, un take profit exécuté
+laisserait le stop actif sur une position à plat — et un stop sur une position à plat est une
+*entrée* dès qu'il se déclenche.
+
+Émise uniquement par l'automatisme **Auto TP/SL** de l'hôte (`host.autotpsl`), jamais par un appui
+de touche. Elle part **après** l'exécution de l'entrée, pas avec elle : `Account.Submit` rend la
+main avant le fill, un prix lu à cet instant serait une supposition. Rejouer la même commande après
+un renfort suffit à faire suivre les deux jambes au nouveau prix moyen.
+
+```json
+{
+  "type": "command",
+  "action": "attachBracket",
+  "payload": {
+    "account": "Sim101",
+    "instrument": "ES 06-25",
+    "takeProfitTicks": 40,
+    "stopLossTicks": 20
+  }
+}
+```
+
+| Champ | Plage | Description |
+|-------|-------|-------------|
+| `takeProfitTicks` | 0–10000, entier | Distance au-dessus du prix moyen en long, en dessous en short. `0` = **aucun take profit** |
+| `stopLossTicks` | 0–10000, entier | Distance en dessous du prix moyen en long, au-dessus en short. `0` = **aucun stop loss** |
+
+Une décimale est refusée en `INVALID_PAYLOAD` par le bridge, et volontairement : l'add-on la lirait
+comme *absente*, donc comme `0`, donc comme « pas de protection ». Une protection désactivée en
+silence par une virgule est le pire mode de défaillance de cette macro.
+
+`0` sur les deux champs répond en succès sans rien envoyer. `0` ne veut jamais dire « annuler ce
+qui est déjà posé » : la macro cesse de gérer cette jambe, elle ne retire pas une protection en
+cours.
+
+**Ce que la commande ne fait pas** :
+- elle n'ajoute **jamais** une seconde protection du même côté. Un stop déjà en place — stratégie
+  ATM, stop manuel, break-even — laisse la jambe à `kept:foreign` : la position est déjà couverte,
+  et un second stop sortirait du double de la taille puis ouvrirait le trade inverse ;
+- elle ne pose **jamais** un niveau déjà franchi par le marché (`refused:pastMarket`). L'ordre
+  serait immédiatement exécutable : il ne protégerait pas le trade, il le clôturerait sur-le-champ.
+
+Elle **annule** en revanche ses propres jambes restées d'une position de sens opposé, avant de
+poser les nouvelles : ce sont les seuls ordres qu'elle puisse produire capables d'ouvrir un trade.
+
+Réponse :
+```json
+{
+  "result": {
+    "success": true,
+    "avgPrice": 5420.00, "quantity": 2, "direction": "Long",
+    "stopPrice": 5415.00, "targetPrice": 5430.00,
+    "stopOutcome": "created", "targetOutcome": "created",
+    "legsPlaced": 2, "oco": "8f3c…"
+  }
+}
+```
+
+| Issue d'une jambe | Signification |
+|-------------------|---------------|
+| `created` | Ordre soumis |
+| `modified` | Jambe déjà posée par cette macro, repositionnée et redimensionnée (renfort) |
+| `kept:foreign` | Une protection que la macro ne possède pas couvre déjà ce côté — rien envoyé |
+| `refused:pastMarket` | Le niveau est déjà dépassé par le marché — rien envoyé |
+| `disabled` | La jambe vaut `0` dans les réglages |
+
+Refusée en `INVALID_STOP_PRICE` quand **aucune** jambe n'a pu partir et que le marché en est la
+cause. Une jambe laissée à une protection préexistante n'est pas un échec : la position est
+couverte, ce qui était tout l'objet de la commande.
+
 ### Quantité
 
 #### `qtySet`
@@ -431,6 +503,44 @@ librement qu'elle s'arme. Ce n'est pas une limite de risque adossée à un fait 
 aide à la discipline, et le trader doit pouvoir la relâcher quand sa lecture du marché change.
 L'armement n'est pas persisté (voir [macro-trend.md](macro-trend.md)).
 
+### Copie de comptes
+
+Portée par la touche **Compte**, pas par une action à elle : le compte maître **est** le compte
+sélectionné. Détail complet dans [macro-copieur.md](macro-copieur.md).
+
+#### `configureCopier`
+```json
+{
+  "type": "command",
+  "action": "configureCopier",
+  "payload": { "enabled": true, "followers": "Sim102|1|0\nSim103|2|5" }
+}
+```
+
+| Champ | Description |
+|-------|-------------|
+| `enabled` | Le réglage « Copier les positions » de la touche Compte |
+| `followers` | **Une chaîne**, une ligne par suiveur : `nom\|multiplicateur\|plafond` |
+
+Le compte maître **n'est pas transmis** : le bridge le connaît déjà. Un second endroit où le
+déclarer aurait été un second endroit où il peut diverger.
+
+`followers` voyage en texte et non en tableau parce que `sanitizeSettings` côté Bitlearn n'accepte
+que `string`, `boolean` et `number` dans les réglages d'une touche : un tableau y serait écarté en
+silence, et la sélection du trader disparaîtrait sans message.
+
+Passer `enabled: false` est aussi ce qui **libère une copie retenue** après un changement de compte
+maître — un rejeu de `enabled: true` ne suffit pas, sinon la reprise se ferait toute seule à la
+première reconnexion.
+
+#### `copierPanic`
+```json
+{ "type": "command", "action": "copierPanic", "payload": {} }
+```
+
+Désactive la copie puis liquide chaque suiveur résolu. **Aucune touche ne produit cette action** —
+elle existe dans le protocole, le geste qui la déclenchera reste à choisir.
+
 ### État
 
 #### `getState`
@@ -611,6 +721,66 @@ macro de sécurité :
 permanence, y compris macro désarmée ou Anti-Tilt éteint, ce qui fait du mode désactivé un mode
 d'observation — le journal dit ce que les règles auraient fait.
 
+Le bridge y ajoute aussi le bloc `copier`, dont il possède la moitié configuration :
+
+```json
+{
+  "copier": {
+    "enabled": true, "master": "Sim101", "masterResolved": true,
+    "entriesBlocked": false, "suspendedReason": "",
+    "followers": [
+      { "name": "Sim102", "multiplier": 1, "maxContracts": 0,
+        "resolved": true, "drifted": false, "drift": 0, "lastError": "" }
+    ],
+    "copiedToday": 14
+  }
+}
+```
+
+| Champ | Description |
+|-------|-------------|
+| `enabled` | **Bridge.** Le réglage ET rien qui le retienne — faux si `suspendedReason` est renseigné |
+| `master` | **Bridge.** Le compte sélectionné ; il n'existe pas de réglage séparé |
+| `masterResolved` | Add-on. Le nom correspond à un compte NinjaTrader actif |
+| `entriesBlocked` | **Bridge.** Guard refuse les entrées : leurs copies s'arrêtent, **les sorties continuent** |
+| `suspendedReason` | **Bridge.** `"masterChanged"` quand la copie est retenue. Vide sinon |
+| `multiplier` / `maxContracts` | **Bridge.** Les réglages du suiveur. `0` de multiplicateur le désactive ; `0` de plafond veut dire « sans plafond » |
+| `resolved` | Add-on. Le compte existe et sa connexion est active **en ce moment** |
+| `drifted` | Add-on. Écart installé — les entrées ne partent plus vers ce compte, **rien n'est envoyé pour corriger** |
+| `drift` | Add-on. Écart signé en contrats, `réel − attendu` |
+| `lastError` | Add-on. Dernier refus sur ce suiveur, vide sinon |
+
+Même partage que `trend` : ce que l'add-on publie ne peut pas écraser la configuration, que le
+bridge réestampille sur chaque instantané.
+
+### `setCopierConfig` — bridge → add-on
+
+Ce que l'add-on doit recopier, et où.
+
+```json
+{ "type": "command", "action": "setCopierConfig",
+  "payload": { "enabled": true, "master": "Sim101", "entriesBlocked": false,
+               "followers": [ { "name": "Sim102", "multiplier": 1, "maxContracts": 0 } ] } }
+```
+
+Envoyé à la connexion de l'add-on (forcé) puis **uniquement au changement** — même discipline que
+`setGuardPolicy`, et pour la même raison : la boucle tourne à 5 Hz.
+
+`entriesBlocked` est le report de la décision de Guard ; l'add-on ne la recalcule pas.
+
+### `copierViolation` — add-on → bridge → hôte
+
+Même forme que `guardViolation`. Émis sur un rejet de suiveur, un échec d'envoi, et à l'entrée en
+dérive.
+
+```json
+{ "type": "event", "action": "copierViolation",
+  "payload": { "follower": "Sim103", "reason": "drift",
+               "instrument": "MNQ 09-26", "drift": -2 } }
+```
+
+`reason` vaut `"drift"`, `"rejected"` ou `"submitFailed"`.
+
 ### `setGuardPolicy` — bridge → add-on
 
 Le bridge publie ce que la macro refuse actuellement, afin que l'add-on applique les mêmes règles
@@ -724,6 +894,8 @@ Le plugin affiche `REJECTED` pendant 5 s sur les touches d'entrée et déclenche
 | `COOLDOWN_ACTIVE` | Cooldown actif après un trade perdant |
 | `TREND_AGAINST` | La macro Tendance est armée et l'ordre irait à contre-sens. Seuls les ordres qui **créent** de l'exposition sont refusés : clôturer et réduire restent toujours possibles |
 | `TREND_BLOCKING_DISABLED` | Armement refusé : le blocage n'est pas autorisé dans les réglages de la touche |
+| `COPIER_MASTER_IS_FOLLOWER` | Un suiveur porte le nom du compte sélectionné : il se copierait vers lui-même, doublant chaque ordre sur un seul compte |
+| `COPIER_TOO_MANY_FOLLOWERS` | Plus de huit suiveurs. Chacun multiplie l'exposition d'un appui |
 | `CONTEXT_MISSING` | Contexte insuffisant pour résoudre l'action |
 | `ORDER_REJECTED` | NT8 a rejeté l'ordre |
 | `INTERNAL_ERROR` | Erreur interne inattendue |

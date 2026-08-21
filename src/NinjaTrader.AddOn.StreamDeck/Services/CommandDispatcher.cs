@@ -45,6 +45,10 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                         return _engine.Reverse(cmd);
                     case "breakeven":
                         return _engine.BreakEven(cmd);
+                    // Aucune touche ne produit cette action : la macro Auto TP/SL de l’hôte en est
+                    // le seul émetteur, une fois la position réellement ouverte.
+                    case "attachBracket":
+                        return _engine.AttachBracket(cmd);
                     case "moveStop":
                         return _engine.MoveStop(cmd);
                     case "moveTarget":

@@ -20,6 +20,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private readonly AddOnConfig _config;
         private readonly OrderMonitor _orderMonitor;
         private readonly TrendMonitor _trendMonitor;
+        /// <summary>Optional: absent, copying simply never runs and trading is unaffected.</summary>
+        private readonly CopyEngine _copyEngine;
         private Timer _stateTimer;
         private string _trackedAccount;
         private string _trackedInstrument;
@@ -49,13 +51,14 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         }
 
         public StatePublisher(ContextResolver resolver, BridgeClient bridgeClient, AddOnConfig config,
-            OrderMonitor orderMonitor, TrendMonitor trendMonitor)
+            OrderMonitor orderMonitor, TrendMonitor trendMonitor, CopyEngine copyEngine = null)
         {
             _resolver = resolver;
             _bridgeClient = bridgeClient;
             _config = config;
             _orderMonitor = orderMonitor;
             _trendMonitor = trendMonitor;
+            _copyEngine = copyEngine;
         }
 
         public void Start(string accountName, string instrumentName)
@@ -110,7 +113,15 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
         private void PublishState(bool immediate)
         {
-            if (!_bridgeClient.IsConnected) return;
+            if (!_bridgeClient.IsConnected)
+            {
+                // Le copieur tourne DANS NinjaTrader : il ne s'arrête pas parce que le pont est
+                // tombé, et sa surveillance de dérive ne doit pas s'arrêter non plus. C'est
+                // précisément quand plus rien ne remonte à l'écran qu'un suiveur qui décroche doit
+                // continuer d'être détecté — sans quoi la copie continuerait en aveugle.
+                if (_copyEngine != null) _copyEngine.Refresh(_resolver.GetAccountNames());
+                return;
+            }
 
             // Skip this tick if the previous publish is still running
             if (Interlocked.CompareExchange(ref _publishing, 1, 0) != 0)
@@ -173,6 +184,12 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 // bars by itself when that instrument really changes. Cheap and silent otherwise —
                 // this runs twice a second.
                 if (_trendMonitor != null) _trendMonitor.SetInstrument(instrument);
+
+                // The copier re-resolves its accounts and re-judges drift here rather than on a
+                // timer of its own. Driving it from the publish tick is what makes a follower that
+                // reconnects mid-session come back on its own — the defect that made the original
+                // silently stop copying to a reconnected account for the rest of the day.
+                if (_copyEngine != null) _copyEngine.Refresh(availableAccounts);
 
                 var state = BuildState(account, instrument, availableAccounts);
                 LogStateTransitions(state as Dictionary<string, object>);
@@ -354,6 +371,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             state["position"] = positionDict;
             state["availableAccounts"] = availableAccounts;
             if (_trendMonitor != null) state["trend"] = _trendMonitor.BuildState();
+            if (_copyEngine != null) state["copier"] = _copyEngine.BuildState();
             return state;
         }
 

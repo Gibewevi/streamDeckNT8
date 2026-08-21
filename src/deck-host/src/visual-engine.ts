@@ -21,6 +21,13 @@ export interface VisualContext {
   defaultQuantity: number;
   /** État de l'automatisme Auto BE — vit dans l'hôte, pas dans l'état publié par le bridge. */
   autoBe: { actif: boolean; pose: boolean };
+  /**
+   * État de l'automatisme Auto TP/SL. Même nature que `autoBe`, et facultatif pour la même raison
+   * que dans `DeckStateReport` : l'éditeur Bitlearn construit ce contexte à la main, en JavaScript
+   * non typé, à partir de ce qu'un poste lui a envoyé. Le champ y sera absent tant que ce poste
+   * n'aura pas cette version, et le rendu doit alors montrer une macro au repos — pas lever.
+   */
+  autoTpSl?: { actif: boolean; pose: boolean };
 }
 
 /**
@@ -37,6 +44,7 @@ export const RESTING_CONTEXT: VisualContext = {
   lastViolationAt: null,
   defaultQuantity: 1,
   autoBe: { actif: false, pose: false },
+  autoTpSl: { actif: false, pose: false },
 };
 
 /** Gain en ticks au-delà du prix moyen, dans le sens de la position. */
@@ -468,8 +476,64 @@ export function computeVisual(
     case 'com.trader.ninjatrader.account': {
       const currentAccount = state.ntConnected ? (state.account || '') : '';
       const isActive = connected && currentAccount !== '';
+      const title = formatAccountLabel(currentAccount, 'ACCT');
+      const copier = state.copier;
+
+      // La copie n'écrase jamais l'identité du compte : elle occupe le sous-titre et le détail.
+      // Savoir SUR QUEL compte on trade prime sur tout le reste de cette touche.
+
+      // Retenue après un changement de compte maître. En tête, et en rouge, parce que c'est le
+      // seul état où le trader croit que la copie tourne alors qu'elle est arrêtée — un écart
+      // entre ce qu'on croit et ce qui est vaut ici plus qu'un simple avertissement.
+      if (copier?.suspendedReason) {
+        return {
+          title, subtitle: 'COPY HOLD', detail: 'MAITRE',
+          bgColor: Colors.refuse, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
+        };
+      }
+
+      if (copier?.enabled && copier.followers.length > 0) {
+        const total = copier.followers.length;
+        const resolved = copier.followers.filter((f) => f.resolved).length;
+        const drifted = copier.followers.some((f) => f.drifted);
+        const rejected = copier.followers.some((f) => f.lastError);
+
+        // Un suiveur en dérive ou en rejet : ce compte-là ne suit plus, et le trader doit
+        // l'apprendre du boîtier plutôt que du journal.
+        if (drifted || rejected) {
+          return {
+            title, subtitle: 'COPY STOP', detail: drifted ? 'DERIVE' : 'REJET',
+            bgColor: Colors.refuse, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
+          };
+        }
+
+        // Guard refuse les entrées : leurs copies s'arrêtent avec elles, les sorties continuent.
+        // Atténué et non rouge — rien n'est cassé, la règle s'applique.
+        if (copier.entriesBlocked) {
+          return {
+            title, subtitle: `COPY ×${total}`, detail: 'SORTIES',
+            bgColor: Colors.orangeDim, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
+          };
+        }
+
+        // Un suiveur que NinjaTrader ne publie pas en ce moment. Pastille blanche plutôt que
+        // rouge : rien n'a échoué, mais la copie ne part pas partout où on la croit partie.
+        if (resolved < total) {
+          return {
+            title, subtitle: `COPY ${resolved}/${total}`,
+            badge: '!', badgeColor: Colors.white,
+            bgColor: Colors.orange, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
+          };
+        }
+
+        return {
+          title, subtitle: `COPY ×${total}`,
+          bgColor: Colors.orange, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
+        };
+      }
+
       return {
-        title: formatAccountLabel(currentAccount, 'ACCT'),
+        title,
         subtitle: isActive ? 'ACTIVE' : 'INACTIVE',
         bgColor: isActive ? Colors.orange : Colors.black,
         textColor: Colors.textWhite,
@@ -742,6 +806,43 @@ export function computeVisual(
       const gain = gainEnTicks(state);
       const attente = gain === null ? 'ARME' : `${Math.floor(gain)}/${declenchement}`;
       return { title: 'AUTOBE', subtitle: attente, bgColor: Colors.orange, textColor: Colors.textWhite };
+    }
+
+    // Second automatisme de l'hôte, jumeau du précédent : le bridge n'a pas non plus de commande
+    // « auto TP/SL ». L'hôte voit la position s'ouvrir et envoie un `attachBracket` ordinaire.
+    case 'host.autotpsl': {
+      const tp = Math.max(0, Math.round(Number(settings.takeProfitTicks) || 0));
+      const sl = Math.max(0, Math.round(Number(settings.stopLossTicks) || 0));
+      // « -- » et non « 0 » : sur une touche, un zéro se lit comme une distance réglée à zéro,
+      // alors qu'il veut dire « cette jambe n'est pas posée du tout ».
+      const valeurs = `TP${tp > 0 ? tp : '--'} SL${sl > 0 ? sl : '--'}`;
+
+      // Champ facultatif du contexte : un éditeur qui ne le remonte pas encore doit voir la macro
+      // au repos, jamais lever.
+      const auto = ctx.autoTpSl ?? { actif: false, pose: false };
+
+      if (!auto.actif) {
+        return {
+          title: 'TPSL:OFF', subtitle: valeurs,
+          bgColor: Colors.black, textColor: Colors.textWhite,
+        };
+      }
+
+      // Armée sans aucune distance : elle n'enverrait rien. Le dire, plutôt que d'afficher une
+      // macro « armée » qui laisse croire à une protection inexistante — c'est le piège exact de
+      // l'interrupteur sans effet. L'hôte refuse d'ailleurs de l'armer dans cet état ; ce cas ne
+      // s'atteint qu'en ramenant les deux réglages à 0 après coup.
+      if (tp === 0 && sl === 0) {
+        return {
+          title: 'TPSL:REGLER', subtitle: 'aucune distance',
+          bgColor: Colors.black, textColor: Colors.orange, subtitleColor: Colors.textWhite,
+        };
+      }
+
+      return {
+        title: auto.pose ? 'TPSL:POSE' : 'TPSL:ARME', subtitle: valeurs,
+        bgColor: Colors.orange, textColor: Colors.textWhite,
+      };
     }
 
     // Action propre à l'hôte : la navigation entre pages était assurée par les touches

@@ -38,6 +38,12 @@ export interface TradingState {
   safety: SafetyStatus;
   /** Sens du marché, calculé par l'add-on. Jamais absent : l'hôte affiche sans test de nullité. */
   trend: TrendState;
+  /**
+   * Copie de comptes. Facultatif, contrairement à `trend` : l'éditeur Bitlearn recopie l'état
+   * champ par champ, et un poste qui n'a pas encore cette version n'en enverra rien. Le rendu doit
+   * alors montrer une touche Compte ordinaire — pas lever, et surtout pas annoncer une copie.
+   */
+  copier?: CopierState;
 }
 
 /** Sens d'une unité de temps. `neutral` est une réponse, pas une absence de réponse. */
@@ -89,6 +95,111 @@ export const DEFAULT_TREND_STATE: TrendState = {
   blockingAllowed: false,
   armed: false,
 };
+
+/**
+ * Copie de comptes, greffée sur la touche Compte. Le compte maître EST le compte sélectionné :
+ * il n'existe pas de second endroit où le choisir.
+ *
+ * Bloc composite, comme `trend` : la CONFIGURATION (`enabled`, `master`, la liste, `entriesBlocked`)
+ * appartient au bridge, qui la persiste et l'estampille sur chaque instantané ; la SANTÉ
+ * (`resolved`, `drifted`, `lastError`) ne peut venir que de l'add-on, seul à voir un compte.
+ */
+export interface CopierFollower {
+  name: string;
+  /** `0` désactive ce suiveur sans le retirer de la liste. */
+  multiplier: number;
+  /** Plafond PAR ORDRE copié. `0` = pas de plafond propre. */
+  maxContracts: number;
+  /** Le compte existe et sa connexion est active **en ce moment**. */
+  resolved: boolean;
+  /**
+   * L'écart avec ce que la position du maître implique s'est installé. Les entrées ne sont plus
+   * copiées vers ce compte ; les sorties, si. **Rien n'est jamais envoyé pour corriger.**
+   */
+  drifted: boolean;
+  /** Écart signé en contrats : `réel − attendu`. */
+  drift: number;
+  /** Dernier refus rencontré sur ce suiveur, vide sinon. */
+  lastError: string;
+}
+
+export interface CopierState {
+  enabled: boolean;
+  master: string;
+  masterResolved: boolean;
+  /** Guard refuse les entrées : leurs copies s'arrêtent avec elles, les sorties continuent. */
+  entriesBlocked: boolean;
+  /**
+   * Non vide quand la copie est retenue après un changement de compte maître. Reprendre demande
+   * d'éteindre puis rallumer le réglage — un rejeu de la même configuration ne suffit pas.
+   */
+  suspendedReason: string;
+  followers: CopierFollower[];
+  copiedToday: number;
+}
+
+export const DEFAULT_COPIER_STATE: CopierState = {
+  enabled: false,
+  master: '',
+  masterResolved: false,
+  entriesBlocked: false,
+  suspendedReason: '',
+  followers: [],
+  copiedToday: 0,
+};
+
+/**
+ * Une ligne par suiveur, `nom|multiplicateur|plafond`.
+ *
+ * **Une chaîne et non un tableau, et ce n'est pas négociable** : `sanitizeSettings`
+ * (`Bitlearn/lib/tradeDeck/layout.js`) n'accepte que `string`, `boolean` et `number` dans les
+ * réglages d'une touche. Un tableau est écarté **en silence** en traversant le site, et le trader
+ * verrait sa sélection disparaître sans le moindre message.
+ *
+ * Tolérant à la saisie : un nom seul vaut `×1` sans plafond, ce qui rend la liste modifiable à la
+ * main sans connaître le format.
+ */
+export function parseFollowers(value: unknown): CopierFollower[] {
+  if (typeof value !== 'string' || !value.trim()) return [];
+
+  const followers: CopierFollower[] = [];
+  const seen = new Set<string>();
+
+  for (const line of value.split(/[\n\r;]+/)) {
+    const parts = line.split('|');
+    const name = (parts[0] ?? '').trim();
+    if (!name) continue;
+
+    const key = name.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    // Une valeur illisible retombe sur le défaut sûr plutôt que sur NaN : `×1` copie à
+    // l'identique, `0` de plafond veut dire « pas de plafond propre ».
+    const multiplier = Number.parseFloat((parts[1] ?? '').trim());
+    const maxContracts = Number.parseInt((parts[2] ?? '').trim(), 10);
+
+    followers.push({
+      name,
+      multiplier: Number.isFinite(multiplier) && multiplier >= 0 ? multiplier : 1,
+      maxContracts: Number.isFinite(maxContracts) && maxContracts > 0 ? maxContracts : 0,
+      resolved: false,
+      drifted: false,
+      drift: 0,
+      lastError: '',
+    });
+  }
+
+  return followers;
+}
+
+/** Réciproque de `parseFollowers` — ce que l'éditeur enregistre dans le layout. */
+export function formatFollowers(followers: Pick<CopierFollower, 'name' | 'multiplier' | 'maxContracts'>[]): string {
+  return followers
+    .filter((f) => f.name.trim())
+    .map((f) => `${f.name.trim()}|${f.multiplier}|${f.maxContracts}`)
+    .join('\n');
+}
 
 /**
  * State of the lockable safety macro, as published by the bridge.
@@ -229,6 +340,7 @@ export const DISCONNECTED_STATE: TradingState = {
   availableAccounts: [], cooldownEnabled: false, cooldownActive: false,
   cooldownSecondsRemaining: 0, cooldownSeconds: 60, safety: { ...DEFAULT_SAFETY_STATUS },
   trend: { ...DEFAULT_TREND_STATE },
+  copier: { ...DEFAULT_COPIER_STATE },
 };
 
 export interface PositionState {
@@ -326,8 +438,8 @@ export function createCommand(action: string, payload: Record<string, unknown> =
  * boîtier, pour toutes les macros à la fois — au lieu d'énumérer un champ par macro et de laisser
  * les deux affichages diverger au premier ajout.
  *
- * `autoBe` voyage à part parce que l'Auto BE est un automatisme de l'hôte : le bridge ne le connaît
- * pas, il n'est donc pas dans `TradingState`.
+ * `autoBe` et `autoTpSl` voyagent à part parce que ce sont des automatismes de l'hôte : le bridge
+ * ne les connaît pas, ils ne sont donc pas dans `TradingState`.
  *
  * `lastRejectionAt` et `lastViolationAt` sont volontairement absents. Ce sont des bannières de
  * quelques secondes, pas un état : arrivées avec plusieurs secondes de retard, elles annonceraient
@@ -338,6 +450,12 @@ export interface DeckStateReport {
   capturedAt: number;
   state: TradingState;
   autoBe: { actif: boolean; pose: boolean };
+  /**
+   * Facultatif, contrairement à `autoBe` : Bitlearn recopie ce rapport champ par champ, et un poste
+   * qui n'a pas encore reçu cette version n'en enverra rien. Un lecteur doit pouvoir lire l'état
+   * d'un poste plus ancien que lui sans que la macro paraisse armée.
+   */
+  autoTpSl?: { actif: boolean; pose: boolean };
 }
 
 /**

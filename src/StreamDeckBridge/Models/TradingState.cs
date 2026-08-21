@@ -40,6 +40,12 @@ public sealed class TradingState
     /// has published anything — and which refuses nothing.
     /// </summary>
     public TrendState Trend { get; set; } = new();
+
+    /// <summary>
+    /// Account copier. Never null, so the host renders without a null check: a default instance
+    /// describes copying as off, which is the honest answer before anything has been configured.
+    /// </summary>
+    public CopierStatus Copier { get; set; } = new();
 }
 
 /// <summary>

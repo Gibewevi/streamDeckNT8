@@ -154,6 +154,78 @@
 - **Action** : Presser BE
 - **Résultat** : Stop déplacé au AveragePrice actuel de NT8
 
+## 5bis. Tests macro Auto TP/SL
+
+Voir `docs/macro-tp-sl.md`. Tous sur Sim101, tick ES = 0.25.
+
+### T-46 : Armement refusé sans distance
+- **Préconditions** : Touche Auto TP/SL posée, TP = 0 et SL = 0
+- **Action** : Presser la touche
+- **Résultat** : Reste `OFF`, la touche affiche `REGLER` si on l'arme autrement.
+  Journal : `AutoTPSL | Armement refusé — aucune distance réglée sur la touche`
+
+### T-47 : Les deux jambes, Long
+- **Préconditions** : Armée, TP = 40, SL = 20. Flat
+- **Action** : Buy Market 1 ES à 5420.00
+- **Résultat** : Stop @ 5415.00 et Limit @ 5430.00, **même OCO**, quantité 1.
+  Touche : `POSE`
+
+### T-48 : Les deux jambes, Short
+- **Préconditions** : Armée, TP = 40, SL = 20. Flat
+- **Action** : Sell Market 1 ES à 5420.00
+- **Résultat** : Stop @ 5425.00 et Limit @ 5410.00. Les niveaux sont **inversés** par rapport au T-47
+
+### T-49a : TP seul
+- **Préconditions** : Armée, TP = 40, SL = 0
+- **Action** : Buy Market 1 ES
+- **Résultat** : Limit seule, **aucun stop créé**. Touche : `TP40 SL--`
+
+### T-49b : SL seul
+- **Préconditions** : Armée, TP = 0, SL = 20
+- **Action** : Buy Market 1 ES
+- **Résultat** : Stop seul, **aucune limite créée**
+
+### T-49c : OCO — l'un annule l'autre
+- **Préconditions** : Position protégée par le T-47
+- **Action** : Laisser le take profit s'exécuter (ou le déclencher à la main)
+- **Résultat** : Le stop est **annulé par NinjaTrader**, la position reste à plat.
+  Aucun ordre en attente ne subsiste
+
+### T-49d : Renfort de position
+- **Préconditions** : Long 1 ES @ 5420 protégé, TP = 40, SL = 20
+- **Action** : Buy Market 1 ES à 5424 (prix moyen → 5422)
+- **Résultat** : Stop **déplacé** à 5417.00 et Limit à 5432.00, **quantité passée à 2**.
+  Aucune seconde paire créée. Journal : `Prix moyen modifié — protections recalculées`
+
+### T-49e : Stop déjà en place (ATM ou manuel)
+- **Préconditions** : Armée TP = 40 / SL = 20, position ouverte avec un stop posé à la main
+- **Action** : Attendre la pose
+- **Résultat** : Le stop manuel est **intact** ; seule la limite est créée.
+  Réponse : `stopOutcome: "kept:foreign"`
+
+### T-49f : Armement sur une position déjà en gain
+- **Préconditions** : Long 1 ES @ 5420, marché à 5440. Armer avec TP = 40
+- **Action** : Attendre la pose
+- **Résultat** : Le take profit (5430) est **refusé**, pas exécuté.
+  Journal : `Take profit NOT placed … already past the market`
+
+### T-49g : Cohabitation avec l'Auto BE
+- **Préconditions** : Auto TP/SL (SL = 20) **et** Auto BE (seuil 8) armées
+- **Action** : Buy Market, laisser le gain atteindre 8 ticks
+- **Résultat** : **Un seul** stop tout du long : celui posé par l'Auto TP/SL, déplacé au point mort
+  par l'Auto BE
+
+### T-49h : Distance décimale
+- **Préconditions** : Saisir 20,5 dans le champ Stop Loss
+- **Résultat** : L'éditeur arrondit (`step: 1`). Si la valeur atteint quand même le bridge,
+  refus `INVALID_PAYLOAD` — jamais une protection silencieusement désactivée
+
+### T-49i : Distance modifiée en séance
+- **Préconditions** : Long 1 ES @ 5420 protégé, SL = 20
+- **Action** : Passer le Stop Loss à 40 dans l'éditeur, sans fermer la position
+- **Résultat** : Le stop est **déplacé** à 5410.00 sur la position en cours.
+  Journal : `Distances modifiées — protections repositionnées sur la position en cours`
+
 ## 6. Tests Move Stop / Target
 
 ### T-50 : Stop +1 tick (Long)
@@ -308,6 +380,24 @@ Réglages utilisés : `maxTradesWhenLosing = 3`, `dailyLossLimit = 300`,
 - **Préconditions** : Add-on publiant `pnlAvailable = false`
 - **Résultat** : Touche affiche `PNL?`, les règles PnL sont inertes (pas de blocage
   silencieux ni de faux blocage)
+
+## 8ter. Tests de la copie de comptes
+
+Les douze scénarios vivent dans **[macro-copieur.md](macro-copieur.md#vérifier)**, avec la macro
+qu'ils valident plutôt que recopiés ici : ils portent chacun sur une règle du moteur de copie, et
+séparer la règle de son test est le meilleur moyen de faire diverger les deux.
+
+Deux d'entre eux ne doivent jamais être sautés :
+
+- **n° 9** — position fermée à la main sur un suiveur : dérive détectée, entrées arrêtées, et
+  **aucun ordre émis**. C'est la garantie centrale de cette macro ;
+- **n° 11** — Guard bloque en cours de position : entrées arrêtées, **sorties toujours copiées**.
+  Enfermer un suiveur dans une position est le résultat qu'aucune règle ne peut produire.
+
+La moitié bridge est couverte par un harnais jetable (14 contrôles au 20/08/2026 : parsing des
+multiplicateurs et plafonds, refus d'un suiveur égal au maître, bornes, retenue au changement de
+compte maître et sa libération). Il vit dans le scratchpad, à reconstruire au besoin — même statut
+que celui de `SafetyMacro`.
 
 ## 9. Tests de robustesse
 

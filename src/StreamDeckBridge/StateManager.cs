@@ -12,6 +12,7 @@ public sealed class StateManager
 {
     private readonly BridgeConfig _config;
     private readonly SafetyMacro _safety;
+    private readonly CopierPolicy _copier;
     private readonly ILogger<StateManager> _logger;
     private readonly object _lock = new();
     private readonly TradingState _state;
@@ -51,10 +52,11 @@ public sealed class StateManager
     // already-open position at startup is never counted as a new trade.
     private bool _previousPositionKnown;
 
-    public StateManager(BridgeConfig config, SafetyMacro safety, ILogger<StateManager> logger)
+    public StateManager(BridgeConfig config, SafetyMacro safety, CopierPolicy copier, ILogger<StateManager> logger)
     {
         _config = config;
         _safety = safety;
+        _copier = copier;
         _logger = logger;
         _state = new TradingState
         {
@@ -132,7 +134,9 @@ public sealed class StateManager
                 ? (int)Math.Ceiling((_cooldownUntil!.Value - DateTime.UtcNow).TotalSeconds)
                 : 0;
 
-            return new TradingState
+            var safety = _safety.GetStatus();
+
+            var snapshot = new TradingState
             {
                 Account = _state.Account,
                 Instrument = _state.Instrument,
@@ -173,8 +177,36 @@ public sealed class StateManager
                     BlockingAllowed = _trendBlockingAllowed,
                     Armed = _trendArmed,
                 },
-                Safety = _safety.GetStatus()
+
+                // Copied for the reason written above the trend block: this snapshot is the ONLY
+                // object broadcast to the client. Returning the live instance would let the
+                // bridge-owned half be stamped into the object NinjaTrader's next publish
+                // overwrites, and the follower list would flicker between configured and empty.
+                Copier = new CopierStatus
+                {
+                    MasterResolved = _state.Copier.MasterResolved,
+                    CopiedToday = _state.Copier.CopiedToday,
+                    Followers = _state.Copier.Followers.Select(f => new CopierFollowerStatus
+                    {
+                        Name = f.Name,
+                        Multiplier = f.Multiplier,
+                        MaxContracts = f.MaxContracts,
+                        Resolved = f.Resolved,
+                        Drifted = f.Drifted,
+                        Drift = f.Drift,
+                        LastError = f.LastError,
+                    }).ToList(),
+                },
+                Safety = safety
             };
+
+            // The configuration half of the copier block is stamped on here, after the copy, for
+            // the same reason the trend's two bridge-owned fields are: a NinjaTrader publish must
+            // not be able to overwrite what the trader configured. `entriesBlocked` is handed over
+            // rather than recomputed — the safety macro is the only arbiter of it.
+            _copier.StampSnapshot(snapshot.Copier, snapshot.Account, safety.EntriesBlocked);
+
+            return snapshot;
         }
     }
 
@@ -247,6 +279,11 @@ public sealed class StateManager
                 // Sans NinjaTrader il n'y a plus de barres, donc plus de tendance. La garder
                 // afficherait un sens figé au moment précis où plus rien ne le met à jour.
                 _state.Trend = new TrendState();
+
+                // Même raisonnement pour la SANTÉ du copieur : plus personne ne peut dire si un
+                // suiveur est résolu ou en dérive. La configuration, elle, n'est pas touchée — elle
+                // appartient à CopierPolicy et sera réestampillée au prochain instantané.
+                _state.Copier = new CopierStatus();
             }
 
             _logger.LogInformation("NT8 connection: {Status}", connected ? "CONNECTED" : "DISCONNECTED");
@@ -397,6 +434,15 @@ public sealed class StateManager
             {
                 var parsed = JsonSerializer.Deserialize<TrendState>(trend.GetRawText(), CamelCase);
                 if (parsed != null) _state.Trend = parsed;
+            }
+            // Only the add-on can see whether a follower account resolved or drifted. The
+            // configuration half of this block is stamped back on in GetSnapshot, so what is
+            // parsed here can never overwrite the trader's settings — same discipline as the
+            // trend, and for the same reason.
+            if (statePayload.TryGetProperty("copier", out var copier) && copier.ValueKind == JsonValueKind.Object)
+            {
+                var parsed = JsonSerializer.Deserialize<CopierStatus>(copier.GetRawText(), CamelCase);
+                if (parsed != null) _state.Copier = parsed;
             }
 
             // Update NT connected status from addon heartbeat

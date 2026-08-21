@@ -26,6 +26,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private GuardEnforcer _guardEnforcer;
         private ExecutionRecorder _executionRecorder;
         private TrendMonitor _trendMonitor;
+        private CopyEngine _copyEngine;
         private AddOnConfig _config;
 
         protected override void OnStateChange()
@@ -81,7 +82,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                 _executionRecorder = new ExecutionRecorder(_trendMonitor);
                 _orderMonitor = new OrderMonitor(_bridgeClient, _guardEnforcer, _executionRecorder);
 
-                _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor, _trendMonitor);
+                // Mirrors the selected account onto follower accounts. Created before the publisher,
+                // which drives its account resolution and its drift check on every tick — the
+                // copier deliberately owns no timer of its own.
+                _copyEngine = new CopyEngine(_resolver, _bridgeClient, _guardEnforcer);
+
+                _statePublisher = new StatePublisher(_resolver, _bridgeClient, _config, _orderMonitor, _trendMonitor, _copyEngine);
 
                 // Fills and cancellations refresh the deck on the spot instead of waiting for the
                 // next publish tick. Set here rather than injected so the monitor keeps no
@@ -109,6 +115,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 SdLogger.Event("Session", "Add-On shutting down (NinjaTrader closing or NinjaScript reload)");
                 if (_statePublisher != null) _statePublisher.Dispose();
+                // After the publisher, which is what drives it: stopping the copier first would
+                // leave a publish in flight calling into a disposed engine. Its submit workers are
+                // background threads, so an unclean stop would survive a NinjaScript reload.
+                if (_copyEngine != null) _copyEngine.Dispose();
                 // After the publisher, which is the only reader of its verdict: releasing the bars
                 // requests while a publish is in flight would pull the series out from under it.
                 if (_trendMonitor != null) _trendMonitor.Dispose();
@@ -143,6 +153,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             if (message.Action == "setGuardPolicy")
                 response = HandleGuardPolicy(message);
+            else if (message.Action == "setCopierConfig")
+                response = HandleCopierConfig(message);
+            else if (message.Action == "copierPanic")
+                response = HandleCopierPanic(message);
             else if (message.Action == "configureTrend")
                 response = HandleTrendConfig(message);
             else if (message.Action == "setInstrument" || message.Action == "setAccount")
@@ -210,6 +224,46 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 blocked = blocked,
                 maxContracts = maxContracts
+            });
+        }
+
+        /// <summary>
+        /// Adopts the copier configuration the bridge publishes. Handled here rather than in the
+        /// dispatcher for the same reason as the guard policy: it sends no order and touches no
+        /// position, it only tells the copy engine what to mirror and where.
+        ///
+        /// The bridge owns and persists this configuration and republishes it on every add-on
+        /// (re)connection — which is what makes a NinjaScript recompile mid-session harmless.
+        /// </summary>
+        private BridgeMessage HandleCopierConfig(BridgeMessage message)
+        {
+            if (_copyEngine == null)
+                return BridgeMessage.CreateError(message.RequestId, message.Action, "CONTEXT_MISSING", "Copy engine is not initialized.");
+
+            _copyEngine.Configure(message);
+
+            return BridgeMessage.CreateResponse(message.RequestId, message.Action, true, new
+            {
+                enabled = message.GetPayloadBool("enabled"),
+                master = message.GetPayloadString("master") ?? string.Empty
+            });
+        }
+
+        /// <summary>
+        /// Stops copying and flattens every follower account. The only place the copier sends
+        /// orders of its own accord, and it takes a deliberate command to get here — never a
+        /// measurement.
+        /// </summary>
+        private BridgeMessage HandleCopierPanic(BridgeMessage message)
+        {
+            if (_copyEngine == null)
+                return BridgeMessage.CreateError(message.RequestId, message.Action, "CONTEXT_MISSING", "Copy engine is not initialized.");
+
+            var flattened = _copyEngine.PanicFlatten();
+
+            return BridgeMessage.CreateResponse(message.RequestId, message.Action, true, new
+            {
+                flattened = flattened
             });
         }
 

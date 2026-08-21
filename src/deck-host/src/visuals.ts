@@ -165,6 +165,18 @@ export function renderButtonSvg(visual: ButtonVisual, opts: RenderOptions = {}):
       <text x="72" y="88" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="bold" fill="${sc}">${sub}</text>
       <text x="72" y="122" text-anchor="middle" font-family="sans-serif" font-size="17" fill="${sc}">${esc(visual.detail || '')}</text>`;
 
+  } else if (t.startsWith('TPSL')) {
+    // Auto TP/SL — en-tête, état, puis les deux distances réglées.
+    //
+    // Trois lignes et non deux : l'état seul ne dit pas CE QUI sera posé, et c'est la question
+    // qu'on se pose devant la touche avant d'entrer. Les distances tiennent sur la ligne du bas,
+    // comme le restant de la touche Sécurité.
+    const word = esc(t.split(':')[1] || 'OFF');
+    contentSvg = `
+      <text x="72" y="30" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="${tc}">TP/SL</text>
+      <text x="72" y="82" text-anchor="middle" font-family="sans-serif" font-size="30" font-weight="bold" fill="${tc}">${word}</text>
+      <text x="72" y="124" text-anchor="middle" font-family="sans-serif" font-size="17" fill="${sc}">${sub}</text>`;
+
   } else if (t.startsWith('TREND')) {
     // Tendance — mot, symbole, puis le détail par unité de temps.
     //

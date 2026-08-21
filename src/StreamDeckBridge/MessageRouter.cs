@@ -13,6 +13,7 @@ public sealed class MessageRouter
 {
     private readonly StateManager _stateManager;
     private readonly SafetyMacro _safety;
+    private readonly CopierPolicy _copier;
     private readonly MessageValidator _validator;
     private readonly DuplicateGuard _duplicateGuard;
     private readonly SecurityJournal _journal;
@@ -23,7 +24,12 @@ public sealed class MessageRouter
         "qtySet", "qtyAdjust", "qtyReset", "setInstrument", "setAccount", "getState",
         "toggleCooldown", "configureCooldown",
         "armSafety", "disarmSafety", "toggleSafety", "configureSafety",
-        "configureTrend", "toggleTrend"
+        "configureTrend", "toggleTrend",
+        // `configureCopier` only stores settings. What the add-on needs reaches it through the
+        // broadcast loop's setCopierConfig push, on change and on every reconnection — the same
+        // route as the guard policy, and for the same reason: the add-on is reloaded on every
+        // NinjaScript recompile and must be told again without the host having to notice.
+        "configureCopier"
     };
 
     /// <summary>
@@ -47,6 +53,7 @@ public sealed class MessageRouter
     public MessageRouter(
         StateManager stateManager,
         SafetyMacro safety,
+        CopierPolicy copier,
         MessageValidator validator,
         DuplicateGuard duplicateGuard,
         SecurityJournal journal,
@@ -54,6 +61,7 @@ public sealed class MessageRouter
     {
         _stateManager = stateManager;
         _safety = safety;
+        _copier = copier;
         _validator = validator;
         _duplicateGuard = duplicateGuard;
         _journal = journal;
@@ -460,6 +468,32 @@ public sealed class MessageRouter
             case "toggleSafety":
             case "configureSafety":
                 return HandleSafetyAction(message);
+            case "configureCopier":
+                {
+                    var enabled = GetPayloadBoolOrNull(message, "enabled");
+                    var followers = GetPayloadString(message, "followers");
+                    var master = _stateManager.GetSnapshot().Account;
+
+                    var (ok, code, reason) = _copier.Configure(enabled, followers, master);
+                    if (!ok)
+                        return BridgeMessage.CreateError(message.RequestId, message.Action, code!, reason!);
+
+                    return new BridgeMessage
+                    {
+                        Type = "response",
+                        RequestId = message.RequestId,
+                        Source = "bridge",
+                        Action = message.Action,
+                        Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                        Result = JsonSerializer.SerializeToElement(new
+                        {
+                            success = true,
+                            enabled = _copier.IsEffectivelyEnabled,
+                            suspendedReason = _copier.SuspendedReason,
+                            followers = _copier.Followers.Count
+                        })
+                    };
+                }
             case "configureTrend":
                 {
                     // Les réglages de DÉTECTION vivent dans l'add-on, seul à détenir les barres, et

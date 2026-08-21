@@ -38,6 +38,7 @@ builder.Services.AddLogging(logging =>
 // Services
 builder.Services.AddSingleton<SecurityJournal>();
 builder.Services.AddSingleton<SafetyMacro>();
+builder.Services.AddSingleton<CopierPolicy>();
 builder.Services.AddSingleton<StateManager>();
 builder.Services.AddSingleton<MessageValidator>();
 builder.Services.AddSingleton(sp =>
