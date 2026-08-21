@@ -68,6 +68,17 @@
       <HintPath>$(ATAS_BASE)\Utils.Common.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!--
+      DEVIATION (tache 4) : RenderPen (OFT.Rendering.Tools) expose System.Drawing.Drawing2D.DashStyle
+      dans sa surface publique. Ce type vit dans System.Drawing.Common, absent du framework partage
+      d'un projet net10.0 sans UseWindowsForms/UseWPF. ATAS X livre sa propre copie de cette DLL :
+      on la reference au meme HintPath que les autres, pour rester sur la version qu'ATAS charge
+      reellement au lieu d'un package NuGet qui pourrait diverger.
+    -->
+    <Reference Include="System.Drawing.Common">
+      <HintPath>$(ATAS_BASE)\System.Drawing.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>

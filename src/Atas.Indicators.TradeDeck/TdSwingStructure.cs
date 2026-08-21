@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 
 using ATAS.Indicators;
 using ATAS.Indicators.Drawing;
 using ATAS.Indicators.Technical;
 
 using OFT.Attributes;
+using OFT.Rendering.Context;
 
 // DEVIATION (tache 2) : ATAS.Indicators et OFT.Attributes definissent chacun un ParameterAttribute
 // (le premier derive du second) ; les importer tous les deux rend [Parameter] ambigu (CS0104).
@@ -90,6 +92,7 @@ public class TdSwingStructure : Indicator
     private int _minBarsBetweenPivots = 3;
     private int _dotOffsetTicks = 4;
     private bool _showEma = true;
+    private bool _showStatistics = true;
 
     public TdSwingStructure() : base(true)
     {
@@ -217,6 +220,38 @@ public class TdSwingStructure : Indicator
         }
     }
 
+    protected override void OnRender(RenderContext context, DrawingLayouts layout)
+    {
+        if (!_showStatistics || ChartInfo == null || Container == null)
+            return;
+
+        if (_majorHighs + _majorLows == 0)
+            return;
+
+        var lines = new List<string>
+        {
+            string.Format(CultureInfo.InvariantCulture,
+                "pivots majeurs : {0} sommets / {1} creux — mineurs : {2}",
+                _majorHighs, _majorLows, _minorPivots)
+        };
+
+        if (_legTicks.Count > 0)
+        {
+            lines.Add(string.Format(CultureInfo.InvariantCulture,
+                "vagues : {0} — amplitude moy. {1:F1} ticks, med. {2:F1} ticks",
+                _legTicks.Count, StatsBox.Mean(_legTicks), StatsBox.MedianOf(_legTicks)));
+        }
+
+        if (_legBars.Count > 0)
+        {
+            lines.Add(string.Format(CultureInfo.InvariantCulture,
+                "duree : moy. {0:F1} barres, med. {1:F1} barres",
+                StatsBox.Mean(_legBars), StatsBox.MedianOf(_legBars)));
+        }
+
+        StatsBox.Draw(context, Container, lines);
+    }
+
     #region Reglages
 
     [Parameter]
@@ -287,6 +322,14 @@ public class TdSwingStructure : Indicator
     {
         get => _ema.Period;
         set { _ema.Period = value; RecalculateValues(); }
+    }
+
+    [Parameter]
+    [Display(Name = "Afficher les statistiques", Description = "Encart de calibration : nombre de pivots, amplitude et duree des vagues.", GroupName = "Affichage", Order = 40)]
+    public bool ShowStatistics
+    {
+        get => _showStatistics;
+        set { _showStatistics = value; RedrawChart(); }
     }
 
     #endregion
