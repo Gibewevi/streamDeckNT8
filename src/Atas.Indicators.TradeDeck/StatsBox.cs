@@ -21,12 +21,20 @@ internal static class StatsBox
     private const int Padding = 8;
     private const int Margin = 12;
 
+    /// <summary>
+    /// Vertical offset for a box that must stack below another one sharing the same corner.
+    /// Sized to clear a four-line box at this font: pairing TdSwingStructure and TdStopPlacement
+    /// on the same panel is the documented workflow (their threshold settings are meant to match),
+    /// so without this the second box paints straight over the first.
+    /// </summary>
+    public const int StackedTopOffset = 100;
+
     private static readonly RenderFont Font = new("Arial", 11);
     private static readonly Color Background = Color.FromArgb(200, 20, 25, 35);
     private static readonly Color Text = Color.FromArgb(220, 220, 220);
     private static readonly RenderPen Border = new(Color.Gray, 1);
 
-    public static void Draw(RenderContext context, IIndicatorContainer container, IReadOnlyList<string> lines)
+    public static void Draw(RenderContext context, IIndicatorContainer container, IReadOnlyList<string> lines, int topOffset)
     {
         if (context == null || container == null || lines == null || lines.Count == 0)
             return;
@@ -45,7 +53,7 @@ internal static class StatsBox
         var boxHeight = lineHeight * lines.Count + Padding * 2;
 
         var x = container.Region.Width - boxWidth - Margin;
-        var y = Margin;
+        var y = Margin + topOffset;
         if (x < 0)
             x = 0;
 

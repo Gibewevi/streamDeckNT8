@@ -335,7 +335,7 @@ et `System.Drawing.Common` (que `RenderPen` expose dans sa surface publique, et 
 partagé d'un `net10.0` nu ne fournit pas) — un lecteur qui déplace le projet ou met à jour ATAS X
 doit s'attendre à les retrouver dans le `.csproj`.
 
-Trois différences de plateforme valent d'être connues :
+Quatre différences de plateforme valent d'être connues :
 
 - **La barre close se gère à la main.** ATAS rappelle `OnCalculate` à chaque tick de la barre en
   formation, là où `Calculate.OnBarClose` ne l'appelait qu'une fois par barre close. Le moteur est
@@ -344,6 +344,11 @@ Trois différences de plateforme valent d'être connues :
   rétroactive d'un pivot est triviale.
 - **`decimal` n'a pas de `NaN`.** `ShowZeroValue = false` remplace la remise à `double.NaN` par
   barre, et rend inutile la remise à zéro elle-même.
+- **Les `[Range]` côté ATAS plafonnent à `10000` / `1000` là où les originaux NinjaTrader sont en
+  `int.MaxValue` / `double.MaxValue`.** C'est une restriction d'interface, sans effet sur les
+  chiffres calculés : personne ne règle `AtrPeriod` à un million, mais la borne n'a pas été choisie
+  et mérite d'être connue avant de la prendre pour une différence de comportement entre les deux
+  plateformes.
 
 Les statistiques de calibration ne passent plus par `Print` — ATAS n'a pas de fenêtre de sortie —
 mais par un encart dessiné sur le graphique. Elles servent aussi de recette : mêmes réglages, même

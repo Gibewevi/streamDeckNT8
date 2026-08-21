@@ -88,6 +88,8 @@ public class TdStopPlacement : Indicator
     private int _sweepHorizonBars = 20;
     private bool _showStatistics = true;
 
+    // No Panel assignment: the base(true) constructor already places the indicator on the
+    // candles panel, ATAS's equivalent of NinjaTrader's IsOverlay = true.
     public TdStopPlacement() : base(true)
     {
         DataSeries[0] = _structural;
@@ -96,6 +98,12 @@ public class TdStopPlacement : Indicator
 
         Add(_atr);
         Add(_ema);
+
+        // ATAS gates OnRender on EnableCustomDrawing: without these two lines the override is
+        // never called and the statistics box silently does not exist. Every built-in ATAS
+        // indicator that draws (AccountInfoDisplay among them) opts in the same way.
+        EnableCustomDrawing = true;
+        SubscribeToDrawingEvents(DrawingLayouts.Final);
     }
 
     protected override void OnRecalculate()
@@ -116,9 +124,14 @@ public class TdStopPlacement : Indicator
     {
         // Same bar-close discipline as TdSwingStructure, and for the same reason: the engine is a
         // state machine, and ATAS re-enters OnCalculate on every tick of the forming bar.
+        //
+        // _lastBar is stamped only once this bar is actually about to reach _engine.Update (see
+        // below), not here at entry: if InstrumentInfo is briefly unavailable, the guards below
+        // return without stamping, so the next tick of this SAME forming bar retries the closed
+        // bar instead of losing it forever. Re-running the side-effect-free checks above on that
+        // retry is harmless, but the engine must only ever be fed once.
         if (bar == _lastBar)
             return;
-        _lastBar = bar;
 
         if (bar == 0)
             return;
@@ -131,6 +144,10 @@ public class TdStopPlacement : Indicator
         var tick = InstrumentInfo?.TickSize ?? 0m;
         if (tick <= 0m)
             return;
+
+        // Past this point the bar WILL be fed to the engine below, so it is safe — and necessary —
+        // to mark it consumed now.
+        _lastBar = bar;
 
         var atr = _atr[closed];
         if (atr < tick)
@@ -266,7 +283,10 @@ public class TdStopPlacement : Indicator
                 _sweepHorizonBars, 100.0 * _swept / _resolved, _swept, _resolved));
         }
 
-        StatsBox.Draw(context, Container, lines);
+        // Stacks below TdSwingStructure's box: pairing the two indicators on one panel is the
+        // documented workflow (their threshold settings are meant to match), and without an
+        // offset the second box would paint over the first.
+        StatsBox.Draw(context, Container, lines, StatsBox.StackedTopOffset);
     }
 
     /// <summary>A preview awaiting its verdict.</summary>

@@ -94,6 +94,8 @@ public class TdSwingStructure : Indicator
     private bool _showEma = true;
     private bool _showStatistics = true;
 
+    // No Panel assignment: the base(true) constructor already places the indicator on the
+    // candles panel, ATAS's equivalent of NinjaTrader's IsOverlay = true.
     public TdSwingStructure() : base(true)
     {
         DataSeries[0] = _swingHigh;
@@ -104,6 +106,12 @@ public class TdSwingStructure : Indicator
 
         Add(_atr);
         Add(_ema);
+
+        // ATAS gates OnRender on EnableCustomDrawing: without these two lines the override is
+        // never called and the statistics box silently does not exist. Every built-in ATAS
+        // indicator that draws (AccountInfoDisplay among them) opts in the same way.
+        EnableCustomDrawing = true;
+        SubscribeToDrawingEvents(DrawingLayouts.Final);
     }
 
     protected override void OnRecalculate()
@@ -133,9 +141,14 @@ public class TdSwingStructure : Indicator
         //
         // Side effect, and a welcome one: the historical pass feeds bars 0..CurrentBar-1 and leaves
         // the forming bar alone — exactly NinjaTrader's behaviour, for free.
+        //
+        // _lastBar is stamped only once this bar is actually about to reach _engine.Update (see
+        // below), not here at entry: if InstrumentInfo is briefly unavailable, the guards below
+        // return without stamping, so the next tick of this SAME forming bar retries the closed
+        // bar instead of losing it forever. Re-running the side-effect-free checks above on that
+        // retry is harmless — they are idempotent — but the engine must only ever be fed once.
         if (bar == _lastBar)
             return;
-        _lastBar = bar;
 
         if (bar == 0)
             return;
@@ -143,7 +156,9 @@ public class TdSwingStructure : Indicator
         var closed = bar - 1;
 
         // The EMA is drawn from the first bar, before the ATR warm-up gate below — matching the
-        // NinjaTrader version, which set the EMA plot before its own early return.
+        // NinjaTrader version, which set the EMA plot before its own early return. Writing the
+        // same value again on a retried tick is harmless: it is a plain assignment, not an
+        // accumulation.
         _emaSeries[closed] = _showEma ? _ema[closed] : 0m;
 
         // The ATR needs its window before the threshold means anything. Seeding the engine earlier
@@ -154,6 +169,10 @@ public class TdSwingStructure : Indicator
         var tick = InstrumentInfo?.TickSize ?? 0m;
         if (tick <= 0m)
             return;
+
+        // Past this point the bar WILL be fed to the engine below, so it is safe — and necessary —
+        // to mark it consumed now.
+        _lastBar = bar;
 
         var unit = _atr[closed];
         if (unit < tick)
@@ -213,7 +232,7 @@ public class TdSwingStructure : Indicator
             _majorLows++;
         }
 
-        if (pivot.HasPrevious && tick > 0m)
+        if (pivot.HasPrevious)
         {
             _legTicks.Add(Math.Abs(pivot.Price - pivot.PreviousPrice) / (double)tick);
             _legBars.Add(pivot.ExtremeBar - pivot.PreviousExtremeBar);
@@ -249,7 +268,7 @@ public class TdSwingStructure : Indicator
                 StatsBox.Mean(_legBars), StatsBox.MedianOf(_legBars)));
         }
 
-        StatsBox.Draw(context, Container, lines);
+        StatsBox.Draw(context, Container, lines, 0);
     }
 
     #region Reglages
