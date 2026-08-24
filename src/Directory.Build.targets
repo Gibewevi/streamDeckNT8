@@ -1,0 +1,56 @@
+<Project>
+
+  <!--
+    Archive des binaires livrables. Remplace le versionnement de `bin/` et `obj/`, retiré le
+    24/08/2026 (voir la note dans .gitignore) : on garde une trace git des sorties de compilation,
+    sans réimporter les 188 fichiers de DLL de dépendances et de caches NuGet qui allaient avec.
+
+    POURQUOI UN DOSSIER À PART. `bin/`, `obj/`, `publish/`, `dist/`, `build/` et `bridge/` sont
+    tous ignorés par git dans ce dépôt. `binaries/` ne l'est pas, et ne doit jamais l'être — c'est
+    le seul endroit où un binaire produit reste suivi. Le nom évite aussi `artifacts/`, que le SDK
+    .NET s'approprie quand `UseArtifactsOutput` est activé : il y déposerait alors les `bin`/`obj`
+    de tous les projets, au milieu de l'archive.
+
+    CE QUI EST COPIÉ : l'assembly du projet et ses fichiers frères (.pdb, .deps.json,
+    .runtimeconfig.json). Jamais les DLL de dépendances — NuGet les restaure, et elles
+    représentaient à elles seules l'essentiel du volume retiré.
+
+    RELEASE UNIQUEMENT : un build Debug pendant le développement ne doit pas salir `git status`.
+  -->
+
+  <PropertyGroup>
+    <TdBinariesRoot>$(MSBuildThisFileDirectory)..\binaries\</TdBinariesRoot>
+    <TdBinariesDir>$(TdBinariesRoot)$(MSBuildProjectName)\</TdBinariesDir>
+  </PropertyGroup>
+
+  <Target Name="TdArchiveReleaseBinaries"
+          AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Release'">
+
+    <!--
+      `$(AssemblyName).*` ne capture que nos propres sorties : les DLL de dépendances portent un
+      autre nom. Un joker MSBuild ignore silencieusement l'absence de correspondance, donc pas de
+      condition à écrire projet par projet — le `.exe` n'existe que pour le bridge, le `.deps.json`
+      que pour les projets SDK modernes.
+
+      Le groupe est déclaré DANS la cible : un joker écrit hors cible serait évalué avant le build,
+      alors que ces fichiers n'existent qu'après.
+    -->
+    <ItemGroup>
+      <TdArchivedBinary Include="$(TargetDir)$(AssemblyName).*" />
+    </ItemGroup>
+
+    <!--
+      SkipUnchangedFiles : les builds SDK sont déterministes, donc reconstruire sans toucher aux
+      sources produit des octets identiques et laisse le fichier archivé intact. C'est ce qui
+      empêche l'archive de réintroduire un churn binaire à chaque build.
+    -->
+    <Copy SourceFiles="@(TdArchivedBinary)"
+          DestinationFolder="$(TdBinariesDir)"
+          SkipUnchangedFiles="true" />
+
+    <Message Importance="high"
+             Text="binaries\$(MSBuildProjectName)\ ← @(TdArchivedBinary->'%(Filename)%(Extension)', ', ')" />
+  </Target>
+
+</Project>

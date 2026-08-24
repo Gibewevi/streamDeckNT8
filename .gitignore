@@ -1,31 +1,37 @@
 # Sortie de `dotnet publish` utilisée pour le déploiement — régénérable, 2,5 Mo dupliqués
-src/StreamDeckBridge/publish/
+**/publish/**
 
 # Logs d'exécution : Stream Deck en écrit dans le dossier du plugin pendant le développement.
 # Les logs applicatifs du cockpit vivent dans %APPDATA%\StreamDeckTrader\logs, hors du dépôt.
-logs/
+**/logs/**
 
-# Note : bin/, obj/ et dist/ sont volontairement versionnés dans ce dépôt et le restent.
-# Les ajouter ici n'aurait aucun effet — .gitignore ne s'applique pas aux fichiers déjà suivis.
+# Sorties de compilation .NET. Elles étaient versionnées jusqu'au 24/08/2026 : chaque
+# modification de source faisait apparaître des dizaines de DLL et de caches binaires dans
+# `git status`, sans que rien n'en dépende — le déploiement repart des sources `.cs` pour
+# l'add-on NT8 et de `dotnet publish` pour le bridge. Les 188 fichiers suivis ont été
+# détachés par `git rm --cached` ; tout se régénère par un `dotnet build`.
+# Seule exception laissée en place : le `node_modules/` vendorisé de l'ancien plugin
+# (`src/streamdeck-ninjatrader/`), dont les `bin/` restent suivis pour ne pas casser un arbre
+# à moitié versionné.
+**/bin/**
+**/obj/**
 
-# Exception à la ligne ci-dessus : la sortie autonome du bridge. `npm run build:bridge` publie
-# en `--self-contained`, ce qui dépose le runtime .NET complet dans un sous-dossier propre au
-# RID — 74 Mo, en double entre `bin/` et `obj/`, entièrement régénérables. Ce qui compte est
-# la copie livrée dans `src/deck-host/bridge/`, déjà ignorée plus bas.
-src/StreamDeckBridge/bin/Release/net8.0/win-x64/
-src/StreamDeckBridge/obj/Release/net8.0/win-x64/
+# NE JAMAIS AJOUTER `binaries/` ICI. C'est le remplacant versionne de ce qui precede : une cible
+# post-build (`src/Directory.Build.targets`) y depose, a chaque `dotnet build -c Release`,
+# l'assembly de chaque projet et ses fichiers freres — sans les DLL de dependances. Voir
+# `binaries/README.md`.
 
 # Hôte propriétaire (remplacement de l'application Stream Deck) : son node_modules représente
 # plusieurs milliers de fichiers, qui rendraient `git status` inexploitable.
-src/deck-host/node_modules/
-src/deck-host/dist/
+**/node_modules/**
+**/dist/**
 # Le bridge est livré dans le dossier de l'hôte (`npm run build:bridge`) : c'est une sortie de
 # publication régénérable, comme src/StreamDeckBridge/publish/.
-src/deck-host/bridge/
+**/bridge/**
 
 # Artefacts d'empaquetage : charge utile assemblee et installateur produit.
-build/
+**/build/**
 
 # Journaux recus d'un poste client pendant un depannage. Ils portent son nom de machine et son
 # nom d'utilisateur Windows, et ne decrivent qu'un incident : ils se lisent, puis se jettent.
-logs-externes/
+logs-externes/**

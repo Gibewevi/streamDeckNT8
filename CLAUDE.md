@@ -197,12 +197,19 @@ Règles en ajoutant un log :
   layout et pousse les limites de sécurité au bridge. Sa WebSocket contrôle l'en-tête `Origin`
   — une page web quelconque pouvait sinon réécrire le layout et désactiver la macro de sécurité.
   Ne pas retirer ce contrôle.
-- **Les artefacts de build sont versionnés** (`bin/`, `obj/`, et `dist/` de l'ancien plugin) : une
-  modification de source fait apparaître des dizaines de fichiers binaires dans `git status`.
-  C'est attendu ; ne pas « nettoyer » ces fichiers sans demander. Le `.gitignore` ne couvre que ce
-  qui est régénérable et volumineux — `src/deck-host/node_modules/`, `dist/` et `bridge/` de
-  l'hôte, et les dossiers `publish/`. Il ne s'applique pas aux fichiers déjà suivis, d'où la note
-  explicite dans le fichier.
+- **`bin/` et `obj/` ne sont plus versionnés depuis le 24/08/2026 — `binaries/` les remplace.**
+  Les 188 fichiers qui y étaient suivis (DLL de dépendances, caches NuGet) ont été détachés, et
+  une cible post-build partagée, `src/Directory.Build.targets`, archive à la place **l'assembly de
+  chaque projet et ses fichiers frères seuls** dans `binaries/<NomDuProjet>/`. Trois propriétés de
+  ce dispositif comptent : elle ne tourne qu'en **Release** (un build Debug ne salit pas
+  `git status`), les builds SDK sont **déterministes** donc reconstruire sans toucher aux sources
+  ne réécrit rien, et `binaries/` **ne doit jamais entrer dans `.gitignore`** — c'est le seul
+  endroit du dépôt où un binaire reste suivi. Détails et rôle de chaque sous-dossier :
+  `binaries/README.md`.
+  Reste aussi versionné : le `dist/` et le `node_modules/` vendorisés de l'ancien plugin
+  (`src/streamdeck-ninjatrader/`), y compris ses deux fichiers sous `node_modules/typescript/bin/`
+  — les détacher laisserait un arbre à moitié versionné. Rappel : `.gitignore` ne s'applique pas
+  aux fichiers déjà suivis, il faut un `git rm --cached`.
 - **`TdSwingEngine.cs` et `TdStopSelector.cs` sont compilés par TROIS chaînes** : NinjaScript chez le
   trader, `NinjaTrader.Scripts.csproj`, et le projet ATAS `src/Atas.Indicators.TradeDeck/` qui les
   lie par `<Compile Include>`. Ils doivent donc rester en **C# 9 / `net48`** — namespace à portée de
