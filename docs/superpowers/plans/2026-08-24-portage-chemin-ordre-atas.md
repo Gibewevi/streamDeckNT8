@@ -1609,7 +1609,7 @@ un nombre à chaque ouverture.
   `void PublishNow()`, `string TrackedAccount { get; }`, `string TrackedInstrument { get; }`,
   `void Dispose()`.
 
-- [ ] **Étape 1 : écrire le résolveur de contexte**
+- [x] **Étape 1 : écrire le résolveur de contexte**
 
 Créer `src/Atas.Strategy.TradeDeck/ContextResolver.cs` :
 
@@ -1896,7 +1896,7 @@ internal sealed class ContextResolver
 }
 ```
 
-- [ ] **Étape 2 : écrire le publieur d'état**
+- [x] **Étape 2 : écrire le publieur d'état**
 
 Créer `src/Atas.Strategy.TradeDeck/StatePublisher.cs` :
 
@@ -2230,7 +2230,7 @@ internal sealed class StatePublisher : IDisposable
 }
 ```
 
-- [ ] **Étape 3 : brancher la publication et les commandes de suivi**
+- [x] **Étape 3 : brancher la publication et les commandes de suivi**
 
 Dans `src/Atas.Strategy.TradeDeck/TradeDeckStrategy.cs`, ajouter les champs sous `_bridge` :
 
@@ -2372,7 +2372,7 @@ et ajouter les trois méthodes :
 
 (ajouter `using System.Collections.Generic;` en tête de fichier.)
 
-- [ ] **Étape 4 : compiler**
+- [x] **Étape 4 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -2381,6 +2381,8 @@ dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Relea
 Attendu : `Build succeeded`.
 
 - [ ] **Étape 5 : vérifier la publication — recette étape 2**
+
+> ⏸ Non exécutée : exige ATAS X ouvert, un compte de simulation et le bridge lancé. Voir la note de fin de tâche 3.
 
 Déployer le DLL, redémarrer la stratégie, bridge lancé, hôte TradeDeck lancé, puis :
 
@@ -2401,7 +2403,7 @@ Attendu :
   `TotalClosedPnL` qui a été lu — corriger avant de continuer, sinon la macro refusera tout dès
   l'ouverture sur un compte en perte historique.
 
-- [ ] **Étape 6 : committer**
+- [x] **Étape 6 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
