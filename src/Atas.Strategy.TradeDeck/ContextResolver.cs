@@ -41,6 +41,15 @@ internal sealed class ContextResolver
     }
 
     /// <summary>
+    /// Rate limit for the ambiguous-prefix warning below — FindSecurity runs on the 500ms
+    /// publication path (via StatePublisher), so an unguarded warning on every tick a prefix stays
+    /// ambiguous would produce hundreds of thousands of log lines a day. Same pattern as
+    /// _lastPnlWarning in the NinjaTrader add-on's StatePublisher: one warning per minute, not one
+    /// per resolution.
+    /// </summary>
+    private DateTime _lastAmbiguousSecurityWarning = DateTime.MinValue;
+
+    /// <summary>
     /// Matches the deck's instrument string against what the connector knows.
     ///
     /// Three passes, narrowest first. The deck sends whatever the trader typed on the Instrument
@@ -56,7 +65,7 @@ internal sealed class ContextResolver
         if (securities == null) return null;
 
         var wanted = name.Trim();
-        Security? prefix = null;
+        List<Security>? prefixCandidates = null;
 
         foreach (var security in securities)
         {
@@ -65,19 +74,51 @@ internal sealed class ContextResolver
             if (string.Equals(security.Code, wanted, StringComparison.OrdinalIgnoreCase)) return security;
             if (string.Equals(security.Instrument, wanted, StringComparison.OrdinalIgnoreCase)) return security;
 
-            // Kept as a fallback rather than returned at once: an exact match found later in the
-            // list must still win over a prefix match found earlier.
-            if (prefix == null && !string.IsNullOrEmpty(security.Code) &&
-                security.Code.StartsWith(wanted, StringComparison.OrdinalIgnoreCase))
+            // Collected rather than returned at once: an exact match found later in the list must
+            // still win over a prefix match found earlier, and — when more than one security
+            // shares the prefix — the choice below must not depend on which one the connector
+            // happened to enumerate first.
+            if (!string.IsNullOrEmpty(security.Code) && security.Code.StartsWith(wanted, StringComparison.OrdinalIgnoreCase))
             {
-                prefix = security;
+                (prefixCandidates ??= new List<Security>()).Add(security);
             }
         }
 
-        if (prefix != null) return prefix;
+        if (prefixCandidates == null || prefixCandidates.Count == 0)
+        {
+            SdLog.Warn("Instrument not found: {0}", name);
+            return null;
+        }
 
-        SdLog.Warn("Instrument not found: {0}", name);
-        return null;
+        if (prefixCandidates.Count == 1) return prefixCandidates[0];
+
+        // AMBIGUOUS PREFIX, RESOLVED DETERMINISTICALLY — AND SAID OUT LOUD. Several contract
+        // months can share a root ("MNQ" prefixes both a December and a March contract).
+        // Whichever the connector happened to list first is not a criterion: it can change between
+        // reconnects, which would silently move the SAME deck command onto a DIFFERENT contract
+        // with nothing in the log to explain why an order landed somewhere unexpected.
+        //
+        // Tie-break: soonest Expiration first (the front month is what a trader typing the bare
+        // root almost always means), with securities that carry no real expiration — Expiration
+        // defaults to DateTime.MinValue for those — pushed to the end rather than the front, since
+        // a non-expiring symbol matching by prefix coincidence is the least likely intended match.
+        // Code is the final tie-break so the pick is reproducible even if two candidates somehow
+        // share an expiration.
+        var chosen = prefixCandidates
+            .OrderBy(s => s.Expiration == default ? DateTime.MaxValue : s.Expiration)
+            .ThenBy(s => s.Code, StringComparer.OrdinalIgnoreCase)
+            .First();
+
+        if ((DateTime.UtcNow - _lastAmbiguousSecurityWarning).TotalMinutes >= 1)
+        {
+            _lastAmbiguousSecurityWarning = DateTime.UtcNow;
+            var rejected = string.Join(", ", prefixCandidates.Where(s => s != chosen).Select(s => s.Code));
+            SdLog.EventWarn("Instrument",
+                "Ambiguous instrument '{0}' matched {1} securities by prefix — chose {2} (front month), rejected: {3}",
+                name, prefixCandidates.Count, chosen.Code, rejected);
+        }
+
+        return chosen;
     }
 
     /// <summary>

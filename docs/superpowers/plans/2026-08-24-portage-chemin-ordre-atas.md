@@ -122,9 +122,14 @@ trader expose lui aussi des comptes roulés, c'est un ajout à demander — pas 
 Établis **par réflexion sur les assemblies réelles** de `C:\Program Files\ATAS X`, pas par lecture
 de la documentation. Chacun est repris dans la tâche concernée.
 
-1. **Il faut une septième référence : `StockSharp.Messages`.** `Portfolio.ConnectionState` est un
-   `Nullable<ConnectionStates>`, et `ConnectionStates` vit dans `StockSharp.Messages.dll`, pas dans
-   `ATAS.DataFeedsCore.dll`. La DLL est livrée par ATAS, dans le même dossier.
+1. **`Portfolio.ConnectionState` n'est PAS dans `StockSharp.Messages`, contrairement à ce que cette
+   note affirmait initialement.** `Portfolio.ConnectionState` est bien un `Nullable<ConnectionStates>`,
+   mais ce `ConnectionStates`-là vit dans `Utils.Common.Network.Client` — déjà référencé par le
+   projet pour une autre raison, donc aucune septième référence n'est nécessaire.
+   `StockSharp.Messages` déclare bien un type portant le même nom court, mais c'est un type sans
+   rapport : s'y référencer aurait fait échouer l'opérateur `==` avec un `CS0019` trompeur plutôt
+   que de résoudre le vrai type. Corrigé à la tâche 3 après compilation en échec ; voir le
+   commentaire dans `Atas.Strategy.TradeDeck.csproj`.
 2. **`Newtonsoft.Json` se référence par `HintPath`, pas par NuGet.** ATAS X livre
    `Newtonsoft.Json.dll` en 13.0.3 — exactement la version que le projet add-on utilise déjà. La
    référencer là où ATAS la charge évite deux Newtonsoft dans le même `AppDomain`, et suit ce que le

@@ -60,14 +60,17 @@
       <Private>false</Private>
     </Reference>
     <!--
-      ECART : le brief ne listait que six references. `Portfolio.ConnectionState` est un
-      `Nullable<ConnectionStates>` et ce type vit dans StockSharp.Messages.dll, pas dans
-      ATAS.DataFeedsCore.dll. Constate en inspectant les assemblies reelles, pas suppose.
+      LE PLAN ATTENDAIT UNE SEPTIEME REFERENCE, StockSharp.Messages, ET S'EST TROMPE.
+      `Portfolio.ConnectionState` est bien un `Nullable<ConnectionStates>`, mais ce type-la vit dans
+      `Utils.Common.Network.Client` (deja reference ci-dessus pour une autre raison), pas dans
+      StockSharp.Messages.dll. Constate a la tache 3, a la compilation : StockSharp.Messages declare
+      SON PROPRE enum sans rapport, portant par coincidence le meme nom court `ConnectionStates`, ce
+      qui a fait echouer l'operateur `==` avec un CS0019 trompeur ("impossible d'appliquer '==' a
+      ConnectionStates? et ConnectionStates") plutot qu'une reference manquante evidente. La
+      reference StockSharp.Messages a ete retiree : rien dans ce projet n'en depend. Ne pas la
+      rajouter pour ce besoin — voir `StatePublisher.cs`, qui utilise
+      `Utils.Common.Network.Client.ConnectionStates`.
     -->
-    <Reference Include="StockSharp.Messages">
-      <HintPath>$(ATAS_BASE)\StockSharp.Messages.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
     <!--
       ECART : Newtonsoft par HintPath et non par NuGet. ATAS X livre la 13.0.3, exactement celle du
       projet add-on. La prendre la ou ATAS la charge evite deux Newtonsoft dans le meme AppDomain.
