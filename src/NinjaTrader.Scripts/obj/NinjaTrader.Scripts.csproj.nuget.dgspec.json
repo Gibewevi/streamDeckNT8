@@ -1,29 +1,38 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj": {}
+    "D:\\Github\\streamDeckNT8\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj": {}
   },
   "projects": {
-    "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj": {
+    "D:\\Github\\streamDeckNT8\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj",
+        "projectUniqueName": "D:\\Github\\streamDeckNT8\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj",
         "projectName": "NinjaTrader.Scripts.Verification",
-        "projectPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj",
-        "packagesPath": "C:\\Users\\pixel\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\pixel\\Desktop\\stream deck\\src\\NinjaTrader.Scripts\\obj\\",
+        "projectPath": "D:\\Github\\streamDeckNT8\\src\\NinjaTrader.Scripts\\NinjaTrader.Scripts.csproj",
+        "packagesPath": "C:\\Users\\berna\\.nuget\\packages\\",
+        "outputPath": "D:\\Github\\streamDeckNT8\\src\\NinjaTrader.Scripts\\obj\\",
         "projectStyle": "PackageReference",
+        "fallbackFolders": [
+          "C:\\Users\\berna\\AppData\\Roaming\\Godot\\mono\\GodotNuGetFallbackFolder",
+          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+        ],
         "configFilePaths": [
-          "C:\\Users\\pixel\\AppData\\Roaming\\NuGet\\NuGet.Config"
+          "C:\\Users\\berna\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Users\\berna\\AppData\\Roaming\\NuGet\\config\\Godot.Offline.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
         "originalTargetFrameworks": [
           "net48"
         ],
         "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
           "net48": {
+            "framework": "net48",
             "targetAlias": "net48",
             "projectReferences": {}
           }
@@ -38,12 +47,13 @@
           "auditLevel": "low",
           "auditMode": "direct"
         },
-        "SdkAnalysisLevel": "9.0.300"
+        "SdkAnalysisLevel": "10.0.300"
       },
       "frameworks": {
         "net48": {
+          "framework": "net48",
           "targetAlias": "net48",
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.305\\RuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.302\\RuntimeIdentifierGraph.json"
         }
       }
     }

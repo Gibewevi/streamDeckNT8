@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NinjaTrader.Scripts.Verification")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9d23149d5c99f9f927721c343d324c8957fbf6ba")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+414f97fea7631613f716b8b4bba58b3859c08c7d")]
 [assembly: System.Reflection.AssemblyProductAttribute("NinjaTrader.Scripts.Verification")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NinjaTrader.Scripts.Verification")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
