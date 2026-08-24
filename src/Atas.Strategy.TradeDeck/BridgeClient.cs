@@ -23,8 +23,26 @@ internal sealed class BridgeClient : IDisposable
     /// Framework 4.8. What changed is the punishment: 4.8 aborted the socket, .NET 10 throws. The
     /// reason the guard exists has not changed at all — the state publisher's timer and the receive
     /// loop both send, and a lost frame is a lost order confirmation.
+    ///
+    /// EVERY DISPOSAL OF _ws TAKES THIS LOCK TOO, not just SendAsync. SendAsync captures its own
+    /// local reference to the socket before awaiting the wire call; disposing that same object out
+    /// from under an in-flight await — from Stop() or from the reconnect loop replacing a dead
+    /// socket — throws ObjectDisposedException on the send path, silently swallowed by SendAsync's
+    /// own catch, at exactly the moment (reconnect or shutdown) a lost frame matters most. See
+    /// CloseSocket and DisposeSocketAsync.
     /// </summary>
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+
+    /// <summary>
+    /// Bound on how long a disposal path waits for the send lock. SendAsync's wire call uses
+    /// CancellationToken.None (a WebSocket send cannot be safely cancelled mid-frame), so a send
+    /// stuck against a dead TCP peer could hold the lock far longer than the caller expects.
+    /// Waiting on it without a bound here would turn Stop() — called synchronously from
+    /// OnStopping/OnSuspended — into a hung strategy shutdown, or stall the reconnect loop
+    /// indefinitely. A bounded wait that expires is a diagnosable log line; an unbounded one is
+    /// silence followed by "the deck stopped responding."
+    /// </summary>
+    private const int TeardownLockTimeoutMs = 2000;
 
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
@@ -66,16 +84,33 @@ internal sealed class BridgeClient : IDisposable
             try
             {
                 // Dispose the previous socket before replacing it, otherwise every reconnect leaks
-                // a ClientWebSocket for the life of the session.
+                // a ClientWebSocket for the life of the session. Locked: this socket may have been
+                // Open a moment ago, and a SendAsync started against it can still be awaiting the
+                // wire call here.
                 var previous = _ws;
                 if (previous != null)
                 {
                     _ws = null;
-                    try { previous.Dispose(); } catch { /* already gone */ }
+                    await DisposeSocketAsync(previous, "reconnect").ConfigureAwait(false);
                 }
 
-                _ws = new ClientWebSocket();
-                await _ws.ConnectAsync(new Uri(_url), ct);
+                var next = new ClientWebSocket();
+                _ws = next;
+                try
+                {
+                    await next.ConnectAsync(new Uri(_url), ct);
+                }
+                catch
+                {
+                    // Failed or was cancelled before the socket ever reached Open — SendAsync checks
+                    // State before touching the socket, so nothing could have started sending on it.
+                    // Safe to dispose directly, no send lock needed. Clear the field first so a
+                    // concurrent Stop() does not try to close the same object a second time.
+                    if (ReferenceEquals(_ws, next)) _ws = null;
+                    try { next.Dispose(); } catch { /* already gone */ }
+                    throw;
+                }
+
                 SdLog.Event("Connection", "Connected to bridge at {0}", _url);
                 ConnectionChanged?.Invoke(true);
 
@@ -182,21 +217,57 @@ internal sealed class BridgeClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Disposes a socket that may have been Open a moment ago, once no send is in flight on it —
+    /// bounded, see TeardownLockTimeoutMs. Used by the reconnect loop, which runs on its own async
+    /// task and can afford to await the lock.
+    /// </summary>
+    private async Task DisposeSocketAsync(ClientWebSocket socket, string reason)
+    {
+        var acquired = await _sendLock.WaitAsync(TeardownLockTimeoutMs).ConfigureAwait(false);
+        if (!acquired)
+        {
+            SdLog.EventWarn("Connection",
+                "Timed out after {0}ms waiting for an in-flight send before disposing the socket ({1}) — disposing anyway",
+                TeardownLockTimeoutMs, reason);
+        }
+
+        try { socket.Dispose(); }
+        catch { /* already gone */ }
+        finally { if (acquired) _sendLock.Release(); }
+    }
+
+    /// <summary>
+    /// Synchronous twin of DisposeSocketAsync for Stop(), which is called synchronously from
+    /// OnStopping/OnSuspended and cannot await. Same bound, same reasoning.
+    /// </summary>
     private void CloseSocket()
     {
+        var socket = _ws;
+        _ws = null;
+        if (socket == null) return;
+
+        var acquired = _sendLock.Wait(TeardownLockTimeoutMs);
+        if (!acquired)
+        {
+            SdLog.EventWarn("Connection",
+                "Timed out after {0}ms waiting for an in-flight send before closing the socket — closing anyway",
+                TeardownLockTimeoutMs);
+        }
+
         try
         {
-            if (_ws is { State: WebSocketState.Open })
+            if (socket.State == WebSocketState.Open)
             {
-                _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutting down", CancellationToken.None)
+                socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutting down", CancellationToken.None)
                     .GetAwaiter().GetResult();
             }
         }
         catch { /* the socket is going away either way */ }
         finally
         {
-            _ws?.Dispose();
-            _ws = null;
+            try { socket.Dispose(); } catch { /* already gone */ }
+            if (acquired) _sendLock.Release();
         }
     }
 
