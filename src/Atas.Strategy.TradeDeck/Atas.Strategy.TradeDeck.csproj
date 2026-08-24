@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ATAS X uniquement, comme le projet indicateurs : son runtimeconfig.json annonce net10.0 et son
+    dossier d'installation est `C:\Program Files\ATAS X` — a ne pas confondre avec l'ATAS classique,
+    en `Program Files (x86)`, qui est en net10.0-windows et WPF.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>annotations</Nullable>
+    <UseWPF>false</UseWPF>
+    <RootNamespace>TradeDeck.Atas.Strategy</RootNamespace>
+    <AssemblyName>TradeDeck.Strategy</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ATAS_BASE Condition="'$(ATAS_BASE)' == ''">C:\Program Files\ATAS X</ATAS_BASE>
+  </PropertyGroup>
+
+  <!--
+    LE SCELLEMENT N'EST PAS COPIE ICI, IL EST LU LA-BAS.
+    Un seul fichier sur le disque, deux compilateurs. Sa forme canonique doit rester identique au
+    caractere pres a `deck-host/src/seal.ts` et a `Bitlearn/lib/tradeDeck/integrity.js` : une
+    quatrieme implementation manuscrite serait le prochain incident.
+
+    Le fichier reste physiquement dans le projet add-on parce que l'installateur ramasse
+    `src/NinjaTrader.AddOn.StreamDeck/**/*.cs` pour la charge utile NinjaScript. Il reste donc en
+    C# 9 / net48 : une construction plus recente compile ici et casse la compilation NinjaScript
+    ENTIERE chez le trader.
+  -->
+  <ItemGroup>
+    <Compile Include="..\NinjaTrader.AddOn.StreamDeck\Utilities\JournalSeal.cs"
+             Link="Shared\JournalSeal.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="ATAS.Indicators">
+      <HintPath>$(ATAS_BASE)\ATAS.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ATAS.Strategies">
+      <HintPath>$(ATAS_BASE)\ATAS.Strategies.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ATAS.DataFeedsCore">
+      <HintPath>$(ATAS_BASE)\ATAS.DataFeedsCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Attributes">
+      <HintPath>$(ATAS_BASE)\OFT.Attributes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Localization">
+      <HintPath>$(ATAS_BASE)\OFT.Localization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Utils.Common">
+      <HintPath>$(ATAS_BASE)\Utils.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!--
+      ECART : le brief ne listait que six references. `Portfolio.ConnectionState` est un
+      `Nullable<ConnectionStates>` et ce type vit dans StockSharp.Messages.dll, pas dans
+      ATAS.DataFeedsCore.dll. Constate en inspectant les assemblies reelles, pas suppose.
+    -->
+    <Reference Include="StockSharp.Messages">
+      <HintPath>$(ATAS_BASE)\StockSharp.Messages.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!--
+      ECART : Newtonsoft par HintPath et non par NuGet. ATAS X livre la 13.0.3, exactement celle du
+      projet add-on. La prendre la ou ATAS la charge evite deux Newtonsoft dans le meme AppDomain.
+      Repli si la version livree devenait trop ancienne :
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" ExcludeAssets="runtime" />
+    -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(ATAS_BASE)\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

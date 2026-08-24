@@ -713,7 +713,7 @@ connecté — **étape 1 de la recette**.
   `void Dispose()`.
 - Produit : `TradeDeck.Atas.Strategy.TradeDeckStrategy : ChartStrategy`.
 
-- [ ] **Étape 1 : créer le projet**
+- [x] **Étape 1 : créer le projet**
 
 Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 
@@ -803,7 +803,7 @@ Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 </Project>
 ```
 
-- [ ] **Étape 2 : compiler le projet vide pour valider les références**
+- [x] **Étape 2 : compiler le projet vide pour valider les références**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -813,7 +813,7 @@ Attendu : `Build succeeded`. Cette compilation ne contient encore que `JournalSe
 **preuve que la tâche 1 a bien retiré toutes les dépendances NinjaTrader**. Une erreur `CS0246` ici
 renvoie à la tâche 1, pas au projet.
 
-- [ ] **Étape 3 : écrire le journal de bord**
+- [x] **Étape 3 : écrire le journal de bord**
 
 Créer `src/Atas.Strategy.TradeDeck/SdLog.cs` :
 
@@ -1015,7 +1015,7 @@ internal static class SdLog
 }
 ```
 
-- [ ] **Étape 4 : écrire l'enveloppe du protocole**
+- [x] **Étape 4 : écrire l'enveloppe du protocole**
 
 Créer `src/Atas.Strategy.TradeDeck/BridgeMessage.cs` :
 
@@ -1161,7 +1161,7 @@ internal sealed class BridgeMessage
 }
 ```
 
-- [ ] **Étape 5 : écrire le client du pont**
+- [x] **Étape 5 : écrire le client du pont**
 
 Créer `src/Atas.Strategy.TradeDeck/BridgeClient.cs` :
 
@@ -1379,7 +1379,7 @@ internal sealed class BridgeClient : IDisposable
 }
 ```
 
-- [ ] **Étape 6 : écrire le point d'entrée**
+- [x] **Étape 6 : écrire le point d'entrée**
 
 Créer `src/Atas.Strategy.TradeDeck/TradeDeckStrategy.cs`. Cette version est **volontairement
 minimale** : elle ouvre la WebSocket et répond `UNSUPPORTED_ACTION` à tout. Les tâches suivantes la
@@ -1528,7 +1528,7 @@ public class TradeDeckStrategy : ChartStrategy
 }
 ```
 
-- [ ] **Étape 7 : compiler**
+- [x] **Étape 7 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -1538,6 +1538,8 @@ Attendu : `Build succeeded`, et une ligne
 `binaries\Atas.Strategy.TradeDeck\ ← TradeDeck.Strategy.dll, TradeDeck.Strategy.pdb, …`.
 
 - [ ] **Étape 8 : charger la stratégie dans ATAS et vérifier — recette étape 1**
+
+> ⏸ Non exécutée : exige ATAS X ouvert et le bridge lancé. Voir la note de fin de tâche 2.
 
 1. Copier le DLL :
    ```powershell
@@ -1566,7 +1568,7 @@ Attendu, **et chaque point doit être constaté, pas supposé** :
 - arrêter la stratégie fait apparaître `NinjaTrader Add-On disconnected` côté bridge et
   `=== TradeDeck ATAS strategy session ended ===` côté stratégie.
 
-- [ ] **Étape 9 : committer**
+- [x] **Étape 9 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
