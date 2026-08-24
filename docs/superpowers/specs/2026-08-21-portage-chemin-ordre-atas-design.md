@@ -137,6 +137,15 @@ refuse les entrées. Sans lui la macro se contourne en tapant l'ordre à la main
 devient décorative au moment exact où elle compte ». Il ne réduit jamais une position et ne poste
 jamais d'ordre : le pire cas d'un faux positif est un ordre annulé, jamais un trader enfermé.
 
+**Vérifié compatible avec la règle « pas d'entrée avant une heure » (0.29.0), sans code
+supplémentaire.** `GuardEnforcer` ne connaît aucune raison de refus en dur : il reçoit
+`{blocked, reason, maxContracts}` de `setGuardPolicy` et applique le même test générique — l'ordre
+agrandit-il l'exposition ? — quelle que soit `reason`. `beforeSessionStart` emprunte donc
+exactement le même chemin que `dailyLoss` ou `tradeLimit`, et le composant ATAS n'a rien de
+spécifique à écrire pour elle. L'heure locale, l'armement et le calcul du compte à rebours sont une
+décision **du bridge seul** (`SafetyMacro`, non touché par ce portage) : le composant ATAS ne lit
+jamais l'horloge, il relaie `setGuardPolicy` tel quel, comme pour toute autre règle de séance.
+
 ## La publication d'état
 
 | Champ du protocole | Source ATAS |
@@ -268,7 +277,10 @@ Recette, dans cet ordre, chaque étape bloquant la suivante :
    un « OK » ne signifiait pas accepté ;
 5. `NO_MARKET_DATA` refuse bien une limite hors flux ;
 6. les 12 autres commandes, une par une, position ouverte ;
-7. `GuardEnforcer` : macro armée, ordre tapé **dans le DOM ATAS** → annulé, deck informé ;
+7. `GuardEnforcer` : macro armée, ordre tapé **dans le DOM ATAS** → annulé, deck informé. Le cas le
+   plus simple à rejouer à la demande est `beforeSessionStart` : régler l'heure quelques minutes
+   dans le futur arme le refus sans attendre une vraie perte de journée, contrairement à
+   `dailyLoss` ou `tradeLimit` qu'il faut provoquer par des trades réels ;
 8. le journal : une ligne par exécution, scellée, et le deck-host la téléverse sans modification.
 
 Les étapes 3 et 4 sont le vrai jalon : elles prouvent le transport, la sérialisation, la résolution
