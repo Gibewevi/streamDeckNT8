@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 
+using ATAS.Indicators;
 using ATAS.Strategies.Chart;
 
 namespace TradeDeck.Atas.Strategy;
@@ -70,7 +71,12 @@ public class TradeDeckStrategy : ChartStrategy
             _bridge.Start();
 
             _resolver = new ContextResolver(() => Connector);
-            _publisher = new StatePublisher(_resolver, _bridge, StateIntervalMs);
+            // TradingManager's getter is protected on ATAS.Indicators.Indicator: reachable from this
+            // class (TradeDeckStrategy derives from ChartStrategy derives from Indicator), NOT from
+            // StatePublisher. Passed in as a delegate rather than exposing it sideways — same reason
+            // `this` is handed over as a ChartStrategy rather than letting StatePublisher reach for
+            // a static reference to it. See StatePublisher.ReportClassicSurfaceDiagnostics.
+            _publisher = new StatePublisher(_resolver, _bridge, () => this, () => TradingManager, StateIntervalMs);
             // Empty instrument on purpose: a hardcoded contract goes stale and would make the deck
             // show — and trade — something the trader never picked. The bridge replays its
             // selection on every connection.

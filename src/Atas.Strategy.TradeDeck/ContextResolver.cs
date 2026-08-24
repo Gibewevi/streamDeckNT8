@@ -15,6 +15,25 @@ namespace TradeDeck.Atas.Strategy;
 /// the chart does not display. Every lookup below therefore goes through Connector.Portfolios /
 /// Connector.Securities, and never through ChartStrategy.Portfolio / .Security.
 /// </summary>
+/// <summary>
+/// What <see cref="ContextResolver.GetAccountNames(out AccountResolutionStats)"/> saw while
+/// resolving accounts — not just the result, but why anything that didn't make it got dropped.
+///
+/// Exists for one diagnosis: "availableAccounts is empty, and we cannot tell whether the connector
+/// is absent, connected but portfolio-less, or full of portfolios this method is silently
+/// rejecting." That question came up first while field-testing against classic ATAS, with a
+/// connected demo account visible in the platform UI but nothing on the deck's Account key.
+/// </summary>
+internal readonly struct AccountResolutionStats
+{
+    public bool ConnectorNull { get; init; }
+    public bool PortfoliosNull { get; init; }
+    public int PortfolioCount { get; init; }
+    public int DroppedBlankAccountId { get; init; }
+    public int DroppedReplay { get; init; }
+    public int DuplicatesMerged { get; init; }
+}
+
 internal sealed class ContextResolver
 {
     private readonly Func<IDataFeedConnector?> _connector;
@@ -157,32 +176,84 @@ internal sealed class ContextResolver
     /// IsRealAccount is a FACT ATAS gives us, not a naming convention: the NinjaTrader side had to
     /// infer it from the provider, and the bridge still infers it from a "Sim" prefix.
     /// </summary>
-    public List<string> GetAccountNames()
+    public List<string> GetAccountNames() => GetAccountNames(out _);
+
+    /// <summary>
+    /// Same resolution as <see cref="GetAccountNames()"/>, plus a snapshot of WHY each portfolio did
+    /// or didn't make it into the result.
+    ///
+    /// Added while field-testing against classic ATAS: the deck's Account key came back empty
+    /// (availableAccounts=[]) with a connected demo account sitting right there in the platform, and
+    /// nothing in the log could tell whether Connector.Portfolios was null, empty, or full of
+    /// portfolios this method was silently dropping. The overload keeps the exact same filtering as
+    /// the no-stats method — same list, same order — it just also counts what happened along the
+    /// way, in the one enumeration this method already does.
+    /// </summary>
+    public List<string> GetAccountNames(out AccountResolutionStats stats)
     {
         var live = new List<string>();
         var sim = new List<string>();
 
-        var portfolios = Connector?.Portfolios;
+        var connector = Connector;
+        var portfolios = connector?.Portfolios;
+
+        var portfolioCount = 0;
+        var droppedBlankAccountId = 0;
+        var droppedReplay = 0;
+
         if (portfolios != null)
         {
-            foreach (var portfolio in portfolios)
+            // DEFENSIVE ON PURPOSE: this runs on the 500ms state-publish tick, off the ATAS chart
+            // thread that owns portfolio mutation. An enumerator that faults partway through — the
+            // connector rebuilding its portfolio list mid-walk, a broker's Portfolio object throwing
+            // out of IsReplay() — must cost this tick's diagnostics, never the tick itself; the
+            // stateUpdate below still has to go out with whatever was counted so far.
+            try
             {
-                var name = portfolio?.AccountID;
-                if (string.IsNullOrWhiteSpace(name)) continue;
+                foreach (var portfolio in portfolios)
+                {
+                    portfolioCount++;
 
-                // A REPLAY PORTFOLIO IS NOT A TRADABLE ACCOUNT. Replay walks historical data and
-                // produces real Order and MyTrade objects: offering it on the Account key would let
-                // the trader place "orders" that go nowhere while the journal files fabricated
-                // trades to Bitlearn as if they had happened. The NinjaTrader add-on guarded the
-                // same hazard by excluding the accounts named Backtest and Playback101 — ATAS states
-                // it as a fact instead of a name.
-                if (portfolio!.IsReplay()) continue;
+                    var name = portfolio?.AccountID;
+                    if (string.IsNullOrWhiteSpace(name)) { droppedBlankAccountId++; continue; }
 
-                if (portfolio.IsRealAccount) live.Add(name); else sim.Add(name);
+                    // A REPLAY PORTFOLIO IS NOT A TRADABLE ACCOUNT. Replay walks historical data and
+                    // produces real Order and MyTrade objects: offering it on the Account key would
+                    // let the trader place "orders" that go nowhere while the journal files
+                    // fabricated trades to Bitlearn as if they had happened. The NinjaTrader add-on
+                    // guarded the same hazard by excluding the accounts named Backtest and
+                    // Playback101 — ATAS states it as a fact instead of a name.
+                    if (portfolio!.IsReplay()) { droppedReplay++; continue; }
+
+                    if (portfolio.IsRealAccount) live.Add(name); else sim.Add(name);
+                }
+            }
+            catch (Exception ex)
+            {
+                SdLog.TraceEvent("Account",
+                    "Portfolios enumeration faulted after {0} portfolio(s) seen ({1}) — reporting what was counted so far",
+                    portfolioCount, ex.GetType().Name);
             }
         }
 
-        return live.Concat(sim).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var addedBeforeDistinct = live.Count + sim.Count;
+        var resolved = live.Concat(sim).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        stats = new AccountResolutionStats
+        {
+            ConnectorNull = connector == null,
+            PortfoliosNull = portfolios == null,
+            PortfolioCount = portfolioCount,
+            DroppedBlankAccountId = droppedBlankAccountId,
+            DroppedReplay = droppedReplay,
+            // Not a drop the loop above ever explains — it can only appear if two distinct
+            // portfolios resolve to the same AccountID (case-insensitively) and the final Distinct()
+            // merges them. Reported separately so an "otherwise" always has somewhere to go instead
+            // of a silent gap between portfolioCount and resolved.Count.
+            DuplicatesMerged = addedBeforeDistinct - resolved.Count,
+        };
+
+        return resolved;
     }
 
     public List<Order> FindActiveOrders(Portfolio? portfolio, Security? security)

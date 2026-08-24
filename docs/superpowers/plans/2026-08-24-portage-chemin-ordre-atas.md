@@ -1,23 +1,37 @@
-# Portage du chemin d'ordre vers ATAS X — plan d'implémentation
+# Portage du chemin d'ordre vers ATAS classique — plan d'implémentation
 
 > **Pour un agent :** SOUS-COMPÉTENCE REQUISE — utiliser `superpowers:subagent-driven-development`
 > (recommandé) ou `superpowers:executing-plans` pour exécuter ce plan tâche par tâche. Les étapes
 > utilisent la syntaxe à cases (`- [ ]`).
 
-**Objectif :** livrer une `ChartStrategy` ATAS X qui parle le protocole du bridge à la place de
-l'add-on NinjaTrader — les 13 commandes, la publication d'état, les refus, les rejets et le journal.
+**Objectif :** livrer une `ChartStrategy` ATAS **classique** qui parle le protocole du bridge à la
+place de l'add-on NinjaTrader — les 13 commandes, la publication d'état, les refus, les rejets et le
+journal.
+
+> **La cible est ATAS classique, pas ATAS X.** Le support ATAS l'a confirmé par écrit : les Chart
+> Strategies n'existent pas sur ATAS X (Beta). Tout ce plan vise donc `C:\Program Files (x86)\ATAS
+> Platform` et `%APPDATA%\ATAS\Strategies`.
 
 **Architecture :** le bridge et le deck-host ne connaissent que `docs/protocol.md` ; ils ne savent
 pas qui est au bout du fil. Un client WebSocket ATAS qui parle ce protocole se branche à leur place
 sans qu'ils s'en aperçoivent. **C'est la propriété qui rend ce portage possible, et aucune tâche de
-ce plan ne modifie une ligne du bridge ou du deck-host.** La stratégie doit être attachée à un
-graphique et démarrée — n'importe lequel, affichant n'importe quoi : la sélection du deck est
-résolue contre `Connector.Portfolios` / `Connector.Securities` et **posée explicitement** sur chaque
-ordre.
+ce plan ne modifie une ligne du bridge ou du deck-host.**
 
-**Pile technique :** C# récent / `net10.0`, DLL référencées depuis `C:\Program Files\ATAS X`,
-`Newtonsoft.Json` pris dans ce même dossier. Un seul fichier reste partagé avec NinjaTrader —
-`JournalSeal.cs` — et reste donc en C# 9 / `net48`.
+`ChartStrategy.Connector` est **toujours nul** sur le classique — mesuré sur 472 trames publiées et
+confirmé par le support ATAS (« the connector must be assigned manually if you need it »). La
+sélection du deck se résout donc contre le **registre de connecteurs de l'hôte**
+(`OFT.Platform.Core`, atteint par réflexion via `CommonServiceLocator`), agrégée sur
+`IConnectorsManager.Connectors`, et **posée explicitement** sur chaque ordre. Quand ce registre est
+introuvable, la stratégie **dégrade** vers `TradingManager` — le compte et l'instrument du graphique
+seuls — le dit une fois dans le journal, et continue de trader : ce mode dégradé fait partie de la
+livraison, pas un repli oublié. La stratégie doit dans tous les cas être attachée à un graphique et
+démarrée, avec un portefeuille sélectionné dans ses paramètres et un flux connecté.
+
+**Pile technique :** C# récent / `net10.0`, DLL référencées depuis `C:\Program Files (x86)\ATAS
+Platform`, `Newtonsoft.Json` pris dans ce même dossier. Un seul fichier reste partagé avec
+NinjaTrader — `JournalSeal.cs` — et reste donc en C# 9 / `net48`. L'accès au registre de connecteurs
+de l'hôte se fait **entièrement par réflexion**, sans aucune référence de compilation à
+`OFT.Platform.Core`, `OFT.Platform` ni `CommonServiceLocator` (voir Contraintes globales).
 
 **Spécification :** `docs/superpowers/specs/2026-08-21-portage-chemin-ordre-atas-design.md`
 
@@ -40,6 +54,15 @@ Elles s'appliquent à **toutes** les tâches, implicitement.
   récente. Une construction trop moderne compile côté ATAS et **casse la compilation NinjaScript
   entière chez le trader** — ses indicateurs personnels compris, une compilation NinjaScript étant
   tout-ou-rien. Le reste du projet ATAS est libre (`LangVersion latest`).
+- **L'accès au registre de connecteurs de l'hôte se fait entièrement par réflexion — aucune
+  référence de compilation** à `OFT.Platform.Core`, `OFT.Platform` ni `CommonServiceLocator`. Ce
+  sont des assemblies de l'**hôte**, pas l'API plugin documentée : leurs types et méthodes sont
+  publics, mais ATAS ne garantit rien et ne préviendra pas s'ils bougent. Une référence dure et la
+  stratégie ne se charge plus du tout le jour où l'un d'eux est renommé — cockpit mort, sans
+  explication. Par réflexion, elle **dégrade** vers `TradingManager` (compte et instrument du
+  graphique seuls), le dit une fois dans le journal, et continue de trader. Toute tâche qui touche
+  `ContextResolver` ou la résolution compte/instrument est concernée, et le mode dégradé doit être
+  écrit et testé comme le reste — ce n'est pas du code mort.
 - **Les trois builds passent, jamais un seul :**
   ```bash
   dotnet build src/NinjaTrader.AddOn.StreamDeck/NinjaTrader.AddOn.StreamDeck.csproj -c Release
@@ -64,7 +87,8 @@ Elles s'appliquent à **toutes** les tâches, implicitement.
   réel de trading.
 - **Aucun test automatisé n'existe dans ce dépôt et ce plan n'en introduit pas.** La vérification de
   chaque tâche est une compilation **plus** un contrôle explicite, décrit pas à pas. Les tâches 4 et
-  suivantes exigent ATAS X ouvert, le bridge lancé sur ports isolés, et un compte de simulation.
+  suivantes exigent ATAS classique ouvert, le bridge lancé sur ports isolés, et un compte de
+  simulation.
 - **Toujours sur ports isolés**, jamais 8218/8219 pendant qu'une installation tourne :
   ```powershell
   $env:SDBRIDGE_PluginPort = "9318"; $env:SDBRIDGE_AddonPort = "9319"
@@ -74,29 +98,32 @@ Elles s'appliquent à **toutes** les tâches, implicitement.
 - **Un seul add-on à la fois.** Le bridge n'accepte qu'un add-on : pendant tout essai ATAS,
   NinjaTrader doit être fermé. Deux clients se disputeraient la place et le diagnostic serait
   illisible.
-- **`binaries/TradeDeck.Strategy/` apparaîtra dans `git status`** à chaque build Release : c'est la
-  cible partagée `src/Directory.Build.targets` qui archive l'assembly du projet. C'est attendu, il
-  faut le committer, et `binaries/` ne doit jamais entrer dans `.gitignore`.
+- **`binaries/Atas.Strategy.TradeDeck/` apparaîtra dans `git status`** à chaque build Release : c'est
+  la cible partagée `src/Directory.Build.targets` qui archive l'assembly du projet (nommé d'après le
+  projet, `TradeDeck.Strategy.dll` en est la sortie). C'est attendu, il faut le committer, et
+  `binaries/` ne doit jamais entrer dans `.gitignore`.
 - **Un commit par tâche au minimum**, message en français, corps expliquant le pourquoi.
 
 ## Ce que ce portage laisse volontairement dégradé
 
-À nommer maintenant plutôt qu'à découvrir en séance. Ces trois points sont **corrects par
-conception** et ne doivent pas être « réparés » en cours de route :
+À nommer maintenant plutôt qu'à découvrir en séance. Ces points sont **corrects par conception** et
+ne doivent pas être « réparés » en cours de route :
 
 | Ce que le trader verra | Pourquoi c'est correct |
 |---|---|
+| Registre introuvable : un seul compte, un seul instrument, ceux du graphique | `ChartStrategy.Connector` est toujours nul et le registre de connecteurs de l'hôte (`OFT.Platform.Core`) s'atteint par réflexion, sans référence de compilation — voir Contraintes globales. S'il devient introuvable (ATAS a renommé un type), la stratégie **dégrade** vers `TradingManager`, chart-scoped, le dit une fois dans le journal, et continue de trader plutôt que de refuser de se charger. C'est un mode livré et testé, pas un repli oublié. |
 | Touche Tendance : `NO DATA` | Le protocole prévoit le bloc `trend` absent tant que le monitor n'est pas initialisé, et le bridge conserve alors la dernière valeur reçue. La macro Tendance est hors périmètre. |
 | Touche Compte : suiveurs non résolus | Le bloc `copier` de l'add-on n'est pas publié ; le bridge réestampille sa moitié configuration et les champs venus de l'add-on restent à leur défaut. Le copieur est hors périmètre. |
 | `setCopierConfig` / `configureTrend` refusés | Le bridge les **force** à chaque connexion d'add-on. La stratégie répond `UNSUPPORTED_ACTION` et le journalise une fois : mentir en répondant « succès » afficherait une copie active alors que rien ne recopie. |
 
-Une quatrième omission, elle assumée et signalée ici parce qu'elle **change** le comportement du
+Une omission de plus, elle assumée et signalée ici parce qu'elle **change** le comportement du
 deck : l'add-on NinjaTrader élague les comptes « roulés » d'une société de prop
 (`APEX-346280-35`, `-36` → seul le plus haut suffixe est listé, voir
 `ContextResolver.PruneRolledAccountNames`). Ce plan ne porte pas cette heuristique : elle est
-spécifique à la façon dont NinjaTrader énumère ces comptes, et `Connector.Portfolios` ne présente
-pas forcément la même forme. Tous les portefeuilles connectés sont listés. **Si le courtier ATAS du
-trader expose lui aussi des comptes roulés, c'est un ajout à demander — pas à improviser.**
+spécifique à la façon dont NinjaTrader énumère ces comptes, et l'agrégation sur
+`IConnectorsManager.Connectors` ne présente pas forcément la même forme. Tous les portefeuilles
+connectés sont listés. **Si le courtier ATAS du trader expose lui aussi des comptes roulés, c'est un
+ajout à demander — pas à improviser.**
 
 ## Structure des fichiers
 
@@ -109,7 +136,7 @@ trader expose lui aussi des comptes roulés, c'est un ajout à demander — pas 
 | `src/Atas.Strategy.TradeDeck/BridgeMessage.cs` | enveloppe du protocole, sur `Newtonsoft.Json` |
 | `src/Atas.Strategy.TradeDeck/BridgeClient.cs` | `ws://127.0.0.1:8219`, reconnexion autonome, **verrou d'envoi** |
 | `src/Atas.Strategy.TradeDeck/TradeDeckStrategy.cs` | `ChartStrategy` — cycle de vie, abonnements, routage des commandes non marchandes |
-| `src/Atas.Strategy.TradeDeck/ContextResolver.cs` | sélection du deck → `Portfolio` + `Security` + `Position` + ordres |
+| `src/Atas.Strategy.TradeDeck/ContextResolver.cs` | sélection du deck → `Portfolio` + `Security` + `Position` + ordres, agrégés par réflexion sur `IConnectorsManager.Connectors` ; dégrade vers `TradingManager` si le registre est introuvable |
 | `src/Atas.Strategy.TradeDeck/StatePublisher.cs` | publication toutes les 500 ms |
 | `src/Atas.Strategy.TradeDeck/CommandDispatcher.cs` | aiguillage des 13 commandes |
 | `src/Atas.Strategy.TradeDeck/OrderEngine.cs` | construit et poste les `Order` |
@@ -119,8 +146,9 @@ trader expose lui aussi des comptes roulés, c'est un ajout à demander — pas 
 
 ## Écarts constatés par rapport à la spécification
 
-Établis **par réflexion sur les assemblies réelles** de `C:\Program Files\ATAS X`, pas par lecture
-de la documentation. Chacun est repris dans la tâche concernée.
+Établis **par réflexion sur les assemblies réelles** et **par essai terrain sur ATAS classique**
+(24/08/2026, journal `addon-2026-08-24.log`), confirmés à trois reprises par le support ATAS —
+pas par lecture de la documentation. Chacun est repris dans la tâche concernée.
 
 1. **`Portfolio.ConnectionState` n'est PAS dans `StockSharp.Messages`, contrairement à ce que cette
    note affirmait initialement.** `Portfolio.ConnectionState` est bien un `Nullable<ConnectionStates>`,
@@ -130,7 +158,7 @@ de la documentation. Chacun est repris dans la tâche concernée.
    rapport : s'y référencer aurait fait échouer l'opérateur `==` avec un `CS0019` trompeur plutôt
    que de résoudre le vrai type. Corrigé à la tâche 3 après compilation en échec ; voir le
    commentaire dans `Atas.Strategy.TradeDeck.csproj`.
-2. **`Newtonsoft.Json` se référence par `HintPath`, pas par NuGet.** ATAS X livre
+2. **`Newtonsoft.Json` se référence par `HintPath`, pas par NuGet.** ATAS livre
    `Newtonsoft.Json.dll` en 13.0.3 — exactement la version que le projet add-on utilise déjà. La
    référencer là où ATAS la charge évite deux Newtonsoft dans le même `AppDomain`, et suit ce que le
    projet indicateurs fait déjà pour `System.Drawing.Common`. Repli documenté si la version livrée
@@ -140,6 +168,7 @@ de la documentation. Chacun est repris dans la tâche concernée.
    chez NinjaTrader s'appelle **`Comment`** ici. Toute la logique qui distingue « ordre du deck » de
    « ordre tapé à la main » repose dessus — et `GuardEnforcer` la double d'un suivi par référence,
    parce qu'un commentaire est une chaîne libre qu'un trader peut taper dans un ticket de DOM.
+   Confirmé par l'essai terrain : un ordre `ChartTrader` manuel apparaît avec `Comment` vide.
 4. **`OrderStates` ne compte que quatre valeurs brutes** — `None`, `Active`, `Done`, `Failed` — là
    où NinjaTrader en a une douzaine. Mais l'extension **`Order.Status()`**
    (`ATAS.DataFeedsCore.Extensions`) rend le verdict utilisable :
@@ -153,18 +182,24 @@ de la documentation. Chacun est repris dans la tâche concernée.
    citait `TradingManager.OpenOrder(order, setDefaultQuantity: false, askConfirmation: false,
    checkOrderStates: true)`. Cette surcharge existe, mais **ce n'est pas l'API documentée d'une
    stratégie** : la doc et l'exemple officiel `SmaChartStrategy` emploient `OpenOrder(order)`,
-   `CancelOrder(order)`, `ModifyOrder(ancien, neuf)` — sans aucun booléen. Cela **retire un des trois
-   « vrais risques » de la spec** : il n'y a pas de `askConfirmation` à établir empiriquement sur ce
-   chemin, puisqu'il n'y a pas de paramètre.
+   `CancelOrder(order)`, `ModifyOrder(ancien, neuf)` — sans aucun booléen, **vérifié présent sur le
+   classique par réflexion**. Cela **retire un des trois « vrais risques » de la spec** : il n'y a
+   pas de `askConfirmation` à établir empiriquement sur ce chemin, puisqu'il n'y a pas de paramètre.
 7. **`ChartStrategy.Portfolio` et `.Security` ont un accesseur en écriture qui LÈVE**
-   (`NotSupportedException`) : le graphique les fixe, on ne peut pas repointer la stratégie. La
-   conception de la spec — poser `Portfolio` et `Security` sur chaque `Order` — n'est donc pas une
-   élégance, c'est **le seul chemin possible**. Ce que la doc ne dit pas, en revanche, c'est si
-   `OpenOrder` honore ces champs ou leur substitue ceux du graphique : c'est devenu le premier
-   contrôle empirique de la tâche 4.
+   (`NotSupportedException`) : le graphique les fixe, on ne peut pas repointer la stratégie. Et
+   **`ChartStrategy.Connector` est toujours nul** — mesuré sur 472 trames publiées, confirmé par le
+   support ATAS (« the connector must be assigned manually if you need it »). La conception de la
+   spec — résoudre `Portfolio` et `Security` du deck contre le **registre de connecteurs de l'hôte**
+   (agrégé sur `IConnectorsManager.Connectors`, jamais `ChartStrategy.Connector`) puis les poser
+   explicitement sur chaque `Order` — n'est donc pas une élégance, c'est **le seul chemin possible** :
+   ni le graphique ni son `Connector` ne peuvent être repointés. En mode dégradé (registre
+   introuvable), ce chemin se réduit au couple `Portfolio` / `Security` du graphique — un seul
+   compte, un seul instrument.
 8. **`ChartStrategy.CurrentPosition` et `.AveragePrice` sont INTERNES à la stratégie**, la doc le
    dit explicitement — « distinct des positions au niveau du compte ». Le deck a besoin de la
-   position du **compte** : tout passe par `Connector.Positions`, jamais par ces deux propriétés.
+   position du **compte** : elle vient de l'agrégation des `Positions` de chaque connecteur du
+   registre de l'hôte (jamais de `ChartStrategy.Connector.Positions`, toujours nul), avec repli sur
+   `TradingManager.Position` — chart-scoped — en mode dégradé.
 9. **ATAS a un mode Replay qui produit de vrais objets `MyTrade`.**
    `ATAS.DataFeedsCore.Extensions.IsReplay()` existe sur `Portfolio`, `Order`, `Position` et
    `MyTrade`, et l'indicateur officiel `TradesOnChart` s'en sert pour choisir sa source de
@@ -173,28 +208,79 @@ de la documentation. Chacun est repris dans la tâche concernée.
    `Playback101` ; l'équivalent ATAS est un fait, pas un nom.
 10. **`TradingManager` est une propriété directe de `ATAS.Indicators.Indicator`**, dont
     `ChartStrategy` hérite — et non `DataProvider.TradingManager`, forme détournée que ce plan
-    employait d'abord. Les indicateurs officiels écrivent `TradingManager.Portfolio` directement.
+    employait d'abord. Son accesseur est **`protected`** : seule la classe stratégie peut le lire
+    directement, il faut le transmettre explicitement aux classes d'aide (`ContextResolver`,
+    `StatePublisher`, …) qui n'héritent pas d'`Indicator`. Ce n'est plus un détail d'implémentation :
+    `TradingManager` est devenu la **source du mode dégradé** quand le registre de connecteurs de
+    l'hôte est introuvable — chart-scoped, un compte, un instrument. Confirmé par l'essai terrain :
+    l'ordre `ChartTrader` manuel, sur le même couple compte + instrument que le graphique, y était
+    visible ; un ordre passé sur un autre compte, non.
+11. **`ChartStrategy.Connector` est toujours nul, systématiquement.** Mesuré sur 472 trames
+    publiées, sur plusieurs sessions ; jamais de transition « connecteur sain » observée. Ne pas le
+    retenter en repli : ce n'est pas un cas rare, c'est le comportement normal du classique.
+12. **`ChartStrategy.Orders` vaut toujours 0**, même quand un ordre existe — vérifié en en passant
+    un et en le laissant vivre pendant que la sonde tournait. La source des ordres est le registre
+    de connecteurs agrégé (ou `TradingManager.Orders` en mode dégradé), jamais cette propriété.
+13. **Le connecteur s'obtient par le registre de l'hôte, atteint par réflexion** :
+    `CommonServiceLocator.ServiceLocator.Current.GetInstance(typeof(OFT.Platform.Core.Providers
+    .ITradingCore)).GetConnector(portfolio)`, et `GetInstance(typeof(IConnectorsManager)).Connectors`
+    pour la liste complète. Mesuré : `GetConnector(DEMO29ADC)` rend un `SbeConnector` exposant
+    Portfolios=1, Securities=5, Orders=2, Positions=2, MyTrades=1 — deux ordres et deux positions là
+    où `TradingManager` n'en montrait aucun au même instant ; `IConnectorsManager.Connectors` liste
+    12 connecteurs, dont un Rithmic portant deux portefeuilles absents du graphique.
+14. **`CoreProvider.TradingCore` est nul** — voie morte constatée en sonde. Résoudre `ITradingCore`
+    directement via `ServiceLocator.Current.GetInstance`, jamais via `CoreProvider`.
+15. **Les portefeuilles sont répartis sur plusieurs connecteurs, jamais un seul.**
+    `ContextResolver` doit agréger sur `IConnectorsManager.Connectors`, en ignorant ceux qui ne
+    portent aucun portefeuille — 10 des 12 connecteurs mesurés étaient dans ce cas.
 
 ## Surface d'API ATAS utilisée par ce plan
 
 Relevé par réflexion, à ne pas redécouvrir tâche par tâche.
 
 ```
-ChartStrategy (ATAS.Strategies.Chart)          : Connector, Portfolio, Security (SETTERS THROW),
+ChartStrategy (ATAS.Strategies.Chart)          : Portfolio, Security (SETTERS THROW),
                                                  OpenOrder(Order), CancelOrder(Order),
                                                  ModifyOrder(Order old, Order new),
                                                  OnStarted(), OnSuspended(), OnStopping(), OnStopped(),
-                                                 StopWithNotification(string)
+                                                 StopWithNotification(string) /
+                                                 StopWithNotificationAsync(string)
                                                  CurrentPosition, AveragePrice — STRATEGY-INTERNAL,
                                                  never the account position: do not use them
-Indicator (base)                               : TradingManager → ITradingManager, InstrumentInfo,
-                                                 ChartInfo, TradingStatisticsProvider
+                                                 Connector — ALWAYS NULL on classic (measured across
+                                                 472 published frames; confirmed in writing by ATAS
+                                                 support). NEVER use it, and never fall back to it.
+                                                 Orders — ALWAYS 0, even with a live order (measured).
+                                                 NEVER use it; the source is the aggregated connector
+                                                 registry below, or TradingManager.Orders degraded.
+Indicator (base)                               : TradingManager → ITradingManager. Accessor is
+                                                 PROTECTED: only the strategy class reaches it
+                                                 directly, pass it down explicitly to helper classes.
+                                                 THE DEGRADED-MODE SOURCE when the host registry
+                                                 below is unreachable — chart-scoped, one account,
+                                                 one instrument, same references as the chart's own
+                                                 Portfolio/Security (measured).
+                                                 Also: InstrumentInfo, ChartInfo, TradingStatisticsProvider
 ITradingManager                                : IsStopLossOrder(Order), IsTakeProfitOrder(Order)
                                                  (its four-boolean OpenOrder/CancelOrder/ModifyOrder
                                                   overloads exist but are NOT the strategy API)
 Extensions (ATAS.DataFeedsCore)                : Order.Status() → OrderStatus
                                                  { None, Placed, Filled, PartlyFilled, Canceled }
                                                  IsReplay() on Portfolio, Order, Position, MyTrade
+
+--- Host registry — REFLECTION ONLY, no compile-time reference to any of these three (see
+    Contraintes globales); this is the primary path, TradingManager above is the degraded fallback ---
+CommonServiceLocator.ServiceLocator (static)   : IsLocationProviderSet, Current.GetInstance(Type)
+OFT.Platform.Core.Providers.ITradingCore       : GetConnector(Portfolio) / GetConnector(Security)
+                                                 → IDataFeedConnector
+OFT.Platform.Core.Managers.Connections.IConnectorsManager
+                                                : Connectors → IEnumerable<IDataFeedConnector>, every
+                                                 connector in the platform. AGGREGATE over it, skip
+                                                 connectors carrying no portfolio (measured: 10 of 12).
+OFT.Platform.Core.Providers.CoreProvider       : TradingCore — ALWAYS NULL (measured). Do not use it;
+                                                 resolve ITradingCore directly via ServiceLocator instead.
+-----------------------------------------------------------------------------------------------------
+
 IDataFeedConnector (ATAS.DataFeedsCore)        : Portfolios, Securities, Orders, Positions, MyTrades
                                                  GetPosition(Portfolio, Security, TPlusLimits?)
                                                  NewOrders, OrderChanged, OrdersRegisterFailed,
@@ -718,7 +804,16 @@ connecté — **étape 1 de la recette**.
   `void Dispose()`.
 - Produit : `TradeDeck.Atas.Strategy.TradeDeckStrategy : ChartStrategy`.
 
-- [x] **Étape 1 : créer le projet**
+- [ ] **Étape 1 : créer le projet**
+
+> ⏸ Redémarrée : cette étape avait été exécutée et commitée en ciblant **ATAS X**, cible abandonnée
+> le 24/08 (`docs/carte-des-deux-depots.md` non concerné, voir le préambule du plan). Le support
+> ATAS a confirmé par écrit que les Chart Strategies n'existent pas sur ATAS X ; la cible est
+> désormais **ATAS classique** (`C:\Program Files (x86)\ATAS Platform`). Seuls le commentaire et la
+> valeur par défaut d'`ATAS_BASE` changent ci-dessous — `TargetFramework` reste `net10.0`, comme
+> confirmé par la spec révisée. **Le `.csproj` sur le disque n'a pas été corrigé** (hors périmètre de
+> cette révision, qui ne touche que le plan) : le refaire est le premier geste de la reprise de cette
+> tâche.
 
 Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 
@@ -726,9 +821,9 @@ Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    ATAS X uniquement, comme le projet indicateurs : son runtimeconfig.json annonce net10.0 et son
-    dossier d'installation est `C:\Program Files\ATAS X` — a ne pas confondre avec l'ATAS classique,
-    en `Program Files (x86)`, qui est en net10.0-windows et WPF.
+    ATAS CLASSIQUE uniquement, PAS ATAS X : le support ATAS a confirme par ecrit que les Chart
+    Strategies n'existent pas sur ATAS X (Beta), qui ne les prevoit pas avec date. Le dossier
+    d'installation du classique est `C:\Program Files (x86)\ATAS Platform`, WPF, net10.0.
   -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -740,7 +835,7 @@ Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
   </PropertyGroup>
 
   <PropertyGroup>
-    <ATAS_BASE Condition="'$(ATAS_BASE)' == ''">C:\Program Files\ATAS X</ATAS_BASE>
+    <ATAS_BASE Condition="'$(ATAS_BASE)' == ''">C:\Program Files (x86)\ATAS Platform</ATAS_BASE>
   </PropertyGroup>
 
   <!--
@@ -785,18 +880,19 @@ Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
       <Private>false</Private>
     </Reference>
     <!--
-      ECART : le brief ne listait que six references. `Portfolio.ConnectionState` est un
-      `Nullable<ConnectionStates>` et ce type vit dans StockSharp.Messages.dll, pas dans
-      ATAS.DataFeedsCore.dll. Constate en inspectant les assemblies reelles, pas suppose.
+      PAS de reference a StockSharp.Messages.dll : essaye puis retiree (tache 3). `Portfolio.
+      ConnectionState` est bien un `Nullable<ConnectionStates>`, mais CE `ConnectionStates`-la vit
+      dans Utils.Common.Network.Client, deja reference ci-dessus pour une autre raison, PAS dans
+      StockSharp.Messages.dll — qui declare un type homonyme sans rapport. Une reference dessus fait
+      echouer l'operateur `==` avec un CS0019 trompeur plutot que de resoudre le bon type. Constate
+      en inspectant les assemblies reelles apres un premier build en echec, pas suppose.
     -->
-    <Reference Include="StockSharp.Messages">
-      <HintPath>$(ATAS_BASE)\StockSharp.Messages.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
     <!--
-      ECART : Newtonsoft par HintPath et non par NuGet. ATAS X livre la 13.0.3, exactement celle du
-      projet add-on. La prendre la ou ATAS la charge evite deux Newtonsoft dans le meme AppDomain.
-      Repli si la version livree devenait trop ancienne :
+      ECART : Newtonsoft par HintPath et non par NuGet, pour eviter deux Newtonsoft dans le meme
+      AppDomain que celui charge par ATAS. Version a verifier localement au premier build (l'ecart
+      d'origine de ce commentaire supposait 13.0.3 par analogie avec ATAS X — cible abandonnee, voir
+      le preambule du plan ; rien ne garantit que le classique livre la meme version).
+      Repli si la version livree s'avere trop ancienne :
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" ExcludeAssets="runtime" />
     -->
     <Reference Include="Newtonsoft.Json">
@@ -808,7 +904,14 @@ Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 </Project>
 ```
 
-- [x] **Étape 2 : compiler le projet vide pour valider les références**
+- [ ] **Étape 2 : compiler le projet vide pour valider les références**
+
+> ⏸ Redémarrée avec l'étape 1 : le build exécuté visait `C:\Program Files\ATAS X`. À refaire contre
+> `C:\Program Files (x86)\ATAS Platform` une fois le `.csproj` corrigé — les six DLL référencées
+> (`ATAS.Indicators`, `ATAS.Strategies`, `ATAS.DataFeedsCore`, `OFT.Attributes`, `OFT.Localization`,
+> `Utils.Common`) plus `Newtonsoft.Json` doivent exister à cet emplacement ; rien ne garantit qu'elles
+> portent la même version que sur ATAS X. (`StockSharp.Messages` n'est plus référencée — voir le
+> commentaire du `.csproj` ci-dessus.)
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -1404,8 +1507,9 @@ namespace TradeDeck.Atas.Strategy;
 /// same log file — a different platform underneath.
 ///
 /// THE CHART IS ONLY A HOST. ATAS requires a strategy to be attached to a chart and started, but
-/// nothing here reads that chart: the deck's selection is resolved against Connector.Portfolios and
-/// Connector.Securities and set EXPLICITLY on every order. The chart may display anything at all.
+/// nothing here reads that chart: the deck's selection is resolved against the host's own connector
+/// registry (task 3 — ChartStrategy.Connector is confirmed always null on classic ATAS, never used)
+/// and set EXPLICITLY on every order. The chart may display anything at all.
 ///
 /// A CLOSED CHART BREAKS NOTHING NEW. Stopped or removed, the strategy simply stops being a client
 /// of the bridge, and the bridge reports "add-on disconnected" exactly as it does today when
@@ -1544,12 +1648,22 @@ Attendu : `Build succeeded`, et une ligne
 
 - [ ] **Étape 8 : charger la stratégie dans ATAS et vérifier — recette étape 1**
 
-> ⏸ Non exécutée : exige ATAS X ouvert et le bridge lancé. Voir la note de fin de tâche 2.
+> ⏸ Non exécutée à l'origine (exigeait ATAS ouvert et le bridge lancé). Depuis, l'essai terrain du
+> 24/08 a chargé la stratégie sur **ATAS classique** et validé cette étape (recette A/B1, voir
+> `.superpowers/sdd/2026-08-24-portage-chemin-ordre-atas/progress.md`) — mais avec un binaire déployé
+> à la main pendant l'investigation, pas via ce protocole écrit ATAS X → classique. À rejouer avec le
+> `.csproj` corrigé (étape 1) pour que la procédure ci-dessous soit celle réellement suivie.
+
+**Cible : ATAS classique, PAS ATAS X.** Deux différences avec ATAS X qui piègent si on les ignore :
+le classique **ne surveille pas** `%APPDATA%\ATAS\Strategies\` — déposer le DLL ne suffit pas, **ATAS
+doit être redémarré** pour le charger, contrairement à ATAS X qui recompile à la volée comme
+NinjaTrader ouvert (voir « Déploiement » dans `CLAUDE.md`) ; et la stratégie se charge par **clic
+droit sur le graphique → *Chart strategies*** (pas un menu global *Stratégies*).
 
 1. Copier le DLL :
    ```powershell
    Copy-Item src\Atas.Strategy.TradeDeck\bin\Release\net10.0\TradeDeck.Strategy.dll `
-             "$env:APPDATA\ATAS X\Strategies\" -Force
+             "$env:APPDATA\ATAS\Strategies\" -Force
    ```
 2. **Fermer NinjaTrader** (un seul add-on à la fois).
 3. Lancer le bridge sur ports isolés :
@@ -1562,8 +1676,10 @@ Attendu : `Build succeeded`, et une ligne
    modifier temporairement la constante — **ou**, mieux, lancer le bridge sur ses ports par défaut
    avec NinjaTrader fermé et l'hôte TradeDeck arrêté. Choisir la seconde option quand la machine est
    libre ; la première seulement si une installation tourne.
-4. Ouvrir ATAS X, un graphique quelconque, clic droit → *Stratégies* → ajouter **TradeDeck** →
-   *Démarrer*.
+4. **Redémarrer ATAS classique** (obligatoire après tout dépôt de DLL — voir ci-dessus). Ouvrir un
+   graphique quelconque avec un portefeuille sélectionné dans ses paramètres et un flux connecté
+   (ATAS refuse de démarrer la stratégie sinon), clic droit sur le graphique → *Chart strategies* →
+   ajouter **TradeDeck** → *Démarrer*.
 
 Attendu, **et chaque point doit être constaté, pas supposé** :
 - `%APPDATA%\StreamDeckTrader\logs\addon-AAAA-MM-JJ.log` contient la ligne
@@ -1572,6 +1688,12 @@ Attendu, **et chaque point doit être constaté, pas supposé** :
 - le journal du bridge affiche `NinjaTrader Add-On connected` ;
 - arrêter la stratégie fait apparaître `NinjaTrader Add-On disconnected` côté bridge et
   `=== TradeDeck ATAS strategy session ended ===` côté stratégie.
+
+**Piège à connaître avant de diagnostiquer un silence** : ATAS classique **arrête la stratégie sans
+message** dès que l'instrument, l'unité de temps ou le portefeuille du graphique changent, que
+l'historique recharge, que le graphique se ferme, ou qu'on redépose le DLL. Un flux `stateUpdate` qui
+s'interrompt est d'abord ce cas-là, pas un bug — vérifier l'état de la stratégie dans ATAS avant de
+creuser plus loin.
 
 - [x] **Étape 9 : committer**
 
@@ -1582,39 +1704,336 @@ git commit -m "Creer la strategie ATAS TradeDeck : projet, journal, enveloppe et
 
 ---
 
-## Tâche 3 : résolution du contexte et publication d'état
+## Tâche 3 : le registre de connecteurs, la résolution du contexte et la publication d'état
 
 Fin de tâche : le deck affiche le bon compte, le bon instrument et une position vide — **étape 2 de
 la recette**. Le bloc `position` est **complet dès maintenant**, protections comprises : le protocole
 déclare ces champs requis, et les omettre ferait clignoter la signature de protection entre `-` et
 un nombre à chaque ouverture.
 
+> ⚠ **Cette tâche a déjà été exécutée et commitée une première fois (commits `9053905`..`25e91b7`),
+> contre une conception invalidée depuis par l'essai terrain du 24/08.** L'implémentation livrée
+> résolvait `Portfolio`/`Security`/`Order`/`Position` contre `ChartStrategy.Connector` — mesuré
+> **toujours nul** sur 472 trames publiées, confirmé par écrit par le support ATAS (« the connector
+> must be assigned manually if you need it »). Ce n'est pas un ajustement : `ContextResolver` et
+> `StatePublisher` doivent être **réécrits** contre le **registre de connecteurs de l'hôte**
+> (`OFT.Platform.Core`, atteint par réflexion via `CommonServiceLocator`), agrégé sur
+> `IConnectorsManager.Connectors` — avec repli vers `TradingManager` (mode dégradé) quand ce registre
+> est introuvable. Les étapes concernées sont détaillées ci-dessous et remises à `- [ ]`.
+
 **Fichiers :**
+- Créer : `src/Atas.Strategy.TradeDeck/ConnectorRegistry.cs`
 - Créer : `src/Atas.Strategy.TradeDeck/ContextResolver.cs`
 - Créer : `src/Atas.Strategy.TradeDeck/StatePublisher.cs`
 - Modifier : `src/Atas.Strategy.TradeDeck/TradeDeckStrategy.cs`
 
 **Interfaces :**
 - Consomme : `BridgeClient.SendAsync`, `BridgeMessage.Notify/Response/Failure`, `SdLog` (tâche 2).
+- Produit : `ConnectorRegistry` —
+  `ConnectorRegistry()`, `bool IsAvailable { get; }`,
+  `IReadOnlyList<IDataFeedConnector> GetConnectors()`,
+  `IDataFeedConnector? ConnectorFor(Portfolio? portfolio)`.
+  Entièrement par réflexion, sans référence de compilation à `OFT.Platform.Core`, `OFT.Platform` ni
+  `CommonServiceLocator` (voir Contraintes globales) — le seul type qui traverse la frontière est
+  `ATAS.DataFeedsCore.IDataFeedConnector`, déjà référencé par le projet.
 - Produit : `ContextResolver` —
-  `ContextResolver(Func<IDataFeedConnector?> connector)`,
+  `ContextResolver(ConnectorRegistry registry, Func<ITradingManager?> tradingManager)`,
+  `bool IsDegraded { get; }`, `IReadOnlyList<IDataFeedConnector> Connectors { get; }`,
   `Portfolio? FindPortfolio(string? name)`, `Security? FindSecurity(string? name)`,
-  `Position? FindPosition(Portfolio, Security)`, `List<string> GetAccountNames()`,
-  `List<Order> FindActiveOrders(Portfolio, Security)`,
-  `List<Order> FindStopOrders(Portfolio, Security)`,
-  `List<Order> FindTargetOrders(Portfolio, Security)`,
-  `List<Order> FindAllActiveOrders(Portfolio)`,
+  `Position? FindPosition(Portfolio?, Security?)`, `List<Position> FindAllPositions(Portfolio?)`,
+  `List<string> GetAccountNames()`,
+  `List<Order> FindActiveOrders(Portfolio?, Security?)`,
+  `List<Order> FindStopOrders(Portfolio?, Security?)`,
+  `List<Order> FindTargetOrders(Portfolio?, Security?)`,
+  `List<Order> FindAllActiveOrders(Portfolio?)`,
+  `IDataFeedConnector? ConnectorFor(Portfolio? portfolio)`,
   `static string InstrumentName(Security?)`, `static decimal PointValue(Security?)`,
   `static decimal MarketPrice(Security?)`, `static bool IsActive(Order?)`,
-  `static bool SamePortfolio(Portfolio?, Portfolio?)`, `static bool SameSecurity(Security?, Security?)`,
-  `IDataFeedConnector? Connector { get; }`.
+  `static bool SamePortfolio(Portfolio?, Portfolio?)`, `static bool SameSecurity(Security?, Security?)`.
+  **Plus de propriété `Connector` unique** : `ChartStrategy.Connector` est toujours nul, et le
+  registre agrège potentiellement plusieurs connecteurs — voir l'étape 2.
 - Produit : `StatePublisher` —
   `StatePublisher(ContextResolver, BridgeClient, int intervalMs)`,
   `void Start(string account, string instrument)`, `void UpdateTracking(string?, string?)`,
   `void PublishNow()`, `string TrackedAccount { get; }`, `string TrackedInstrument { get; }`,
   `void Dispose()`.
 
-- [x] **Étape 1 : écrire le résolveur de contexte**
+- [ ] **Étape 1 : écrire l'accès au registre de connecteurs de l'hôte, par réflexion**
+
+> Nouvelle étape — c'est le maillon qui manquait à la première exécution de cette tâche. Elle
+> implémente proprement `prototype-acces-connecteur.patch`
+> (`.superpowers/sdd/2026-08-24-portage-chemin-ordre-atas/`), qui est du code d'investigation à ne
+> **pas** recopier tel quel : il journalise à outrance (utile pour établir les faits une fois, pas
+> pour tourner en production sur la boucle 500 ms) et vit dans `StatePublisher` alors que cette
+> responsabilité — obtenir et mettre en cache le registre — appartient à sa propre classe, réutilisée
+> par `ContextResolver`, `OrderMonitor` (tâche 4) et `GuardEnforcer` (tâche 8).
+
+Créer `src/Atas.Strategy.TradeDeck/ConnectorRegistry.cs` :
+
+```csharp
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+
+using ATAS.DataFeedsCore;
+
+namespace TradeDeck.Atas.Strategy;
+
+/// <summary>
+/// Reaches the platform's own connector registry — the thing that makes multi-account selection
+/// possible on classic ATAS, since <see cref="ATAS.Strategies.Chart.ChartStrategy.Connector"/> is
+/// confirmed permanently null (measured across 472 published frames, confirmed in writing by ATAS
+/// support: "the connector must be assigned manually if you need it").
+///
+/// ENTIRELY BY REFLECTION, NO COMPILE-TIME REFERENCE to OFT.Platform.Core, OFT.Platform or
+/// CommonServiceLocator. These are host internals, not ATAS's documented plugin surface: a hard
+/// reference means the strategy stops loading AT ALL the day one of them is renamed — a dead cockpit
+/// over a feature the trader never asked to lose. By reflection, a rename instead costs one field
+/// (IsAvailable flips to false) and this class degrades quietly; ContextResolver then falls back to
+/// TradingManager, chart-scoped, and says so once in the log — see ContextResolver.
+///
+/// Verified live 2026-08-24 (see progress.md, "SONDE SERVICELOCATOR"): IsLocationProviderSet=True,
+/// ITradingCore and IConnectorsManager both resolve, GetConnector(DEMO29ADC) returned a live
+/// SbeConnector (Portfolios=1 Securities=5 Orders=2 Positions=2 MyTrades=1), and
+/// IConnectorsManager.Connectors listed 12 connectors, 2 of them carrying a portfolio (10 configured
+/// but never connected).
+/// </summary>
+internal sealed class ConnectorRegistry
+{
+    // STATIC AND RESOLVED ONCE. This class answers GetConnectors() on the 500ms state-publish tick —
+    // hundreds of thousands of calls a day. CommonServiceLocator.ServiceLocator.Current,
+    // ITradingCore and IConnectorsManager never change identity while ATAS runs, so the reflection
+    // LOOKUPS (assembly scan, GetProperty, GetMethod) are paid once for the process, never per tick.
+    // What IS re-read on every call is the DATA — Connectors, Portfolios — because those genuinely
+    // change: a broker connects, another disconnects, mid-session.
+    private static readonly object InitLock = new();
+    private static bool _initAttempted;
+    private static object? _tradingCore;          // ITradingCore instance, optional fast path
+    private static object? _connectorsManager;     // IConnectorsManager instance — load-bearing
+    private static PropertyInfo? _connectorsProperty;
+    private static MethodInfo? _getConnectorByPortfolio;
+    private static string? _initFailureReason;
+
+    /// <summary>Transition-tracked, not read every tick: see ReportAvailability.</summary>
+    private bool? _lastAvailable;
+
+    public ConnectorRegistry() => EnsureInitialized();
+
+    public bool IsAvailable => _connectorsManager != null && _connectorsProperty != null;
+
+    /// <summary>
+    /// Every connector currently carrying at least one portfolio.
+    ///
+    /// FILTERED ON PURPOSE: of the 12 connectors measured live, 10 were configured but never
+    /// connected and carried zero portfolios. Presenting them as selectable accounts would let the
+    /// deck resolve a name against a connector that can never fill an order.
+    ///
+    /// Re-enumerated on every call — see the static fields' comment above for why the cost of doing
+    /// so is acceptable and the cost of NOT doing so would be a stale account list.
+    /// </summary>
+    public IReadOnlyList<IDataFeedConnector> GetConnectors()
+    {
+        if (!IsAvailable)
+        {
+            ReportAvailability(false, _initFailureReason ?? "registry not initialized");
+            return Array.Empty<IDataFeedConnector>();
+        }
+
+        try
+        {
+            var raw = _connectorsProperty!.GetValue(_connectorsManager) as IEnumerable;
+            var result = new List<IDataFeedConnector>();
+            if (raw != null)
+            {
+                foreach (var entry in raw)
+                {
+                    if (entry is IDataFeedConnector connector && SafePortfolioCount(connector) > 0)
+                        result.Add(connector);
+                }
+            }
+
+            ReportAvailability(true, null);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            ReportAvailability(false, ex.GetType().Name + ": " + ex.Message);
+            return Array.Empty<IDataFeedConnector>();
+        }
+    }
+
+    /// <summary>
+    /// The connector that owns this portfolio, or null. Point 4 of the field trial: an Order, a
+    /// Position and a MyTrade each belong to a connector — watching, cancelling or modifying them
+    /// must act on the one that owns the pair, never on a global connector (there is none).
+    ///
+    /// Tries the host's own lookup first (measured live: GetConnector(DEMO29ADC) -> SbeConnector,
+    /// exact match), falling back to a linear scan of GetConnectors() so this method stays correct
+    /// even when ITradingCore itself could not be resolved but IConnectorsManager could.
+    /// </summary>
+    public IDataFeedConnector? ConnectorFor(Portfolio? portfolio)
+    {
+        if (portfolio == null) return null;
+
+        if (_tradingCore != null && _getConnectorByPortfolio != null)
+        {
+            try
+            {
+                if (_getConnectorByPortfolio.Invoke(_tradingCore, new object?[] { portfolio }) is IDataFeedConnector fast)
+                    return fast;
+            }
+            catch { /* fall through to the scan below — this path is a shortcut, not load-bearing */ }
+        }
+
+        foreach (var connector in GetConnectors())
+        {
+            if (SafeContainsPortfolio(connector, portfolio)) return connector;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Logged ONLY on a transition, never per tick — this is read from the 500ms publish loop and
+    /// CLAUDE.md is explicit that one line there is hundreds of thousands a day. A registry that
+    /// never becomes available must still be visible once, at a level a normal run shows; that is
+    /// exactly the degraded-mode entry ContextResolver relies on this class to report honestly.
+    /// </summary>
+    private void ReportAvailability(bool available, string? reason)
+    {
+        if (_lastAvailable == available) return;
+        _lastAvailable = available;
+
+        if (available)
+        {
+            SdLog.Event("Registry", "Connector registry reachable — resolving deck accounts against IConnectorsManager.Connectors");
+        }
+        else
+        {
+            SdLog.EventWarn("Registry",
+                "Connector registry unreachable ({0}) — degrading to the chart's own account and instrument via TradingManager",
+                reason ?? "?");
+        }
+    }
+
+    private static int SafePortfolioCount(IDataFeedConnector connector)
+    {
+        try { return connector.Portfolios?.Count() ?? 0; }
+        catch { return 0; }
+    }
+
+    private static bool SafeContainsPortfolio(IDataFeedConnector connector, Portfolio portfolio)
+    {
+        try
+        {
+            var portfolios = connector.Portfolios;
+            if (portfolios == null) return false;
+            foreach (var p in portfolios)
+            {
+                if (ReferenceEquals(p, portfolio)) return true;
+                if (!string.IsNullOrEmpty(p?.AccountID) &&
+                    string.Equals(p.AccountID, portfolio.AccountID, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Resolves CommonServiceLocator -> ITradingCore / IConnectorsManager once, by assembly simple
+    /// name and full type name. EVERY STEP OWNS ITS OWN FAILURE PATH: the worst outcome of any of
+    /// them failing is IsAvailable staying false, never an exception escaping to the caller — this
+    /// runs from a strategy's OnStarted, and a constructor that throws would refuse to load the
+    /// whole cockpit over a diagnostic nobody asked for.
+    /// </summary>
+    private static void EnsureInitialized()
+    {
+        lock (InitLock)
+        {
+            if (_initAttempted) return;
+            _initAttempted = true;
+
+            try
+            {
+                var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+
+                var locatorType = FindType(assemblies, "CommonServiceLocator", "CommonServiceLocator.ServiceLocator");
+                if (locatorType == null) { _initFailureReason = "CommonServiceLocator.ServiceLocator not loaded"; return; }
+
+                var isSet = locatorType.GetProperty("IsLocationProviderSet", BindingFlags.Public | BindingFlags.Static)?.GetValue(null) as bool?;
+                if (isSet != true) { _initFailureReason = "IsLocationProviderSet=false"; return; }
+
+                var current = locatorType.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (current == null) { _initFailureReason = "ServiceLocator.Current returned null"; return; }
+
+                var getInstance = current.GetType().GetMethod("GetInstance", new[] { typeof(Type) });
+                if (getInstance == null) { _initFailureReason = "IServiceLocator.GetInstance(Type) not found"; return; }
+
+                // ITradingCore is a nice-to-have shortcut (GetConnector(Portfolio)), not
+                // load-bearing: GetConnectors() below works from IConnectorsManager alone. A failure
+                // here does not abort initialisation.
+                var tradingCoreType = FindType(assemblies, "OFT.Platform.Core", "OFT.Platform.Core.Providers.ITradingCore");
+                if (tradingCoreType != null)
+                {
+                    try
+                    {
+                        _tradingCore = getInstance.Invoke(current, new object?[] { tradingCoreType });
+                        _getConnectorByPortfolio = _tradingCore?.GetType().GetMethod("GetConnector", new[] { typeof(Portfolio) });
+                    }
+                    catch { _tradingCore = null; _getConnectorByPortfolio = null; }
+                }
+                // CoreProvider.TradingCore is confirmed NULL live (progress.md, step 4 of the probe) —
+                // deliberately not attempted as a second path to ITradingCore.
+
+                var managerType = FindType(assemblies, "OFT.Platform.Core", "OFT.Platform.Core.Managers.Connections.IConnectorsManager");
+                if (managerType == null) { _initFailureReason = "IConnectorsManager type not found"; return; }
+
+                object? manager;
+                try { manager = getInstance.Invoke(current, new object?[] { managerType }); }
+                catch (Exception ex)
+                {
+                    var real = ex is TargetInvocationException { InnerException: { } inner } ? inner : ex;
+                    _initFailureReason = "GetInstance(IConnectorsManager) threw " + real.GetType().Name;
+                    return;
+                }
+                if (manager == null) { _initFailureReason = "GetInstance(IConnectorsManager) returned null"; return; }
+
+                var connectorsProperty = manager.GetType().GetProperty("Connectors", BindingFlags.Public | BindingFlags.Instance);
+                if (connectorsProperty == null) { _initFailureReason = "IConnectorsManager.Connectors property not found"; return; }
+
+                _connectorsManager = manager;
+                _connectorsProperty = connectorsProperty;
+            }
+            catch (Exception ex)
+            {
+                _initFailureReason = ex.GetType().Name + ": " + ex.Message;
+            }
+        }
+    }
+
+    private static Type? FindType(Assembly[] assemblies, string assemblySimpleName, string fullTypeName)
+    {
+        foreach (var assembly in assemblies)
+        {
+            string? name;
+            try { name = assembly.GetName().Name; } catch { continue; }
+            if (!string.Equals(name, assemblySimpleName, StringComparison.OrdinalIgnoreCase)) continue;
+
+            try
+            {
+                var type = assembly.GetType(fullTypeName, throwOnError: false);
+                if (type != null) return type;
+            }
+            catch { /* keep scanning the other assemblies matching this simple name, if any */ }
+        }
+        return null;
+    }
+}
+```
+
+- [ ] **Étape 2 : écrire le résolveur de contexte**
 
 Créer `src/Atas.Strategy.TradeDeck/ContextResolver.cs` :
 
@@ -1624,6 +2043,7 @@ using System.Collections.Generic;
 using System.Linq;
 
 using ATAS.DataFeedsCore;
+using ATAS.Indicators;
 
 namespace TradeDeck.Atas.Strategy;
 
@@ -1631,30 +2051,56 @@ namespace TradeDeck.Atas.Strategy;
 /// Turns the deck's selection — two strings, an account name and an instrument name — into the ATAS
 /// objects an order needs.
 ///
-/// RESOLVED AGAINST THE CONNECTOR, NEVER AGAINST THE CHART. The chart the strategy is attached to is
-/// only a host; Order carries its own Portfolio and Security, so the deck can trade an instrument
-/// the chart does not display. Every lookup below therefore goes through Connector.Portfolios /
-/// Connector.Securities, and never through ChartStrategy.Portfolio / .Security.
+/// RESOLVED AGAINST THE AGGREGATED HOST REGISTRY, NEVER AGAINST THE CHART, AND NEVER AGAINST A SINGLE
+/// CONNECTOR. There is no such thing as "the" connector: portfolios are spread across whichever of
+/// the platform's connectors are actually connected (measured live: 2 of 12, one of them a Rithmic
+/// connector carrying a portfolio invisible from the chart). Every account/instrument/position/order
+/// lookup below therefore walks <see cref="ConnectorRegistry.GetConnectors"/>, never a single
+/// connector — and Order carries its own Portfolio and Security, so the deck can trade an instrument
+/// the chart does not display.
+///
+/// DEGRADED MODE. When the registry is unreachable (<see cref="IsDegraded"/>), every lookup below
+/// falls back to the chart's own <c>ITradingManager</c> — one account, one instrument, the chart's.
+/// This is not a partial failure to patch around: it is the delivered fallback (see Contraintes
+/// globales), entered and left silently except for the one transition log line in
+/// <see cref="ConnectorRegistry.GetConnectors"/> (via <c>IsAvailable</c> flipping) — this class adds
+/// no logging of its own for the transition, it only reads the registry's current answer on each
+/// call.
 /// </summary>
 internal sealed class ContextResolver
 {
-    private readonly Func<IDataFeedConnector?> _connector;
+    private readonly ConnectorRegistry _registry;
+    private readonly Func<ITradingManager?> _tradingManager;
 
-    public ContextResolver(Func<IDataFeedConnector?> connector) => _connector = connector;
+    public ContextResolver(ConnectorRegistry registry, Func<ITradingManager?> tradingManager)
+    {
+        _registry = registry;
+        _tradingManager = tradingManager;
+    }
 
-    public IDataFeedConnector? Connector => _connector();
+    /// <summary>True once the host registry has proven unreachable — read for logging/diagnostics only.</summary>
+    public bool IsDegraded => !_registry.IsAvailable;
+
+    /// <summary>Every connector currently carrying a portfolio. Empty in degraded mode.</summary>
+    public IReadOnlyList<IDataFeedConnector> Connectors => _registry.GetConnectors();
+
+    public IDataFeedConnector? ConnectorFor(Portfolio? portfolio) => _registry.ConnectorFor(portfolio);
 
     public Portfolio? FindPortfolio(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
 
-        var portfolios = Connector?.Portfolios;
-        if (portfolios == null) return null;
+        var connectors = _registry.GetConnectors();
+        if (connectors.Count == 0) return DegradedPortfolio(name);
 
-        foreach (var portfolio in portfolios)
+        foreach (var connector in connectors)
         {
-            if (string.Equals(portfolio?.AccountID, name, StringComparison.OrdinalIgnoreCase))
-                return portfolio;
+            var portfolios = SafePortfolios(connector);
+            foreach (var portfolio in portfolios)
+            {
+                if (string.Equals(portfolio?.AccountID, name, StringComparison.OrdinalIgnoreCase))
+                    return portfolio;
+            }
         }
 
         SdLog.Warn("Account not found: {0}", name);
@@ -1662,42 +2108,73 @@ internal sealed class ContextResolver
     }
 
     /// <summary>
-    /// Matches the deck's instrument string against what the connector knows.
+    /// Chart-scoped fallback for FindPortfolio when the registry is unreachable. Only ONE portfolio
+    /// exists in this mode — the chart's own, via TradingManager — so the lookup degrades to
+    /// "is this the one account we have", rather than a search.
+    /// </summary>
+    private Portfolio? DegradedPortfolio(string name)
+    {
+        var portfolio = _tradingManager()?.Portfolio;
+        if (portfolio == null) return null;
+        if (string.Equals(portfolio.AccountID, name, StringComparison.OrdinalIgnoreCase)) return portfolio;
+
+        SdLog.Warn("Account '{0}' not found — degraded mode only exposes the chart's own account ('{1}')",
+            name, portfolio.AccountID ?? "?");
+        return null;
+    }
+
+    /// <summary>
+    /// Matches the deck's instrument string against what the registry knows, across every connector.
     ///
-    /// Three passes, narrowest first. The deck sends whatever the trader typed on the Instrument
-    /// key — "MNQ", "MNQ 09-26", or the broker's own symbol — and each broker names its contracts
-    /// differently. Matching Code exactly first means an unambiguous symbol never gets hijacked by
-    /// a prefix match on another one.
+    /// Three passes, narrowest first, exact match always wins regardless of which connector or
+    /// position in the enumeration it came from — see the ambiguity handling below. The deck sends
+    /// whatever the trader typed on the Instrument key — "MNQ", "MNQ 09-26", or the broker's own
+    /// symbol — and each broker names its contracts differently.
     /// </summary>
     public Security? FindSecurity(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
 
-        var securities = Connector?.Securities;
-        if (securities == null) return null;
+        var connectors = _registry.GetConnectors();
+        if (connectors.Count == 0) return DegradedSecurity(name);
 
         var wanted = name.Trim();
-        Security? prefix = null;
+        Security? best = null;
 
-        foreach (var security in securities)
+        foreach (var connector in connectors)
         {
-            if (security == null) continue;
-
-            if (string.Equals(security.Code, wanted, StringComparison.OrdinalIgnoreCase)) return security;
-            if (string.Equals(security.Instrument, wanted, StringComparison.OrdinalIgnoreCase)) return security;
-
-            // Kept as a fallback rather than returned at once: an exact match found later in the
-            // list must still win over a prefix match found earlier.
-            if (prefix == null && !string.IsNullOrEmpty(security.Code) &&
-                security.Code.StartsWith(wanted, StringComparison.OrdinalIgnoreCase))
+            var securities = SafeSecurities(connector);
+            foreach (var security in securities)
             {
-                prefix = security;
+                if (security == null) continue;
+
+                if (string.Equals(security.Code, wanted, StringComparison.OrdinalIgnoreCase)) return security;
+                if (string.Equals(security.Instrument, wanted, StringComparison.OrdinalIgnoreCase)) return security;
+
+                if (best == null && !string.IsNullOrEmpty(security.Code) &&
+                    security.Code.StartsWith(wanted, StringComparison.OrdinalIgnoreCase))
+                {
+                    best = security;
+                }
             }
         }
 
-        if (prefix != null) return prefix;
+        if (best != null) return best;
 
         SdLog.Warn("Instrument not found: {0}", name);
+        return null;
+    }
+
+    private Security? DegradedSecurity(string name)
+    {
+        var security = _tradingManager()?.Security;
+        if (security == null) return null;
+        if (string.Equals(security.Code, name, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(security.Instrument, name, StringComparison.OrdinalIgnoreCase))
+            return security;
+
+        SdLog.Warn("Instrument '{0}' not found — degraded mode only exposes the chart's own instrument ('{1}')",
+            name, security.Code ?? "?");
         return null;
     }
 
@@ -1712,15 +2189,13 @@ internal sealed class ContextResolver
     {
         if (portfolio == null || security == null) return null;
 
-        var positions = Connector?.Positions;
-        if (positions == null) return null;
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null) return IsDegraded ? DegradedPosition(portfolio, security) : null;
 
-        foreach (var position in positions)
+        foreach (var position in SafePositions(connector))
         {
             if (position == null) continue;
-            if (!ReferenceEquals(position.Portfolio, portfolio) &&
-                !string.Equals(position.Portfolio?.AccountID, portfolio.AccountID, StringComparison.OrdinalIgnoreCase))
-                continue;
+            if (!SamePortfolio(position.Portfolio, portfolio)) continue;
             if (!SameSecurity(position.Security, security)) continue;
 
             return position.Volume != 0 ? position : null;
@@ -1729,23 +2204,68 @@ internal sealed class ContextResolver
         return null;
     }
 
+    private Position? DegradedPosition(Portfolio portfolio, Security security)
+    {
+        var tm = _tradingManager();
+        var position = tm?.Position;
+        if (position == null || position.Volume == 0m) return null;
+        if (!SamePortfolio(position.Portfolio, portfolio) || !SameSecurity(position.Security, security)) return null;
+        return position;
+    }
+
     /// <summary>
-    /// Account names the deck may select.
+    /// Every open position on this portfolio, across whichever connector owns it — used by
+    /// flattenAccount, which liquidates the whole account rather than one instrument.
+    /// </summary>
+    public List<Position> FindAllPositions(Portfolio? portfolio)
+    {
+        var found = new List<Position>();
+        if (portfolio == null) return found;
+
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null)
+        {
+            if (IsDegraded)
+            {
+                var position = _tradingManager()?.Position;
+                if (position != null && position.Volume != 0m && SamePortfolio(position.Portfolio, portfolio))
+                    found.Add(position);
+            }
+            return found;
+        }
+
+        foreach (var position in SafePositions(connector))
+        {
+            if (position == null || position.Volume == 0m) continue;
+            if (!SamePortfolio(position.Portfolio, portfolio)) continue;
+            found.Add(position);
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Account names the deck may select, aggregated across every connected connector.
     ///
     /// Real accounts first, then simulated ones — the same order the NinjaTrader add-on publishes,
     /// so the Account key's list does not reshuffle when a trader moves between platforms.
     /// IsRealAccount is a FACT ATAS gives us, not a naming convention: the NinjaTrader side had to
     /// infer it from the provider, and the bridge still infers it from a "Sim" prefix.
+    ///
+    /// DEGRADED MODE returns AT MOST ONE NAME — the chart's own account. That is not a bug to fix:
+    /// it is the entire point of the fallback, and it is what tells the trader, honestly, that the
+    /// deck can no longer see the rest of the platform's accounts.
     /// </summary>
     public List<string> GetAccountNames()
     {
+        var connectors = _registry.GetConnectors();
+        if (connectors.Count == 0) return DegradedAccountNames();
+
         var live = new List<string>();
         var sim = new List<string>();
 
-        var portfolios = Connector?.Portfolios;
-        if (portfolios != null)
+        foreach (var connector in connectors)
         {
-            foreach (var portfolio in portfolios)
+            foreach (var portfolio in SafePortfolios(connector))
             {
                 var name = portfolio?.AccountID;
                 if (string.IsNullOrWhiteSpace(name)) continue;
@@ -1756,7 +2276,7 @@ internal sealed class ContextResolver
                 // trades to Bitlearn as if they had happened. The NinjaTrader add-on guarded the
                 // same hazard by excluding the accounts named Backtest and Playback101 — ATAS states
                 // it as a fact instead of a name.
-                if (portfolio!.IsReplay()) continue;
+                if (SafeIsReplay(portfolio!)) continue;
 
                 if (portfolio.IsRealAccount) live.Add(name); else sim.Add(name);
             }
@@ -1765,15 +2285,27 @@ internal sealed class ContextResolver
         return live.Concat(sim).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    private List<string> DegradedAccountNames()
+    {
+        var portfolio = _tradingManager()?.Portfolio;
+        if (portfolio == null || string.IsNullOrWhiteSpace(portfolio.AccountID)) return new List<string>();
+        if (SafeIsReplay(portfolio)) return new List<string>();
+        return new List<string> { portfolio.AccountID };
+    }
+
     public List<Order> FindActiveOrders(Portfolio? portfolio, Security? security)
     {
         var found = new List<Order>();
         if (portfolio == null || security == null) return found;
 
-        var orders = Connector?.Orders;
-        if (orders == null) return found;
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null)
+        {
+            if (IsDegraded) found.AddRange(DegradedOrders(portfolio, security, allInstruments: false));
+            return found;
+        }
 
-        foreach (var order in orders)
+        foreach (var order in SafeOrders(connector))
         {
             if (!IsActive(order)) continue;
             if (!SamePortfolio(order!.Portfolio, portfolio)) continue;
@@ -1789,10 +2321,14 @@ internal sealed class ContextResolver
         var found = new List<Order>();
         if (portfolio == null) return found;
 
-        var orders = Connector?.Orders;
-        if (orders == null) return found;
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null)
+        {
+            if (IsDegraded) found.AddRange(DegradedOrders(portfolio, security: null, allInstruments: true));
+            return found;
+        }
 
-        foreach (var order in orders)
+        foreach (var order in SafeOrders(connector))
         {
             if (!IsActive(order)) continue;
             if (!SamePortfolio(order!.Portfolio, portfolio)) continue;
@@ -1800,6 +2336,26 @@ internal sealed class ContextResolver
         }
 
         return found;
+    }
+
+    /// <summary>
+    /// Degraded-mode order lookup, via TradingManager.Orders — confirmed live to show every order on
+    /// the chart's account+instrument pair REGARDLESS OF ORIGIN, including a manual ChartTrader order
+    /// (Comment empty). That is the discriminator GuardEnforcer relies on even in degraded mode.
+    /// </summary>
+    private IEnumerable<Order> DegradedOrders(Portfolio portfolio, Security? security, bool allInstruments)
+    {
+        var tm = _tradingManager();
+        var orders = tm?.Orders;
+        if (orders == null) yield break;
+
+        foreach (var order in orders)
+        {
+            if (!IsActive(order)) continue;
+            if (!SamePortfolio(order!.Portfolio, portfolio)) continue;
+            if (!allInstruments && !SameSecurity(order.Security, security)) continue;
+            yield return order;
+        }
     }
 
     /// <summary>Working stop orders, sorted by trigger price ascending.</summary>
@@ -1898,10 +2454,47 @@ internal sealed class ContextResolver
         return !string.IsNullOrEmpty(a.SecurityId) &&
                string.Equals(a.SecurityId, b.SecurityId, StringComparison.OrdinalIgnoreCase);
     }
+
+    // --- Defensive accessors -----------------------------------------------------------------
+    //
+    // Every lookup above walks collections owned by a connector this class does not control, on the
+    // 500ms publish tick. A broker's connector rebuilding its portfolio list mid-walk, or throwing
+    // out of a property it owns, must cost this ONE lookup, never the tick's real stateUpdate — same
+    // reasoning as ConnectorRegistry.SafePortfolioCount.
+
+    private static IEnumerable<Portfolio> SafePortfolios(IDataFeedConnector connector)
+    {
+        try { return connector.Portfolios ?? Enumerable.Empty<Portfolio>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Portfolios read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Portfolio>(); }
+    }
+
+    private static IEnumerable<Security> SafeSecurities(IDataFeedConnector connector)
+    {
+        try { return connector.Securities ?? Enumerable.Empty<Security>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Securities read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Security>(); }
+    }
+
+    private static IEnumerable<Position> SafePositions(IDataFeedConnector connector)
+    {
+        try { return connector.Positions ?? Enumerable.Empty<Position>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Positions read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Position>(); }
+    }
+
+    private static IEnumerable<Order> SafeOrders(IDataFeedConnector connector)
+    {
+        try { return connector.Orders ?? Enumerable.Empty<Order>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Orders read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Order>(); }
+    }
+
+    private static bool SafeIsReplay(Portfolio portfolio)
+    {
+        try { return portfolio.IsReplay(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "IsReplay() faulted: {0}", ex.GetType().Name); return false; }
+    }
 }
 ```
 
-- [x] **Étape 2 : écrire le publieur d'état**
+- [ ] **Étape 3 : écrire le publieur d'état**
 
 Créer `src/Atas.Strategy.TradeDeck/StatePublisher.cs` :
 
@@ -1913,8 +2506,9 @@ using System.Linq;
 using System.Threading;
 
 using ATAS.DataFeedsCore;
-// ConnectionStates lives here, not in ATAS.DataFeedsCore — see the deviation note in the csproj.
-using StockSharp.Messages;
+// ConnectionStates lives here, NOT in StockSharp.Messages (a same-named but unrelated type there —
+// see the deviation note in the csproj) and not in ATAS.DataFeedsCore either.
+using Utils.Common.Network.Client;
 
 namespace TradeDeck.Atas.Strategy;
 
@@ -2235,11 +2829,16 @@ internal sealed class StatePublisher : IDisposable
 }
 ```
 
-- [x] **Étape 3 : brancher la publication et les commandes de suivi**
+- [ ] **Étape 4 : brancher la publication et les commandes de suivi**
+
+> ⏸ Redémarrée avec les étapes 2 et 3 : `new ContextResolver(() => Connector)` construisait le
+> résolveur contre `ChartStrategy.Connector`, toujours nul. Il se construit désormais contre le
+> `ConnectorRegistry` et le `TradingManager` — voir ci-dessous.
 
 Dans `src/Atas.Strategy.TradeDeck/TradeDeckStrategy.cs`, ajouter les champs sous `_bridge` :
 
 ```csharp
+    private ConnectorRegistry? _registry;
     private ContextResolver? _resolver;
     private StatePublisher? _publisher;
 
@@ -2260,13 +2859,20 @@ Dans `src/Atas.Strategy.TradeDeck/TradeDeckStrategy.cs`, ajouter les champs sous
 Dans `OnStarted()`, après `_bridge.Start();` :
 
 ```csharp
-            _resolver = new ContextResolver(() => Connector);
+            // ChartStrategy.Connector is confirmed always null on classic ATAS — never used here.
+            // The registry is the primary path; ContextResolver degrades to the protected
+            // Indicator.TradingManager getter (reachable only from this class, passed down as a
+            // delegate) when the registry cannot be reached.
+            _registry = new ConnectorRegistry();
+            _resolver = new ContextResolver(_registry, () => TradingManager);
             _publisher = new StatePublisher(_resolver, _bridge, StateIntervalMs);
             // Empty instrument on purpose: a hardcoded contract goes stale and would make the deck
             // show — and trade — something the trader never picked. The bridge replays its
             // selection on every connection.
             _publisher.Start(_resolver.GetAccountNames().FirstOrDefault() ?? string.Empty, string.Empty);
 ```
+
+(ajouter `using ATAS.Indicators;` en tête de fichier — c'est là que vit `ITradingManager`.)
 
 (ajouter `using System.Linq;` en tête de fichier.)
 
@@ -2279,7 +2885,7 @@ Dans `OnStopping()`, **avant** l'arrêt du client :
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the state publisher"); }
 ```
 
-et dans `OnStopped()`, après la libération du client : `_publisher = null; _resolver = null;`.
+et dans `OnStopped()`, après la libération du client : `_publisher = null; _resolver = null; _registry = null;`.
 
 Remplacer enfin le corps de `OnBridgeMessage` après la ligne de journalisation :
 
@@ -2377,7 +2983,10 @@ et ajouter les trois méthodes :
 
 (ajouter `using System.Collections.Generic;` en tête de fichier.)
 
-- [x] **Étape 4 : compiler**
+- [ ] **Étape 5 : compiler**
+
+> ⏸ Redémarrée avec les étapes 1 à 4 ci-dessus : le build réussi précédemment portait sur la
+> conception invalidée (résolution contre `ChartStrategy.Connector`).
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -2385,11 +2994,36 @@ dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Relea
 
 Attendu : `Build succeeded`.
 
-- [ ] **Étape 5 : vérifier la publication — recette étape 2**
+- [ ] **Étape 6 : vérifier le registre puis la publication — recette étapes 0 et 2**
 
-> ⏸ Non exécutée : exige ATAS X ouvert, un compte de simulation et le bridge lancé. Voir la note de fin de tâche 3.
+> ⏸ Non exécutée par ce protocole écrit (exige ATAS classique ouvert, un compte de simulation et le
+> bridge lancé), mais **déjà établie sur le terrain le 24/08** par une sonde d'investigation
+> (non commitée, voir `progress.md`, section « SONDE SERVICELOCATOR ») : la chaîne de réflexion
+> fonctionne bel et bien sur cette machine. Cette étape rejoue la même preuve à travers le code
+> propre livré par les étapes 1 à 4, plutôt que la sonde jetable.
 
-Déployer le DLL, redémarrer la stratégie, bridge lancé, hôte TradeDeck lancé, puis :
+**Étape 0 de la recette — le registre répond.** Avant même de regarder `stateUpdate`, vérifier que
+`ConnectorRegistry` a bien résolu la chaîne d'hôte :
+
+```powershell
+Get-Content "$env:APPDATA\StreamDeckTrader\logs\addon-$(Get-Date -f yyyy-MM-dd).log" -Tail 60
+```
+
+Attendu, l'une des deux lignes (transition unique, loggée une fois — ne pas s'attendre à la revoir à
+chaque tick) :
+- `Registry | Connector registry reachable — resolving deck accounts against IConnectorsManager.Connectors`
+  — le chemin normal, **ce qu'on veut voir** ; ou
+- `Registry | Connector registry unreachable (…) — degrading to the chart's own account and instrument via TradingManager`
+  — le mode dégradé s'est enclenché. C'est **le basculement qu'on vérifie alors, pas la suite** :
+  confirmer que le boîtier affiche quand même **un** compte et **un** instrument (ceux du graphique)
+  plutôt que rien, avant de continuer.
+
+Si aucune des deux lignes n'apparaît, la stratégie n'a pas atteint son premier tick de publication —
+revenir à l'étape 4 de la tâche 2 (le bridge la voit-il comme add-on connecté ?) avant de creuser ici.
+
+**Étape 2 de la recette — la publication.** Déployer le DLL (`%APPDATA%\ATAS\Strategies\`,
+**redémarrer ATAS** — voir la tâche 2), stratégie démarrée sur un graphique avec portefeuille et flux
+connectés, bridge lancé, hôte TradeDeck lancé, puis :
 
 ```powershell
 Get-Content "$env:APPDATA\StreamDeckTrader\logs\bridge-$(Get-Date -f yyyy-MM-dd).log" -Tail 40
@@ -2402,13 +3036,20 @@ Attendu :
 - le boîtier affiche le **compte sélectionné** et l'**instrument sélectionné**, `FLAT`, et un P&L de
   compte cohérent avec ce qu'ATAS affiche ;
 - appuyer sur la touche Compte pour changer de compte : le nouveau nom apparaît sur la touche **et**
-  dans `addon-*.log` en `State | Tracking changed — account='…'` ;
+  dans `addon-*.log` en `State | Tracking changed — account='…'` — **si le registre est joignable**,
+  la liste doit porter tous les comptes connectés, pas seulement celui du graphique ; en mode dégradé
+  elle n'en porte qu'un, ce qui est le comportement attendu et pas un bug ;
 - **contrôle du piège `ClosedPnL`** : comparer `realizedPnl` publié avec le P&L **du jour** affiché
   par ATAS pour ce portefeuille. S'il correspond au cumul de toutes les séances, c'est
   `TotalClosedPnL` qui a été lu — corriger avant de continuer, sinon la macro refusera tout dès
   l'ouverture sur un compte en perte historique.
 
-- [x] **Étape 6 : committer**
+Rappel du piège classique (voir tâche 2, étape 8) : un `stateUpdate` qui s'arrête net est d'abord le
+signe qu'ATAS a arrêté la stratégie en silence (changement d'instrument, d'unité de temps ou de
+portefeuille sur le graphique, rechargement d'historique, fermeture du graphique, redépôt du DLL) —
+vérifier l'état de la stratégie dans ATAS avant de chercher un bug dans ce code.
+
+- [ ] **Étape 7 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
@@ -2452,9 +3093,13 @@ et non après.
 - Produit : `CommandDispatcher` — `CommandDispatcher(OrderEngine)`,
   `static bool Handles(string action)`, `BridgeMessage Dispatch(BridgeMessage)`.
 - Produit : `OrderMonitor` —
-  `OrderMonitor(BridgeClient)`, `void Attach(IDataFeedConnector)`,
-  `void Detach()`, `Action? StateChanged { get; set; }`, `void Dispose()`.
-  Les deux paramètres facultatifs du constructeur arrivent aux tâches 8 et 9.
+  `OrderMonitor(BridgeClient)`, `void Refresh(IReadOnlyList<IDataFeedConnector> connectors)`,
+  `void DetachAll()`, `Action? StateChanged { get; set; }`, `void Dispose()`.
+  **`Refresh`, pas `Attach(IDataFeedConnector)` : un seul connecteur n'existe pas.** Les portefeuilles
+  sont répartis sur plusieurs connecteurs (tâche 3) ; `Refresh` reconcilie l'ensemble des abonnements
+  contre `ContextResolver.Connectors` à chaque tick de publication — un connecteur peut se
+  (dé)connecter en cours de session, comme le Rithmic du 24/08 qui portait un portefeuille invisible
+  du graphique. Les deux paramètres facultatifs du constructeur arrivent aux tâches 8 et 9.
 
 - [ ] **Étape 1 : écrire le moteur d'ordres**
 
@@ -2764,27 +3409,35 @@ Créer `src/Atas.Strategy.TradeDeck/OrderMonitor.cs` :
 ```csharp
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ATAS.DataFeedsCore;
 
 namespace TradeDeck.Atas.Strategy;
 
 /// <summary>
-/// Watches every order on the connector and tells the deck what it cannot see for itself.
+/// Watches every order on every connector the deck can reach, and tells the deck what it cannot see
+/// for itself.
 ///
 /// THE REJECTION PATH IS THE REASON THIS CLASS EXISTS. Submission is asynchronous: OpenOrder returns
 /// long before the venue answers, so without this the key would flash "OK" for an order that never
 /// reached the market. This is exactly the pain Account.Submit caused on the NinjaTrader side.
 ///
-/// Subscribed to the CONNECTOR, not to the strategy's own callbacks: the connector reports
-/// everything happening on the account, whatever its origin — DOM, Chart Trader, another strategy.
+/// SUBSCRIBED TO EVERY CONNECTOR THE REGISTRY REPORTS, NOT ONE. There is no single connector to
+/// subscribe to (task 3): portfolios are spread across whichever connectors are actually connected,
+/// and an Order/Position/MyTrade belongs to whichever one carries its portfolio. Missing a connector
+/// here means missing every external order placed on the account it carries — exactly the hole
+/// GuardEnforcer (task 8) exists to close, so <see cref="Refresh"/> is called every publish tick
+/// (500 ms) rather than once at start-up: a connector can connect mid-session, as the Rithmic one did
+/// in the field trial, carrying a portfolio invisible from the chart.
 /// </summary>
 internal sealed class OrderMonitor : IDisposable
 {
     private readonly BridgeClient _bridge;
     private readonly object _lock = new();
 
-    private IDataFeedConnector? _connector;
+    /// <summary>Connectors currently subscribed, keyed by reference — a connector never compares by value.</summary>
+    private readonly HashSet<IDataFeedConnector> _attached = new();
     private bool _disposed;
 
     /// <summary>
@@ -2795,40 +3448,64 @@ internal sealed class OrderMonitor : IDisposable
 
     public OrderMonitor(BridgeClient bridge) => _bridge = bridge;
 
-    public void Attach(IDataFeedConnector connector)
+    /// <summary>
+    /// Reconciles the connectors this monitor listens to against what the registry currently reports.
+    /// Cheap to call every tick: a session with no connector churn does nothing beyond a set
+    /// comparison, and one that gains or loses a connector attaches or detaches exactly that one.
+    /// </summary>
+    public void Refresh(IReadOnlyList<IDataFeedConnector> connectors)
     {
         lock (_lock)
         {
-            if (_disposed || ReferenceEquals(_connector, connector)) return;
-            Detach();
+            if (_disposed) return;
 
-            connector.OrderChanged += OnOrderChanged;
-            connector.OrdersRegisterFailed += OnRegisterFailed;
-            connector.OrdersCancelFailed += OnCancelFailed;
-            connector.OrderModifyFailed += OnModifyFailed;
-            connector.PositionsChanged += OnPositionsChanged;
+            var wanted = new HashSet<IDataFeedConnector>(connectors);
 
-            _connector = connector;
-            SdLog.Event("Order", "Order monitor attached to the connector");
+            foreach (var gone in _attached.Where(c => !wanted.Contains(c)).ToList())
+                DetachOne(gone);
+
+            foreach (var connector in connectors)
+                if (!_attached.Contains(connector)) AttachOne(connector);
         }
     }
 
-    public void Detach()
+    /// <summary>Detaches every connector — used on shutdown and in degraded mode, where the registry reports none.</summary>
+    public void DetachAll()
     {
         lock (_lock)
         {
-            if (_connector == null) return;
-            try
-            {
-                _connector.OrderChanged -= OnOrderChanged;
-                _connector.OrdersRegisterFailed -= OnRegisterFailed;
-                _connector.OrdersCancelFailed -= OnCancelFailed;
-                _connector.OrderModifyFailed -= OnModifyFailed;
-                _connector.PositionsChanged -= OnPositionsChanged;
-            }
-            catch (Exception ex) { SdLog.Warn("Could not unsubscribe order updates: {0}", ex.Message); }
-            _connector = null;
+            foreach (var connector in _attached.ToList()) DetachOne(connector);
         }
+    }
+
+    private void AttachOne(IDataFeedConnector connector)
+    {
+        connector.OrderChanged += OnOrderChanged;
+        connector.OrdersRegisterFailed += OnRegisterFailed;
+        connector.OrdersCancelFailed += OnCancelFailed;
+        connector.OrderModifyFailed += OnModifyFailed;
+        connector.PositionsChanged += OnPositionsChanged;
+
+        _attached.Add(connector);
+        SdLog.Event("Order", "Order monitor attached to connector {0} ({1} connector(s) now watched)",
+            connector.GetType().Name, _attached.Count);
+    }
+
+    private void DetachOne(IDataFeedConnector connector)
+    {
+        try
+        {
+            connector.OrderChanged -= OnOrderChanged;
+            connector.OrdersRegisterFailed -= OnRegisterFailed;
+            connector.OrdersCancelFailed -= OnCancelFailed;
+            connector.OrderModifyFailed -= OnModifyFailed;
+            connector.PositionsChanged -= OnPositionsChanged;
+        }
+        catch (Exception ex) { SdLog.Warn("Could not unsubscribe order updates from a connector: {0}", ex.Message); }
+
+        _attached.Remove(connector);
+        SdLog.Event("Order", "Order monitor detached from connector {0} ({1} connector(s) now watched)",
+            connector.GetType().Name, _attached.Count);
     }
 
     private void OnPositionsChanged(IDataFeedConnector connector, IEnumerable<Position> positions)
@@ -2934,7 +3611,7 @@ internal sealed class OrderMonitor : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            Detach();
+            DetachAll();
             StateChanged = null;
         }
     }
@@ -2956,6 +3633,14 @@ ajouter les champs :
     private OrderEngine? _engine;
     private CommandDispatcher? _dispatcher;
     private OrderMonitor? _monitor;
+
+    /// <summary>
+    /// Keeps the order monitor's connector subscriptions in step with the registry, at the same
+    /// cadence as the state publisher. A connector can connect or disconnect mid-session — see
+    /// OrderMonitor.Refresh — and the only way to notice is to ask again periodically; there is no
+    /// "connector list changed" event to subscribe to instead.
+    /// </summary>
+    private System.Threading.Timer? _connectorRefreshTimer;
 ```
 
 et les cinq membres de la passerelle, en fin de classe :
@@ -3007,13 +3692,37 @@ Après la création du publieur :
             // the publisher that owns it.
             _monitor.StateChanged = _publisher.PublishNow;
 
-            if (Connector != null) _monitor.Attach(Connector);
-            else SdLog.EventWarn("Session", "No connector at start — order rejections will not be reported until one appears");
+            // NEVER ChartStrategy.Connector (always null, confirmed by measurement — task 3). The
+            // monitor's subscriptions are reconciled against the registry's CURRENT connector list on
+            // the same cadence as the state publisher: a connector can appear mid-session (the
+            // Rithmic connector in the 24/08 field trial connected after the chart had already
+            // started), and there is no event to learn that from — only asking again.
+            _connectorRefreshTimer = new System.Threading.Timer(_ =>
+            {
+                try { _monitor?.Refresh(_resolver?.Connectors ?? Array.Empty<IDataFeedConnector>()); }
+                catch (Exception ex) { SdLog.Fail("Session", ex, "Order monitor connector refresh failed"); }
+            }, null, 0, StateIntervalMs);
 ```
+
+⚠ **Conséquence du mode dégradé à connaître avant la tâche 8, pas à découvrir dessus.**
+`ContextResolver.Connectors` est **vide** en mode dégradé (registre introuvable) : `_monitor.Refresh`
+détache alors tout, et plus aucun événement `OrderChanged` / `OrdersRegisterFailed` / `NewOrders`
+n'arrive. Deux conséquences distinctes :
+- **la remontée de rejet (tâche 4, étape 8 de ce plan / étape 4 de la recette)** ne fonctionne plus
+  en mode dégradé — un ordre du deck refusé par le courtier ne produira pas de `orderUpdate`
+  `rejected:true` tant que le registre reste introuvable ;
+- **`GuardEnforcer` (tâche 8) perd sa seule source d'événements temps réel.** Ce n'est pas un défaut à
+  corriger dans cette tâche : `TradingManager.Orders`, confirmé peuplé même hors registre (essai
+  terrain du 24/08, un ordre `ChartTrader` manuel y était visible), reste consultable **depuis la
+  boucle de publication** — mais l'appliquer à `GuardEnforcer` en mode dégradé exigerait un mécanisme
+  de sondage que ce plan ne spécifie pas (voir la tâche 8). À signaler explicitement dans le rapport
+  de tâche plutôt qu'à laisser croire que le mode dégradé protège autant que le mode normal.
 
 Dans `OnStopping()`, avant l'arrêt du publieur :
 
 ```csharp
+        try { _connectorRefreshTimer?.Dispose(); _connectorRefreshTimer = null; }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the connector refresh timer"); }
         try { _monitor?.Dispose(); }
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while detaching the order monitor"); }
 ```
@@ -3043,43 +3752,51 @@ Attendu : `Build succeeded`.
 
 - [ ] **Étape 6 : LE contrôle qui décide du portage — un ordre part-il là où le deck vise ?**
 
-C'est l'hypothèse porteuse de toute la conception, et **la documentation ne la tranche pas**.
-`ChartStrategy.Portfolio` et `.Security` sont fixés par le graphique — leur accesseur en écriture
-**lève** — donc la seule façon de viser ailleurs est de poser `Portfolio` et `Security` sur l'`Order`
-lui-même. L'exemple officiel `SmaChartStrategy` les recopie depuis la stratégie et ne dit donc rien
-du cas qui nous intéresse : `OpenOrder` honore-t-il les champs de l'ordre, ou leur substitue-t-il
-ceux du graphique ?
+C'est l'hypothèse porteuse de toute la conception, et **ni la documentation ni l'essai terrain du
+24/08 ne la tranchent** — celui-ci a mesuré `ChartStrategy.Connector` toujours nul et le registre de
+connecteurs joignable, mais n'a jamais soumis d'ordre visant un compte ou un instrument différent de
+ceux du graphique. `ChartStrategy.Portfolio` et `.Security` sont fixés par le graphique — leur
+accesseur en écriture **lève** — donc la seule façon de viser ailleurs est de poser `Portfolio` et
+`Security` sur l'`Order` lui-même. L'exemple officiel `SmaChartStrategy` les recopie depuis la
+stratégie et ne dit donc rien du cas qui nous intéresse : `OpenOrder` honore-t-il les champs de
+l'ordre, ou leur substitue-t-il ceux du graphique ?
 
-Sur **compte de simulation**, faire le test qui répond, et lui seul :
+**Deux tests, dans cet ordre, sur compte de simulation** — le second est le plus important, parce que
+c'est lui qui décide si l'agrégation multi-connecteurs de la tâche 3 sert à quelque chose pour
+l'envoi d'ordres, pas seulement pour l'affichage :
 
-1. ouvrir un graphique sur un instrument **A** (par exemple MNQ) et y démarrer la stratégie ;
-2. sélectionner sur le deck un instrument **B différent** (par exemple MES) ;
-3. appuyer une fois sur Acheter.
+1. **Même connecteur, instrument différent.** Ouvrir un graphique sur un instrument **A** (par
+   exemple MNQ) et y démarrer la stratégie ; sélectionner sur le deck un instrument **B différent**
+   (par exemple MES, même compte, même connecteur) ; appuyer une fois sur Acheter.
+   Attendu : **la position s'ouvre sur B**, pas sur A.
+2. **Connecteur différent.** Sans changer le graphique, sélectionner sur le deck un **compte porté
+   par un AUTRE connecteur** que celui du graphique — dans l'essai terrain, le graphique était sur
+   `DEMO29ADC` (`SbeConnector`) et `LDE050-SZ976P0C-TEST001` était porté par un `RithmicConnector`
+   distinct. Appuyer une fois sur Acheter.
+   Attendu : **la position s'ouvre sur ce second compte**, chez son propre courtier.
 
-Attendu : **la position s'ouvre sur B**, pas sur A. Vérifier dans la fenêtre des positions d'ATAS,
-pas seulement sur la touche du deck.
+Vérifier les deux dans la fenêtre des positions d'ATAS, pas seulement sur la touche du deck.
 
-Si la position s'ouvre sur **A**, la conception ne tient pas telle quelle — mais elle n'est pas
-perdue : passer par le chemin brut du connecteur, qui prend l'ordre et rien d'autre. Dans
-`TradeDeckStrategy`, remplacer l'implémentation de la passerelle par :
-
-```csharp
-    // FALLBACK, if and only if the routing check proved ChartStrategy.OpenOrder substitutes the
-    // chart's own instrument. RegisterOrder is the connector's raw path: it takes the order and
-    // nothing else, so order.Portfolio and order.Security are all that decide where it goes. It
-    // also skips whatever validation the strategy API performs, which is why it is the second
-    // choice and not the first.
-    void IOrderGateway.Open(Order order) => Connector.RegisterOrder(order);
-    void IOrderGateway.Cancel(Order order) => Connector.CancelOrder(order);
-    void IOrderGateway.Modify(Order oldOrder, Order newOrder) => Connector.ModifyOrder(oldOrder, newOrder);
-```
+**Si l'un des deux échoue, la conception ne tient pas telle quelle — et il n'existe PAS de repli
+prêt à écrire dans ce plan.** L'idée d'origine — passer par une méthode brute du connecteur
+(`Connector.RegisterOrder(order)`) — est elle-même invalidée par l'essai terrain :
+`ChartStrategy.Connector` est **toujours nul**, donc cet appel ne peut littéralement pas s'exécuter,
+et la surface d'API relevée par réflexion sur `IDataFeedConnector` (voir « Surface d'API ATAS utilisée
+par ce plan ») ne liste **aucune** méthode d'envoi d'ordre — seulement `Portfolios`, `Securities`,
+`Orders`, `Positions`, `MyTrades`, `GetPosition` et des événements. Aucune méthode de soumission n'a
+été confirmée par réflexion sur le connecteur retourné par `ConnectorRegistry` : en inventer une ici
+reproduirait exactement l'erreur qui a fait échouer ce test. **S'arrêter, journaliser précisément ce
+qui a été observé (sur quel compte/instrument la position s'est réellement ouverte), et relancer une
+sonde de réflexion sur l'instance de connecteur obtenue via `ConnectorRegistry.ConnectorFor(...)`**
+avant d'écrire quoi que ce soit — c'est une nouvelle tâche de découverte, pas une ligne de code à
+deviner.
 
 Faire ensuite le contrôle du dialogue, qui ne coûte rien : appuyer sur Acheter et vérifier
 qu'**aucune boîte de confirmation ne s'ouvre**. Le chemin documenté n'a pas de paramètre
 `askConfirmation`, donc rien ne devrait apparaître ; si quelque chose apparaît, c'est un réglage de
 la plateforme et non du code — le noter dans le rapport de tâche.
 
-Consigner le résultat des deux contrôles : c'est la conclusion la plus réutilisable de tout ce
+Consigner le résultat des trois contrôles : c'est la conclusion la plus réutilisable de tout ce
 portage.
 
 - [ ] **Étape 7 : recette étape 3 — un ordre au marché**
@@ -3336,33 +4053,32 @@ Dans `OrderEngine.cs`, après les ordres d'entrée :
         if (cancelFailure != null) return cancelFailure;
 
         var flattened = 0;
-        var positions = _resolver.Connector?.Positions;
-        if (positions != null)
+        // FindAllPositions, NOT a raw connector: the portfolio can live on any connector the registry
+        // aggregates (task 3), and in degraded mode this call transparently falls back to the
+        // chart's own TradingManager.Position — no branch needed here for that case.
+        var positions = _resolver.FindAllPositions(portfolio);
+        foreach (var position in positions)
         {
-            foreach (var position in positions)
+            if (position == null || position.Volume == 0m) continue;
+            if (position.Security == null) continue;
+
+            var ctx = new TradingContext { Portfolio = portfolio, Security = position.Security };
+            var direction = position.Volume > 0m ? OrderDirections.Sell : OrderDirections.Buy;
+            var order = NewOrder(ctx, direction, OrderTypes.Market, Math.Abs(position.Volume),
+                                 DeckOrderComment + "_Liquidate");
+
+            var failure = Submit(cmd, order);
+            if (failure != null)
             {
-                if (position == null || position.Volume == 0m) continue;
-                if (!ContextResolver.SamePortfolio(position.Portfolio, portfolio)) continue;
-                if (position.Security == null) continue;
-
-                var ctx = new TradingContext { Portfolio = portfolio, Security = position.Security };
-                var direction = position.Volume > 0m ? OrderDirections.Sell : OrderDirections.Buy;
-                var order = NewOrder(ctx, direction, OrderTypes.Market, Math.Abs(position.Volume),
-                                     DeckOrderComment + "_Liquidate");
-
-                var failure = Submit(cmd, order);
-                if (failure != null)
-                {
-                    // The worst outcome this whole feature can produce: the trader is told the day
-                    // is closed while a position is still live. Reported as a failure so the deck
-                    // turns red instead of pretending it worked.
-                    SdLog.Fail("Safety", null, "[REQ:{0}] ACCOUNT LIQUIDATION FAILED on {1} for {2}",
-                        cmd.RequestId, accountName, ContextResolver.InstrumentName(position.Security));
-                    return failure;
-                }
-
-                flattened++;
+                // The worst outcome this whole feature can produce: the trader is told the day
+                // is closed while a position is still live. Reported as a failure so the deck
+                // turns red instead of pretending it worked.
+                SdLog.Fail("Safety", null, "[REQ:{0}] ACCOUNT LIQUIDATION FAILED on {1} for {2}",
+                    cmd.RequestId, accountName, ContextResolver.InstrumentName(position.Security));
+                return failure;
             }
+
+            flattened++;
         }
 
         SdLog.EventWarn("Safety", "[REQ:{0}] ACCOUNT LIQUIDATION on {1} — {2} order(s) cancelled, {3} position(s) flattened",
@@ -4080,8 +4796,12 @@ Sur compte Sim :
 **Le contrôle OCO se fait en premier après le bracket**, avant les déplacements : sans lui, un take
 profit exécuté laisse un stop actif sur une position à plat, et ce stop est une *entrée* dès qu'il
 se déclenche. Si les deux jambes ne sont pas liées, vérifier que le courtier ATAS supporte l'OCO
-serveur (`Connector.IsSupportedServerOCO`) — et si ce n'est pas le cas, **s'arrêter et le signaler**
-plutôt que de livrer un bracket dont une jambe survit.
+serveur — **jamais via `ChartStrategy.Connector.IsSupportedServerOCO`, cette propriété est toujours
+nulle** (tâche 3). Le connecteur à interroger est celui qui porte le portefeuille résolu, obtenu par
+`_resolver.ConnectorFor(ctx.Portfolio)` ; si cette propriété n'existe pas sur son type (à vérifier par
+réflexion à ce moment-là, elle n'est pas listée dans « Surface d'API ATAS utilisée par ce plan »),
+traiter l'absence comme « support inconnu » et **s'arrêter et le signaler** plutôt que de livrer un
+bracket dont une jambe survit.
 
 - [ ] **Étape 8 : committer**
 
@@ -4108,6 +4828,16 @@ ne connaît **aucune** raison de refus en dur : elle reçoit `{blocked, reason, 
 que soit `reason`. `beforeSessionStart` emprunte donc exactement le même chemin que `dailyLoss`.
 **L'heure locale, l'armement et le compte à rebours sont une décision du bridge seul** : cette
 classe ne lit jamais l'horloge.
+
+⚠ **Cette classe dépend entièrement des événements du connecteur, qui n'existent plus en mode
+dégradé** (registre introuvable — voir la tâche 3 et la note de la tâche 4, étape 4). Sans connecteur,
+`OrderMonitor` ne reçoit plus `OrderChanged` / `NewOrders`, donc `GuardEnforcer.Inspect` n'est plus
+appelé et un ordre passé hors du deck n'est plus surveillé du tout. Ce plan **ne spécifie pas** de
+sondage périodique de `TradingManager.Orders` pour compenser — ce serait un mécanisme distinct, non
+mesuré (voir la tâche 9). L'étape 5 doit donc **constater et journaliser** ce trou plutôt que de le
+découvrir en production : le rapport de tâche doit dire explicitement si le mode dégradé a été
+recréé et testé, et si oui, confirmer que la macro de sécurité **côté bridge** (qui continue de
+refuser les commandes venues du deck, elle, quel que soit le mode) reste le seul filet dans ce cas.
 
 **Fichiers :**
 - Créer : `src/Atas.Strategy.TradeDeck/GuardEnforcer.cs`
@@ -4457,13 +5187,13 @@ et brancher l'inspection **en tête** de `OnOrderChanged`, juste après le test 
 ```
 
 Ajouter aussi l'abonnement aux ordres **nouveaux**, qui est le premier moment où un ordre extérieur
-apparaît — dans `Attach()` :
+apparaît — dans `AttachOne()` (tâche 4) :
 
 ```csharp
             connector.NewOrders += OnNewOrders;
 ```
 
-dans `Detach()` : `_connector.NewOrders -= OnNewOrders;`
+dans `DetachOne()` : `connector.NewOrders -= OnNewOrders;`
 
 et le gestionnaire :
 
@@ -4578,6 +5308,15 @@ Puis les deux contrôles qui garantissent qu'on n'enferme personne :
 
 Si l'un de ces deux derniers contrôles échoue, `GrowsExposure` est faux : ne pas livrer.
 
+6. **Contrôle du trou en mode dégradé.** Provoquer artificiellement un registre introuvable (voir la
+   tâche 3, étape 6 — par exemple en coupant le `IsLocationProviderSet` via une sonde, ou plus
+   simplement en constatant l'entrée en mode dégradé si elle se produit d'elle-même sur ce poste),
+   puis rejouer l'étape 3 ci-dessus (ordre tapé dans le DOM, macro armée). Attendu, **et c'est un
+   attendu négatif, pas un échec** : l'ordre **n'est pas annulé** et aucune ligne `Safety | EXTERNAL
+   ORDER …` n'apparaît — conforme à la note de la tâche 4, étape 4. Noter le résultat dans le rapport
+   de tâche : c'est la preuve que la dégradation est silencieuse pour ce garde-fou précis, information
+   que le trader doit connaître avant de compter dessus en mode dégradé.
+
 - [ ] **Étape 6 : committer**
 
 ```bash
@@ -4593,10 +5332,20 @@ Le journal **ne traverse pas le bridge**. `ExecutionRecorder` écrit une ligne J
 `%APPDATA%\StreamDeckTrader\journal\` ; le deck-host lit, scelle la chaîne et téléverse. **Le chemin
 et le format sont une interface, pas un choix** — le deck-host reste intact.
 
-Source des exécutions : **`Connector.NewMyTrades`**, et non `ChartStrategy.OnNewMyTrade`. La
-différence est la raison d'être du journal : au niveau du connecteur on voit **toutes** les
-exécutions du compte, y compris celles passées au DOM ou au Chart Trader. C'est ce que le fichier
-revendique — « le seul composant qui voit la vérité ».
+Source des exécutions : **`NewMyTrades` sur CHAQUE connecteur agrégé par le registre** (tâche 3), et
+non `ChartStrategy.OnNewMyTrade`, et jamais un connecteur unique — les comptes sont répartis sur
+plusieurs connecteurs. La différence est la raison d'être du journal : au niveau du connecteur on
+voit **toutes** les exécutions du compte, y compris celles passées au DOM ou au Chart Trader. C'est
+ce que le fichier revendique — « le seul composant qui voit la vérité ».
+
+⚠ **Trou assumé du mode dégradé, à vérifier à l'étape 5 plutôt qu'à supposer.** `NewMyTrades` est un
+événement du **connecteur** ; en mode dégradé il n'y en a aucun. `ITradingManager.MyTrades` existe
+par réflexion (relevé dans le sondage du 24/08), mais son contenu et son comportement en direct
+**n'ont pas été mesurés** — contrairement à `TradingManager.Orders`, confirmé peuplé sur l'essai
+terrain. Si l'étape 5 montre qu'il reste vide ou ne se met pas à jour, le journal des exécutions
+s'arrête simplement en mode dégradé (compte et instrument du graphique) plutôt que d'inventer un
+mécanisme de sondage non vérifié ici : le signaler dans le rapport de tâche plutôt que de le
+masquer.
 
 Trois règles gouvernent cette classe, et **la première prime sur tout** : elle ne doit jamais pouvoir
 casser le trading. Aucune exception ne s'en échappe, aucun appel réseau, aucune attente bloquante —
@@ -4995,17 +5744,18 @@ Dans `OrderMonitor.cs`, ajouter le champ et le paramètre :
     }
 ```
 
-dans `Attach()` :
+dans `AttachOne()` (tâche 4) :
 
 ```csharp
-            // NewMyTrades on the CONNECTOR, never ChartStrategy.OnNewMyTrade. That difference is the
-            // reason the journal exists: at connector level we see every fill on the account,
+            // NewMyTrades on EACH connector the registry aggregates, never ChartStrategy.OnNewMyTrade
+            // and never a single connector. That difference is the reason the journal exists: at
+            // connector level we see every fill on every account the platform is connected to,
             // including the ones placed at the DOM or the Chart Trader — the very ones the guard
             // rules cannot prevent, only report.
             connector.NewMyTrades += OnNewMyTrades;
 ```
 
-dans `Detach()` : `_connector.NewMyTrades -= OnNewMyTrades;`
+dans `DetachOne()` : `connector.NewMyTrades -= OnNewMyTrades;`
 
 et le gestionnaire :
 
@@ -5062,7 +5812,7 @@ partent non scellées, ce qui est un cas valide mais pas celui qu'on vérifie ic
 
 Attendu, ligne par ligne :
 - **une ligne par exécution, les deux présentes** — c'est ce qui prouve que la source est bien
-  `Connector.NewMyTrades` et non le rappel de la stratégie ;
+  `NewMyTrades` sur les connecteurs agrégés et non le rappel de la stratégie ;
 - chaque ligne porte `seq` et `sig` ;
 - `orderName` vaut `"StreamDeck"` sur la première et `""` (ou la classification du gestionnaire) sur
   la seconde ;
@@ -5079,9 +5829,11 @@ Attendu, ligne par ligne :
    | MES | 0.25 | 1.25 | **5** |
    | ES | 0.25 | 12.50 | **50** |
 
-   Un écart ici fausse le P&L de tout le journal, **et personne ne s'en aperçoit avant les
-   statistiques**. Si le tableau ne correspond pas, s'arrêter : c'est la dérivation qu'il faut
-   corriger, jamais le tableau.
+   La ligne ES est **déjà validée en direct** (essai terrain du 24/08, ESU6 : `TickCost=12.5`,
+   `TickSize=0.25` → `pointValue=50`, exact) : ce n'est plus une valeur à découvrir mais un attendu
+   auquel comparer. Un écart ici fausse le P&L de tout le journal, **et personne ne s'en aperçoit
+   avant les statistiques**. Si le tableau ne correspond pas, s'arrêter : c'est la dérivation qu'il
+   faut corriger, jamais le tableau.
 
 4. **Contrôle de l'horodatage.** Relever la ligne `Journal | First fill timestamp: raw=… kind=… → …`
    dans `addon-*.log` et comparer l'heure enregistrée à celle qu'ATAS affiche dans sa liste de
@@ -5111,6 +5863,7 @@ et sait ce qui reste à faire.
 **Fichiers :**
 - Créer : `docs/atas-chemin-ordre.md`
 - Modifier : `docs/carte-des-deux-depots.md`
+- Modifier : `binaries/README.md`
 - Modifier : `CLAUDE.md`
 - Modifier : `CHANGELOG.md`
 
@@ -5119,13 +5872,14 @@ et sait ce qui reste à faire.
 Créer `docs/atas-chemin-ordre.md` :
 
 ```markdown
-# Le chemin d'ordre sur ATAS X
+# Le chemin d'ordre sur ATAS classique
 
 > Rédigé en français comme le reste de la documentation ; le code et ses commentaires restent en
 > anglais.
 
-`src/Atas.Strategy.TradeDeck/` remplace l'add-on NinjaTrader pour un trader qui utilise ATAS X.
-**Un trader utilise NinjaTrader OU ATAS** : le bridge n'accepte qu'un add-on à la fois.
+`src/Atas.Strategy.TradeDeck/` remplace l'add-on NinjaTrader pour un trader qui utilise **ATAS
+classique** — les Chart Strategies n'existent pas sur ATAS X (Beta), confirmé par écrit par le
+support ATAS. **Un trader utilise NinjaTrader OU ATAS** : le bridge n'accepte qu'un add-on à la fois.
 
 Ni le bridge ni le deck-host ne savent qui est au bout du fil. Ils ne connaissent que
 [`protocol.md`](protocol.md), et c'est la propriété qui a rendu ce portage possible : **aucune ligne
@@ -5136,23 +5890,37 @@ des deux n'a été modifiée.**
 ```powershell
 dotnet build src\Atas.Strategy.TradeDeck\Atas.Strategy.TradeDeck.csproj -c Release
 Copy-Item src\Atas.Strategy.TradeDeck\bin\Release\net10.0\TradeDeck.Strategy.dll `
-          "$env:APPDATA\ATAS X\Strategies\" -Force
+          "$env:APPDATA\ATAS\Strategies\" -Force
 ```
 
-Puis dans ATAS : un graphique quelconque → clic droit → *Stratégies* → **TradeDeck** → *Démarrer*.
+**Puis redémarrer ATAS.** Contrairement à ATAS X, le classique **ne surveille pas** ce dossier : le
+DLL déposé pendant qu'ATAS tourne n'est vu qu'au prochain démarrage. La stratégie se charge alors sur
+un graphique quelconque, par clic droit → ***Chart strategies*** (« Stratégies de graphique ») →
+**TradeDeck** → *Démarrer*.
 
-**Le graphique n'est qu'un hôte.** Il peut afficher n'importe quoi : la sélection du deck est résolue
-contre `Connector.Portfolios` et `Connector.Securities`, et posée explicitement sur chaque ordre. La
-seule contrainte réelle est que la stratégie soit **attachée à un graphique et démarrée**.
+**Le graphique doit avoir un portefeuille sélectionné dans ses paramètres et un flux de données
+connecté** : sans les deux, ATAS refuse purement et simplement de démarrer la stratégie.
 
-Graphique fermé ou stratégie arrêtée, elle cesse d'être un client du bridge, et le bridge signale
-« add-on déconnecté » exactement comme quand NinjaTrader est fermé. Le deck affiche déjà cet état.
+**Le graphique n'est qu'un hôte, pas la source de la sélection.** `ChartStrategy.Connector` est
+toujours nul sur le classique — mesuré, confirmé par le support ATAS — donc la sélection du deck ne
+se résout pas contre lui : elle se résout contre le **registre de connecteurs de l'hôte**
+(`OFT.Platform.Core`, atteint par réflexion), agrégé sur tous les connecteurs connectés, et posée
+explicitement sur chaque ordre. Si ce registre devient introuvable, la stratégie **dégrade** vers le
+compte et l'instrument du graphique seuls, le dit une fois dans le journal, et continue de trader.
+
+**Le graphique arrête la stratégie silencieusement** dans plusieurs cas, à connaître avant de
+diagnostiquer une publication d'état qui s'interrompt sans raison apparente : changement
+d'instrument, d'unité de temps ou de portefeuille du graphique ; rechargement de l'historique ;
+fermeture du graphique ; redépôt du DLL. Dans tous ces cas, elle cesse d'être un client du bridge, et
+le bridge signale « add-on déconnecté » exactement comme quand NinjaTrader est fermé — le deck
+affiche déjà cet état.
 
 ## Diagnostiquer
 
 Même fichier qu'avec NinjaTrader : `%APPDATA%\StreamDeckTrader\logs\addon-AAAA-MM-JJ.log`, même
 format de ligne, même horloge. Le flux de [`logging-strategy.md`](logging-strategy.md) fonctionne
-sans rien changer.
+sans rien changer. Le basculement en mode dégradé (registre de connecteurs introuvable) s'y trouve
+lui aussi, journalisé une fois au démarrage.
 
 `TD_LOG_LEVEL=TRACE` dans l'environnement d'ATAS ouvre les trames WebSocket et la publication d'état
 — des dizaines de milliers de lignes par jour, à ne laisser que le temps d'un diagnostic.
@@ -5165,7 +5933,7 @@ sans rien changer.
 | Copieur multi-comptes | **absent**. `setCopierConfig` et `copierPanic` sont refusés en `UNSUPPORTED_ACTION` |
 | Élagage des comptes « roulés » de prop firm | non porté : heuristique propre à la façon dont NinjaTrader énumère ces comptes |
 
-## Les deux pièges à connaître
+## Les pièges à connaître
 
 - **`Portfolio.ClosedPnL`, jamais `TotalClosedPnL`.** Le second cumule les séances ; le premier porte
   une date. La perte journalière se mesure « depuis le PnL de début de journée » : prendre le
@@ -5173,8 +5941,12 @@ sans rien changer.
   macro refuserait tout, indéfiniment.
 - **`pointValue` est dérivé — `TickCost / TickSize`.** C'est le seul champ calculé du journal, et le
   serveur calcule le P&L dessus sans table d'instruments à lui. Faux, il fausse tout le journal, et
-  personne ne s'en aperçoit avant les statistiques. À vérifier **contrat par contrat**, sur ceux
-  réellement tradés.
+  personne ne s'en aperçoit avant les statistiques. Validé sur ESU6 réel (`50 = 12.5 / 0.25`), mais à
+  revérifier **contrat par contrat**, sur ceux réellement tradés.
+- **`ChartStrategy.Connector` est toujours nul, et `ChartStrategy.Orders` vaut toujours 0.** Ne
+  jamais s'y fier ni les retenter en repli : ce n'est pas un cas rare, c'est systématique sur le
+  classique. L'accès réel passe par le registre de connecteurs de l'hôte, en réflexion pure — voir
+  `docs/superpowers/specs/2026-08-21-portage-chemin-ordre-atas-design.md`.
 
 ## Le fichier partagé
 
@@ -5191,25 +5963,37 @@ Dans `docs/carte-des-deux-depots.md`, ajouter à l'inventaire des composants du 
 l'add-on NinjaTrader :
 
 ```markdown
-| `src/Atas.Strategy.TradeDeck/` | La même chose pour ATAS X : une `ChartStrategy` qui parle le même protocole au bridge. Un trader utilise NinjaTrader **ou** ATAS. Voir [atas-chemin-ordre.md](atas-chemin-ordre.md) |
+| `src/Atas.Strategy.TradeDeck/` | La même chose pour ATAS classique : une `ChartStrategy` qui parle le même protocole au bridge. Un trader utilise NinjaTrader **ou** ATAS. Voir [atas-chemin-ordre.md](atas-chemin-ordre.md) |
 ```
 
-- [ ] **Étape 3 : mettre `CLAUDE.md` à jour**
+- [ ] **Étape 3 : ajouter le nouveau binaire archivé dans `binaries/README.md`**
+
+`src/Directory.Build.targets` archive déjà l'assembly du projet dans `binaries/Atas.Strategy.TradeDeck/`
+à chaque build Release, mais le tableau de `binaries/README.md` ne le liste pas encore — il ne cite
+que `Atas.Indicators.TradeDeck/`, `StreamDeckBridge/`, `NinjaTrader.AddOn.StreamDeck/` et
+`NinjaTrader.Scripts/`. Ajouter une ligne :
+
+```markdown
+| `Atas.Strategy.TradeDeck/` | net10.0 | **Livrable réel** : c'est ce `TradeDeck.Strategy.dll` qu'ATAS classique charge depuis `%APPDATA%\ATAS\Strategies\`. |
+```
+
+- [ ] **Étape 4 : mettre `CLAUDE.md` à jour**
 
 Trois ajouts, aux endroits qui existent déjà :
 
 1. Dans **Commandes**, après le bloc des indicateurs NinjaScript :
 
 ```bash
-# Stratégie ATAS X — le chemin d'ordre (voir docs/atas-chemin-ordre.md)
+# Stratégie ATAS classique — le chemin d'ordre (voir docs/atas-chemin-ordre.md)
 dotnet build "src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj" -c Release
 ```
 
 2. Dans **Déploiement**, après le point sur l'add-on NT8 :
 
 ```markdown
-- **la stratégie ATAS X** se dépose en DLL dans `%APPDATA%\ATAS X\Strategies\`, puis se charge depuis
-  le menu contextuel d'un graphique. Un trader utilise NinjaTrader **ou** ATAS : le bridge n'accepte
+- **la stratégie ATAS classique** se dépose en DLL dans `%APPDATA%\ATAS\Strategies\`, dossier que le
+  classique ne surveille pas — **redémarrer ATAS** avant de la charger depuis le menu contextuel d'un
+  graphique (*Chart strategies*). Un trader utilise NinjaTrader **ou** ATAS : le bridge n'accepte
   qu'un add-on à la fois.
 ```
 
@@ -5229,18 +6013,18 @@ dotnet build "src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj" -c Rel
   quoi plus rien ne scelle — silencieusement, puisque ce côté-ci croit toujours signer correctement.
 ```
 
-- [ ] **Étape 4 : compléter le journal des versions**
+- [ ] **Étape 5 : compléter le journal des versions**
 
 Dans `CHANGELOG.md`, sous la section « Non publié » déjà ouverte en tâche 1 :
 
 ```markdown
-- Chemin d'ordre porté sur ATAS X : `src/Atas.Strategy.TradeDeck/` exécute les 13 commandes, publie
-  l'état toutes les 500 ms, remonte les rejets, applique la macro de sécurité aux ordres passés hors
-  du deck et journalise les exécutions scellées. Le bridge et le deck-host sont inchangés. La macro
-  Tendance et le copieur multi-comptes ne sont pas portés.
+- Chemin d'ordre porté sur ATAS classique : `src/Atas.Strategy.TradeDeck/` exécute les 13 commandes,
+  publie l'état toutes les 500 ms, remonte les rejets, applique la macro de sécurité aux ordres
+  passés hors du deck et journalise les exécutions scellées. Le bridge et le deck-host sont
+  inchangés. La macro Tendance et le copieur multi-comptes ne sont pas portés.
 ```
 
-- [ ] **Étape 5 : vérifier que rien du bridge ni de l'hôte n'a bougé**
+- [ ] **Étape 6 : vérifier que rien du bridge ni de l'hôte n'a bougé**
 
 ```bash
 git diff --stat main -- src/StreamDeckBridge src/deck-host
@@ -5249,7 +6033,7 @@ git diff --stat main -- src/StreamDeckBridge src/deck-host
 Attendu : **aucune sortie**. La moindre ligne signale qu'on a cédé quelque part sur la contrainte
 qui rend ce portage possible.
 
-- [ ] **Étape 6 : compiler les trois projets une dernière fois**
+- [ ] **Étape 7 : compiler les trois projets une dernière fois**
 
 ```bash
 dotnet build src/NinjaTrader.AddOn.StreamDeck/NinjaTrader.AddOn.StreamDeck.csproj -c Release
@@ -5259,10 +6043,10 @@ dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Relea
 
 Attendu : `Build succeeded` sur les trois.
 
-- [ ] **Étape 7 : committer**
+- [ ] **Étape 8 : committer**
 
 ```bash
-git add docs/ CLAUDE.md CHANGELOG.md
+git add docs/ binaries/README.md CLAUDE.md CHANGELOG.md
 git commit -m "Documenter le chemin d ordre ATAS : installation, diagnostic et limites"
 ```
 

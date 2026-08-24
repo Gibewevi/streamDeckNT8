@@ -1,4 +1,4 @@
-# Portage du chemin d'ordre vers ATAS X — conception
+# Portage du chemin d'ordre vers ATAS — conception
 
 > Périmètre : **les 13 commandes, la publication d'état, les refus et les rejets, et le journal.**
 > La macro Tendance et le copieur multi-comptes font l'objet d'une spécification ultérieure.
@@ -8,7 +8,12 @@
 ## Ce qu'on livre
 
 Une `ChartStrategy` ATAS qui remplace l'add-on NinjaTrader, parle le même protocole WebSocket au
-bridge, et permet de trader depuis le deck sur ATAS X.
+bridge, et permet de trader depuis le deck sur **ATAS classique**.
+
+> **La cible est l'ATAS classique, pas ATAS X.** Le support ATAS l'a confirmé par écrit :
+> « Chart Strategies are not currently supported in ATAS X (Beta) ». Le module n'existe pas
+> là-bas ; il est prévu, sans date. Tout ce document vise donc `C:\Program Files (x86)\ATAS
+> Platform`.
 
 **Le bridge et le deck-host ne sont pas touchés.** Ni `MessageRouter` ni le deck-host ne savent
 qu'il y a NinjaTrader au bout du fil : ils ne connaissent que `docs/protocol.md`. Un composant ATAS
@@ -19,23 +24,78 @@ Un trader utilise NinjaTrader **ou** ATAS : le bridge n'accepte qu'un add-on à 
 
 ## Ce qu'ATAS permet réellement
 
-La documentation ATAS laisse croire qu'une stratégie est enfermée dans son graphique. Les assemblies
-disent autre chose, et c'est ce qui rend le cockpit portable. Établi par réflexion sur
-`ATAS.Indicators.dll`, `ATAS.DataFeedsCore.dll` et `ATAS.Strategies.dll` :
+La documentation ATAS laisse croire qu'une stratégie est enfermée dans son graphique, et le support
+le confirme par écrit : « the chart strategy is **intentionally scoped to the chart context**, not a
+global account enumerator ». C'est vrai de l'API de `ChartStrategy`. Ça ne l'est pas du processus,
+et c'est cette nuance qui rend le cockpit portable.
 
-- `ChartStrategy.Connector` donne un `IDataFeedConnector`, qui expose **`Portfolios`**,
-  **`Securities`**, `GetPortfolios(Security)` et `SearchSecuritiesAsync(...)`, plus les événements
-  `NewPortfolios` / `PortfoliosChanged` / `NewSecurities` ;
-- le même connecteur expose **`Orders`, `Positions`, `MyTrades` au pluriel**, avec `NewOrders`,
-  `NewPositions`, `PositionsChanged`, `NewMyTrades`, `OrderChanged`, `OrdersRegisterFailed`,
-  `OrdersCancelFailed`, `OrderModifyFailed` — c'est-à-dire **tout ce qui se passe sur le compte**,
-  quelle qu'en soit l'origine, et pas seulement ce que la stratégie a provoqué ;
-- `Order` porte ses propres champs `Portfolio` et `Security` : un ordre n'est donc pas contraint à
-  la sélection du graphique.
+Établi **par mesure sur la plateforme installée**, pas par lecture de la documentation.
 
-Conclusion : le sélecteur d'instrument, le sélecteur de compte, la surveillance des ordres externes
-et le journal sont tous réalisables. La seule contrainte réelle est que **la stratégie doit être
-attachée à un graphique et démarrée** — n'importe lequel, affichant n'importe quoi.
+### Ce qui ne marche pas, et qu'il ne faut pas réessayer
+
+**`ChartStrategy.Connector` est toujours `null`.** Mesuré sur 472 trames publiées, sur plusieurs
+sessions. Le support l'a confirmé : la propriété existe, mais l'hôte du graphique ne la renseigne
+jamais — « the connector must be assigned manually if you need it ». Le graphique fournit `Portfolio`
+et `Security`, rien d'autre.
+
+**`ChartStrategy.Orders` vaut toujours 0**, même quand un ordre existe. Ne jamais s'en servir.
+
+**`TradingManager` fonctionne mais ne voit que le graphique.** `TradingManager.Portfolio` et
+`.Security` sont les *mêmes références* que celles du graphique, et `TradingManager.Orders` ne montre
+que le couple compte + instrument affiché. Un ordre passé sur un autre compte y est invisible —
+vérifié en en plaçant un et en le laissant vivre.
+
+### Ce qui marche : le registre de l'hôte
+
+L'hôte, `OFT.Platform.Core.dll`, est chargé dans le **même processus** que la stratégie et expose un
+registre de connecteurs en types et méthodes **publics**. Il s'atteint par
+`CommonServiceLocator.ServiceLocator`, une API **statique publique** livrée avec la plateforme :
+
+```csharp
+ServiceLocator.IsLocationProviderSet                        // vrai : Autofac est en place
+ServiceLocator.Current.GetInstance(typeof(ITradingCore))    // OFT.Platform.Core.Providers
+    .GetConnector(portfolio)  →  IDataFeedConnector         // le connecteur qui manquait
+ServiceLocator.Current.GetInstance(typeof(IConnectorsManager))
+    .Connectors               →  tous les connecteurs de la plateforme
+```
+
+Mesuré : `GetConnector(DEMO29ADC)` rend un `SbeConnector` exposant `Portfolios`, `Securities`,
+`Orders`, `Positions` et `MyTrades` — deux ordres et deux positions là où `TradingManager` n'en
+voyait aucun au même instant. Et `IConnectorsManager.Connectors` liste 12 connecteurs, dont un
+Rithmic portant deux portefeuilles absents du graphique.
+
+Le sélecteur d'instrument, le sélecteur de compte, la surveillance des ordres extérieurs et le
+journal sont donc tous réalisables, comme prévu. `Order` porte ses propres champs `Portfolio` et
+`Security` : un ordre n'est pas contraint à la sélection du graphique.
+
+⚠ **Deux écarts avec ce que cette spécification supposait d'abord.**
+
+1. **Les portefeuilles sont répartis sur plusieurs connecteurs.** Il n'existe pas *un* connecteur
+   qu'on interroge : `ContextResolver` doit **agréger** sur `IConnectorsManager.Connectors`, en
+   ignorant ceux qui ne portent aucun portefeuille — 10 des 12 étaient dans ce cas.
+2. **`CoreProvider.TradingCore` est nul.** Passer par `GetInstance(ITradingCore)` directement.
+
+### Le prix, et comment on le paie
+
+`OFT.Platform.Core` **n'est pas l'API plugin documentée** — c'est l'hôte. Les types et méthodes
+employés sont publics, il n'y a aucune réflexion sur du privé, mais ATAS ne garantit rien et ne
+préviendra pas s'ils bougent. Le support a d'ailleurs répondu trois fois « ce n'est pas possible »,
+en parlant à chaque fois de l'API de `ChartStrategy`.
+
+D'où une règle qui n'est pas négociable : **cet accès se fait entièrement par réflexion, sans une
+seule référence de compilation** à `OFT.Platform.Core`, `OFT.Platform` ou `CommonServiceLocator`.
+Ce n'est pas une élégance. Une référence dure et la stratégie ne se charge plus du tout le jour où
+un de ces types est renommé : cockpit mort, sans explication. Par réflexion, elle **dégrade**.
+
+**Le mode dégradé fait partie de la livraison.** Quand le registre est introuvable, la stratégie
+retombe sur `TradingManager` — un seul compte, un seul instrument, ceux du graphique — le dit une
+fois dans le journal, et continue de trader. Il doit être écrit et testé comme le reste : c'est le
+filet qui transforme une rupture d'API en fonctionnalité réduite plutôt qu'en panne. Il n'est pas du
+code mort.
+
+La seule contrainte qui demeure est que **la stratégie doit être attachée à un graphique et
+démarrée** — n'importe lequel, affichant n'importe quoi, mais avec un portefeuille sélectionné dans
+ses paramètres et un flux de données connecté, faute de quoi ATAS refuse de la démarrer.
 
 ## Le composant
 
@@ -68,12 +128,12 @@ NinjaTrader est fermé. Le deck affiche déjà cet état.
 | `StreamDeckAddOn` (341 l.) | `TradeDeckStrategy : ChartStrategy` | réécrit, plus court |
 | `BridgeClient` (218 l.) | `ClientWebSocket` .NET 10 | réécrit — le verrou d'envoi **reste** |
 | `CommandDispatcher` | idem | réécrit |
-| `ContextResolver` (694 l.) | `Connector.Portfolios` / `.Securities` | réécrit, beaucoup plus court |
+| `ContextResolver` (694 l.) | `IConnectorsManager.Connectors` agrégés → `Portfolios` / `Securities` | réécrit |
 | `TradingEngine` (1059 l.) | `OrderEngine`, `Order` explicites | réécrit |
-| `OrderMonitor` (230 l.) | `Connector.OrderChanged`, `OrdersRegisterFailed` | réécrit, plus court |
+| `OrderMonitor` (230 l.) | `IDataFeedConnector.OrderChanged`, `OrdersRegisterFailed` | réécrit, plus court |
 | `StatePublisher` (530 l.) | idem | réécrit |
-| `GuardEnforcer` (365 l.) | `Connector.NewOrders` + `CancelOrder` | réécrit |
-| `ExecutionRecorder` (401 l.) | idem, sur `Connector.NewMyTrades` | réécrit |
+| `GuardEnforcer` (365 l.) | `IDataFeedConnector.NewOrders` + `CancelOrder` | réécrit |
+| `ExecutionRecorder` (401 l.) | idem, sur `IDataFeedConnector.NewMyTrades` | réécrit |
 | `JournalSeal` (270 l.) | **PARTAGÉ** par lien MSBuild | inchangé |
 | `SimpleJson` (454 l.) | supprimé — `Newtonsoft.Json` | — |
 | `SdLogger` (425 l.) | `ILoggerSource` + même fichier `addon-AAAA-MM-JJ.log` | réécrit |
@@ -87,9 +147,13 @@ d'ordre.
 
 ## La sélection : le deck décide
 
-La sélection du deck (`instrument`, `account`) est résolue contre `Connector.Securities` et
-`Connector.Portfolios`, puis **posée explicitement** sur chaque ordre. Le graphique n'est qu'un
-hôte : il peut afficher tout autre chose.
+La sélection du deck (`instrument`, `account`) est résolue en **agrégeant les portefeuilles et
+les instruments de tous les connecteurs connectés** (`IConnectorsManager.Connectors`), puis
+**posée explicitement** sur chaque ordre. Le graphique n'est qu'un hôte : il peut afficher tout
+autre chose.
+
+En mode dégradé — registre introuvable — la sélection se réduit au couple du graphique, et le
+deck n'affiche qu'un compte et qu'un instrument.
 
 ```csharp
 var order = new Order {
@@ -99,11 +163,15 @@ var order = new Order {
     Type      = OrderTypes.Market,
     QuantityToFill = qty,
 };
-TradingManager.OpenOrder(order, setDefaultQuantity: false, askConfirmation: false, checkOrderStates: true);
+OpenOrder(order);   // ChartStrategy.OpenOrder(Order) — l'API documentee d'une strategie
 ```
 
-`askConfirmation: false` n'est pas un détail : une boîte de dialogue au milieu d'un appui de touche
-transformerait le cockpit en piège.
+**C'est `ChartStrategy.OpenOrder(Order)` qu'on emploie, pas la surcharge à quatre booléens de
+`ITradingManager`.** Cette dernière existe, mais la documentation et l'exemple officiel
+`SmaChartStrategy` n'emploient que `OpenOrder(order)`, `CancelOrder(order)` et
+`ModifyOrder(ancien, neuf)`, sans aucun booléen. Les trois sont présentes sur l'ATAS classique,
+vérifié par réflexion. Cela retire du même coup la question `askConfirmation` : il n'y a pas de
+paramètre, donc pas de boîte de dialogue à craindre au milieu d'un appui de touche.
 
 **`SetStopLoss()`, `SetTakeProfit()` et `SetBreakeven()` sont écartés**, malgré leur existence dans
 `ITradingManager` et les 1059 lignes de `TradingEngine` qu'ils sembleraient économiser. Ils agissent
@@ -150,7 +218,7 @@ jamais l'horloge, il relaie `setGuardPolicy` tel quel, comme pour toute autre r�
 
 | Champ du protocole | Source ATAS |
 |---|---|
-| `connected` | `Connector.ConnectionStateChanged`, `Portfolio.ConnectionState` |
+| `connected` | `IDataFeedConnector.ConnectionStateChanged`, `Portfolio.ConnectionState` |
 | `account.name` | `Portfolio.AccountID` |
 | `account.realizedPnl` | `Portfolio.ClosedPnL` — **et surtout pas `TotalClosedPnL`** |
 | `account.unrealizedPnl` | `Portfolio.OpenPnL` |
@@ -160,7 +228,7 @@ jamais l'horloge, il relaie `setGuardPolicy` tel quel, comme pour toute autre r�
 | `position.exists` / `direction` / `quantity` | `Position.IsInPosition`, signe et valeur de `Position.Volume` |
 | `position.averagePrice` | `Position.AveragePrice` |
 | `position.unrealizedPnl` | `Position.UnrealizedPnL` |
-| `position.hasStopOrder` … `targetOrderCount` | `Connector.Orders` filtrés sur la paire résolue |
+| `position.hasStopOrder` … `targetOrderCount` | `IDataFeedConnector.Orders` filtrés sur la paire résolue |
 | `trend` | **absent** — hors périmètre |
 | `quantity` | rien à faire : le bridge la possède et la fusionne |
 
@@ -185,7 +253,7 @@ Il ne traverse pas le bridge. `ExecutionRecorder` écrit une ligne JSON par exé
 `%APPDATA%\StreamDeckTrader\journal\` ; le deck-host lit, scelle la chaîne et téléverse. **Le chemin
 et le format sont une interface, pas un choix** — le deck-host reste intact.
 
-Source des exécutions : **`Connector.NewMyTrades`**, et non `ChartStrategy.OnNewMyTrade`. La
+Source des exécutions : **`IDataFeedConnector.NewMyTrades`**, et non `ChartStrategy.OnNewMyTrade`. La
 différence est la raison d'être du journal : au niveau du connecteur, on voit toutes les exécutions
 du compte, y compris celles passées au DOM ou au Chart Trader. C'est ce que le fichier revendique —
 « le seul composant qui voit la vérité ».
@@ -240,14 +308,21 @@ le prochain incident, déjà décrit par sa propre victime.
 
 ```xml
 <TargetFramework>net10.0</TargetFramework>
-<ATAS_BASE Condition="'$(ATAS_BASE)'==''">C:\Program Files\ATAS X</ATAS_BASE>
+<ATAS_BASE Condition="'$(ATAS_BASE)'==''">C:\Program Files (x86)\ATAS Platform</ATAS_BASE>
 ```
 
 Références : `ATAS.Indicators`, `ATAS.DataFeedsCore`, **`ATAS.Strategies`**, `OFT.Attributes`,
 `OFT.Localization`, `Utils.Common`. Un seul paquet NuGet, `Newtonsoft.Json`, déjà présent chez ATAS.
 
-Déploiement : le DLL dans `%APPDATA%\ATAS X\Strategies\`, puis chargement depuis le menu contextuel
-du graphique.
+Déploiement : le DLL dans **`%APPDATA%\ATAS\Strategies\`**, puis **redémarrage d'ATAS** — le
+classique ne surveille pas ce dossier, contrairement à ATAS X. La stratégie se charge ensuite par
+clic droit sur le graphique → *Chart strategies*.
+
+Le graphique doit avoir un portefeuille sélectionné dans ses paramètres et un flux connecté,
+sinon ATAS refuse de démarrer la stratégie. Et il l'arrête **silencieusement** dès qu'on change
+son instrument, son unité de temps ou son portefeuille, qu'on recharge l'historique, qu'on ferme
+le graphique — ou qu'on redépose le DLL. C'est normal, et c'est à savoir avant de diagnostiquer
+une publication d'état qui s'arrête.
 
 Logs dans `%APPDATA%\StreamDeckTrader\logs\addon-AAAA-MM-JJ.log`, même nom qu'aujourd'hui : le flux
 de diagnostic de `docs/logging-strategy.md` continue de fonctionner sans rien changer ailleurs. Les
@@ -268,6 +343,10 @@ $env:SDBRIDGE_PluginPort = "9318"; $env:SDBRIDGE_AddonPort = "9319"
 
 Recette, dans cet ordre, chaque étape bloquant la suivante :
 
+0. le registre répond : le journal montre `IsLocationProviderSet=True`, `ITradingCore` résolu,
+   `GetConnector(portefeuille)` non nul, et la liste des comptes de **tous** les connecteurs
+   connectés. Si cette étape échoue, la stratégie doit basculer en mode dégradé **et le dire** —
+   c'est ce basculement qu'on vérifie alors, pas la suite ;
 1. la stratégie se charge, démarre, et le bridge la voit comme add-on connecté ;
 2. `stateUpdate` arrive toutes les 500 ms, compte et instrument corrects, position vide ;
 3. **un** `buyMarket` sur compte Sim produit un ordre, un fill, et une position visible sur la
@@ -295,9 +374,12 @@ et c'est pourquoi elles se font avant les douze autres commandes et non après.
   écriture d'état partagé doit être protégée, et rien ne doit bloquer dans un gestionnaire
   d'événement — la contrainte qui a produit `_sendLock` chez NinjaTrader se pose ici sous une autre
   forme.
-- **`checkOrderStates` et `askConfirmation`.** Deux booléens d'`OpenOrder` dont le comportement
-  exact n'est pas documenté. À établir empiriquement avant de leur faire confiance : une
-  confirmation qui s'ouvre pendant un appui de touche, c'est un cockpit qui ment.
+- **La dépendance à `OFT.Platform.Core`.** Le registre de connecteurs n'est pas l'API plugin
+  documentée. Il peut disparaître à toute mise à jour d'ATAS, sans préavis. Atténué par l'accès
+  en réflexion pure et par le mode dégradé — mais c'est le risque structurel de ce portage, et
+  celui qu'il faut re-vérifier à chaque montée de version.
+- ~~`checkOrderStates` et `askConfirmation`~~ — **écarté** : on passe par
+  `ChartStrategy.OpenOrder(Order)`, qui ne prend aucun booléen.
 - **`orderName`.** NinjaTrader nomme ses ordres de protection ; ATAS ne semble pas offrir
   d'équivalent direct, et le champ sert au serveur à distinguer une sortie au stop d'une sortie à
   l'objectif. À reconstruire depuis `IsStopLossOrder` / `IsTakeProfitOrder`, et à valider contre ce
