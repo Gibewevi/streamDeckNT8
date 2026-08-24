@@ -264,7 +264,7 @@ ou rien. Le rappel est repris à l'étape 8 et à la tâche 10.
   hormis le second paramètre du constructeur.
 - Produit : `enum TradeDeck.Journal.JournalSealLevel { Info, Warn, Error }`.
 
-- [ ] **Étape 1 : changer le namespace**
+- [x] **Étape 1 : changer le namespace**
 
 Dans `src/NinjaTrader.AddOn.StreamDeck/Utilities/JournalSeal.cs`, remplacer
 
@@ -288,7 +288,7 @@ namespace TradeDeck.Journal
 {
 ```
 
-- [ ] **Étape 2 : remplacer la journalisation par une callback**
+- [x] **Étape 2 : remplacer la journalisation par une callback**
 
 Juste après `public sealed class JournalSeal`, ajouter le niveau et le champ. Insérer l'énumération
 **avant** la classe, dans le même namespace :
@@ -355,7 +355,7 @@ par
         }
 ```
 
-- [ ] **Étape 3 : remplacer les quatre appels à `SdLogger`**
+- [x] **Étape 3 : remplacer les quatre appels à `SdLogger`**
 
 Quatre appels, à remplacer un à un — la formulation des messages ne change pas, elle est déjà lue
 dans les journaux existants :
@@ -382,7 +382,7 @@ SdLogger.Warn("Journal seal state unreadable — one chain break is expected: {0
 Report(JournalSealLevel.Warn, "Journal seal state unreadable — one chain break is expected", ex);
 ```
 
-- [ ] **Étape 4 : retirer la dépendance à `SimpleJson`**
+- [x] **Étape 4 : retirer la dépendance à `SimpleJson`**
 
 Le fichier d'état est un objet à deux champs, écrit et relu par cette classe seule. Le lire avec un
 analyseur JSON complet n'apportait rien et coûtait la seule dépendance qui empêche le partage.
@@ -501,7 +501,7 @@ Remplacer `LoadState()` et `SaveState()` par :
         }
 ```
 
-- [ ] **Étape 5 : brancher l'add-on NinjaTrader sur la nouvelle forme**
+- [x] **Étape 5 : brancher l'add-on NinjaTrader sur la nouvelle forme**
 
 Dans `src/NinjaTrader.AddOn.StreamDeck/Services/ExecutionRecorder.cs`, ajouter le `using` en tête de
 fichier, après `using NinjaTrader.Cbi;` :
@@ -530,7 +530,7 @@ par
             });
 ```
 
-- [ ] **Étape 6 : compiler les deux projets NinjaTrader**
+- [x] **Étape 6 : compiler les deux projets NinjaTrader**
 
 ```bash
 dotnet build src/NinjaTrader.AddOn.StreamDeck/NinjaTrader.AddOn.StreamDeck.csproj -c Release
@@ -540,7 +540,7 @@ dotnet build src/NinjaTrader.Scripts/NinjaTrader.Scripts.csproj -c Release
 Attendu : `Build succeeded` sur les deux, ~180 `CS0436` sur le premier. Toute erreur `CS0246` sur
 `SimpleJson` ou `SdLogger` signale un appel oublié dans `JournalSeal.cs`.
 
-- [ ] **Étape 7 : vérifier que la signature n'a pas changé — contre l'autorité, pas contre soi-même**
+- [x] **Étape 7 : vérifier que la signature n'a pas changé — contre l'autorité, pas contre soi-même**
 
 La vraie référence n'est pas le comportement d'hier, c'est `deck-host/src/seal.ts`, dont ce fichier
 doit rester le jumeau exact. On calcule la même signature des deux côtés sur le même enregistrement
@@ -657,7 +657,7 @@ node ../parity.js
 Attendu : **les deux `sig` sont identiques**, à `seq` égal. S'ils diffèrent, la forme canonique a
 bougé — ne pas continuer, c'est exactement l'incident que le commentaire en tête du fichier décrit.
 
-- [ ] **Étape 8 : noter l'obligation de version**
+- [x] **Étape 8 : noter l'obligation de version**
 
 Ajouter la ligne suivante en tête de la section « Non publié » de `CHANGELOG.md` (créer la section
 si elle n'existe pas, en respectant la forme des sections existantes) :
@@ -669,7 +669,7 @@ si elle n'existe pas, en respectant la forme des sections existantes) :
   compilation NinjaScript échoue en bloc, indicateurs du trader compris.
 ```
 
-- [ ] **Étape 9 : committer**
+- [x] **Étape 9 : committer**
 
 ```bash
 git add src/NinjaTrader.AddOn.StreamDeck/Utilities/JournalSeal.cs \

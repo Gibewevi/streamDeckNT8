@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using NinjaTrader.Cbi;
 using NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities;
+using TradeDeck.Journal;
 
 namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 {
@@ -103,7 +104,15 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             _directory = directory ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "StreamDeckTrader", FolderName);
-            _seal = new JournalSeal(_directory);
+            // The seal is shared verbatim with the ATAS strategy and knows nothing about either
+            // host's logger, so it reports through a callback. The three levels map onto the ones
+            // this file already used before the seal was made shareable.
+            _seal = new JournalSeal(_directory, (level, message, ex) =>
+            {
+                if (level == JournalSealLevel.Error) SdLogger.Fail("Journal", ex, "{0}", message);
+                else if (level == JournalSealLevel.Warn) SdLogger.Warn("{0}: {1}", message, ex != null ? ex.Message : "-");
+                else SdLogger.Info("{0}", message);
+            });
         }
 
         /// <summary>

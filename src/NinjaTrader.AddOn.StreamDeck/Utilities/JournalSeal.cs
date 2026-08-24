@@ -5,8 +5,24 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
+// Deliberately NOT a NinjaTrader.* namespace. This file is compiled by BOTH NinjaScript and the
+// ATAS project (see src/Atas.Strategy.TradeDeck), and a NinjaTrader.* namespace inside an ATAS
+// assembly makes the next reader doubt what they are looking at. NinjaScript compiles every .cs
+// under bin\Custom into one assembly and places no constraint on the namespace of a plain class.
+//
+// C# 9 / net48 ONLY, like every shared file: a file-scoped namespace, a record or a required member
+// compiles on the ATAS side and breaks the trader's ENTIRE NinjaScript compilation, his own
+// indicators included.
+namespace TradeDeck.Journal
 {
+    /// <summary>
+    /// Severity of a message this class reports back to its host. Kept as an enum rather than
+    /// folded into "exception or not": the three levels below already exist in both hosts' logs,
+    /// and collapsing them would file a missing key — routine, the deck is simply unpaired — at the
+    /// same level as a sealing failure.
+    /// </summary>
+    public enum JournalSealLevel { Info, Warn, Error }
+
     /// <summary>
     /// Seals each journal line with a chained HMAC.
     ///
@@ -55,16 +71,34 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
         private readonly object _sync = new object();
         private readonly string _directory;
 
+        /// <summary>
+        /// Where this class says what happened. A callback rather than a direct logger call: the
+        /// same file is compiled into the NinjaTrader add-on, which logs through SdLogger, and into
+        /// the ATAS strategy, which logs through SdLog. Neither exists on the other side.
+        /// Null is legal and means "say nothing" — losing a log line must never cost a seal.
+        /// </summary>
+        private readonly Action<JournalSealLevel, string, Exception> _report;
+
         private byte[] _key;
         private long _seq;
         private string _sig = string.Empty;
         private DateTime _lastKeyLook = DateTime.MinValue;
         private bool _failureReported;
 
-        public JournalSeal(string directory)
+        public JournalSeal(string directory, Action<JournalSealLevel, string, Exception> report = null)
         {
             _directory = directory;
+            _report = report;
             LoadState();
+        }
+
+        /// <summary>Reports without ever being able to throw back into the capture path.</summary>
+        private void Report(JournalSealLevel level, string message, Exception ex)
+        {
+            var report = _report;
+            if (report == null) return;
+            try { report(level, message, ex); }
+            catch { /* a logger that throws must not cost the seal */ }
         }
 
         /// <summary>
@@ -126,7 +160,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
                     if (!_failureReported)
                     {
                         _failureReported = true;
-                        SdLogger.Fail("Journal", ex, "Sealing failed — journal lines will go out unsigned");
+                        Report(JournalSealLevel.Error, "Sealing failed — journal lines will go out unsigned", ex);
                     }
                 }
             }
@@ -216,14 +250,23 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
                     bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
                 }
                 _key = bytes;
-                SdLogger.Info("Journal sealing key loaded — fills will be signed");
+                Report(JournalSealLevel.Info, "Journal sealing key loaded — fills will be signed", null);
             }
             catch (Exception ex)
             {
-                SdLogger.Warn("Journal sealing key unreadable: {0}", ex.Message);
+                Report(JournalSealLevel.Warn, "Journal sealing key unreadable", ex);
             }
         }
 
+        /// <summary>
+        /// Reloads seq and sig from the state file.
+        ///
+        /// Hand-parsed rather than run through a JSON library: this file has exactly two fields, it
+        /// is written by this class alone, and the library that used to parse it is the one
+        /// dependency that stopped this file from being shared with the ATAS build. The parser is
+        /// deliberately permissive — anything it cannot read leaves the state at zero, which costs
+        /// ONE chain break and never a session.
+        /// </summary>
         private void LoadState()
         {
             try
@@ -231,26 +274,64 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
                 var path = StatePath();
                 if (!File.Exists(path)) return;
 
-                var parsed = SimpleJson.Deserialize(File.ReadAllText(path)) as Dictionary<string, object>;
-                if (parsed == null) return;
+                var text = File.ReadAllText(path);
 
-                object seq;
-                if (parsed.TryGetValue("seq", out seq))
-                {
-                    if (seq is long) _seq = (long)seq;
-                    else if (seq is int) _seq = (int)seq;
-                    else if (seq is double) _seq = (long)(double)seq;
-                }
+                long seq;
+                if (TryReadNumber(text, "seq", out seq)) _seq = seq;
 
-                object sig;
-                if (parsed.TryGetValue("sig", out sig) && sig is string) _sig = (string)sig;
+                string sig;
+                if (TryReadString(text, "sig", out sig)) _sig = sig;
             }
             catch (Exception ex)
             {
                 // State lost: the next line breaks the chain once, the server resynchronises on it,
                 // and everything after is sealed again. One damaged session, not a dead device.
-                SdLogger.Warn("Journal seal state unreadable — one chain break is expected: {0}", ex.Message);
+                Report(JournalSealLevel.Warn, "Journal seal state unreadable — one chain break is expected", ex);
             }
+        }
+
+        /// <summary>Reads <c>"name":123</c>. Returns false on anything else, including a decimal.</summary>
+        private static bool TryReadNumber(string text, string name, out long value)
+        {
+            value = 0;
+            var at = IndexOfValue(text, name);
+            if (at < 0) return false;
+
+            var end = at;
+            while (end < text.Length && (char.IsDigit(text[end]) || (end == at && text[end] == '-'))) end++;
+            if (end == at) return false;
+
+            return long.TryParse(text.Substring(at, end - at), NumberStyles.Integer,
+                CultureInfo.InvariantCulture, out value);
+        }
+
+        /// <summary>
+        /// Reads <c>"name":"abc"</c>. No unescaping: the only string this file holds is a hex
+        /// signature, which cannot contain a quote or a backslash.
+        /// </summary>
+        private static bool TryReadString(string text, string name, out string value)
+        {
+            value = null;
+            var at = IndexOfValue(text, name);
+            if (at < 0 || at >= text.Length || text[at] != '"') return false;
+
+            var end = text.IndexOf('"', at + 1);
+            if (end < 0) return false;
+
+            value = text.Substring(at + 1, end - at - 1);
+            return true;
+        }
+
+        /// <summary>Index of the first character AFTER <c>"name":</c>, or -1.</summary>
+        private static int IndexOfValue(string text, string name)
+        {
+            var key = "\"" + name + "\"";
+            var at = text.IndexOf(key, StringComparison.Ordinal);
+            if (at < 0) return -1;
+
+            at += key.Length;
+            while (at < text.Length && (text[at] == ' ' || text[at] == ':')) at++;
+            return at < text.Length ? at : -1;
         }
 
         private void SaveState()
@@ -258,13 +339,33 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
             try
             {
                 Directory.CreateDirectory(_directory);
-                var state = new Dictionary<string, object> { { "seq", _seq }, { "sig", _sig } };
-                File.WriteAllText(StatePath(), SimpleJson.Serialize(state), Encoding.UTF8);
+
+                // Built by hand for the same reason LoadState parses by hand. The signature is hex
+                // by construction, so nothing here needs escaping — and the guard below makes that
+                // an enforced fact rather than an assumption, because a stray quote would write a
+                // state file this class could never read back.
+                var sig = IsHex(_sig) ? _sig : string.Empty;
+                var json = "{\"seq\":" + _seq.ToString(CultureInfo.InvariantCulture)
+                         + ",\"sig\":\"" + sig + "\"}";
+
+                File.WriteAllText(StatePath(), json, Encoding.UTF8);
             }
             catch
             {
                 // Not blocking: at worst one chain break on the next start.
             }
+        }
+
+        private static bool IsHex(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return true;
+            for (var i = 0; i < value.Length; i++)
+            {
+                var c = value[i];
+                var ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!ok) return false;
+            }
+            return true;
         }
     }
 }
