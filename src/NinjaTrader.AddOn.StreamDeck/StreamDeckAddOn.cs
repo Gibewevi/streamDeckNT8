@@ -29,6 +29,18 @@ namespace NinjaTrader.NinjaScript.AddOns
         private CopyEngine _copyEngine;
         private AddOnConfig _config;
 
+        /// <summary>
+        /// True once the bridge has named the account to track.
+        ///
+        /// Until then the add-on is on the account NinjaTrader happened to list first, chosen by
+        /// nobody. Every safety rule that is scoped to an account rides on that choice, so a guard
+        /// policy adopted while this is false is enforcing somewhere the trader never designated —
+        /// which is how a locked macro coexisted with an hour of hand-placed orders on 2026-08-21.
+        /// The bridge now pushes the account on every connection; this flag is the tripwire that
+        /// says so out loud when it does not.
+        /// </summary>
+        private volatile bool _accountConfirmedByBridge;
+
         protected override void OnStateChange()
         {
             switch (State)
@@ -224,6 +236,21 @@ namespace NinjaTrader.NinjaScript.AddOns
             var reason = message.GetPayloadString("reason");
             var maxContracts = (int)message.GetPayloadDouble("maxContracts");
 
+            // A policy that refuses something, adopted while nobody has told us which account to
+            // watch, is the shape of the 2026-08-21 bypass: armed, displayed red on the deck, and
+            // pointed at an account the trader was not using. The policy is still applied — half a
+            // guard beats none — but it never passes in silence again.
+            if ((blocked || maxContracts > 0) && !_accountConfirmedByBridge)
+            {
+                SdLogger.EventWarn("Guard",
+                    "SECURITY: adopting a blocking policy (blocked={0} reason={1} maxContracts={2}) while the bridge "
+                    + "has NOT named the account — enforcement is running on '{3}', picked by default at startup. "
+                    + "Orders on any other account are NOT being watched.",
+                    blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts,
+                    _statePublisher != null && !string.IsNullOrEmpty(_statePublisher.TrackedAccount)
+                        ? _statePublisher.TrackedAccount : "(none)");
+            }
+
             _guardEnforcer.UpdatePolicy(blocked, reason, maxContracts);
 
             return BridgeMessage.CreateResponse(message.RequestId, message.Action, true, new
@@ -319,6 +346,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             var nextAccount = !string.IsNullOrWhiteSpace(account) ? account : _statePublisher.TrackedAccount;
             var nextInstrument = !string.IsNullOrWhiteSpace(instrument) ? instrument : _statePublisher.TrackedInstrument;
+
+            // The account now comes from the bridge, not from this side's startup guess.
+            if (!string.IsNullOrWhiteSpace(account)) _accountConfirmedByBridge = true;
 
             _statePublisher.UpdateTracking(nextAccount, nextInstrument);
 

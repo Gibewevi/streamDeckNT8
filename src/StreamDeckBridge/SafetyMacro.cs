@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using StreamDeckBridge.Models;
@@ -327,6 +328,33 @@ public sealed class SafetyMacro
                     BuildStatus());
             }
 
+            // Validated BEFORE anything is applied. A payload carrying an unreadable start time
+            // must change nothing at all: applying the fields that parsed and refusing the rest
+            // would leave the macro in a state neither the trader nor this file asked for.
+            TimeSpan? heureDemandee = null;
+            if (update.SessionStartTime != null)
+            {
+                if (!TryParseStartTime(update.SessionStartTime, out var parsed))
+                {
+                    return (false, "SAFETY_INVALID_START_TIME",
+                        $"'{update.SessionStartTime}' is not a valid start time. Expected HH:mm in local time, between 00:00 and 23:59.",
+                        BuildStatus());
+                }
+                heureDemandee = parsed;
+            }
+
+            // Switching the rule ON without a time to enforce is refused rather than accepted and
+            // ignored. A toggle that reads as armed while nothing can ever refuse an entry is the
+            // worst failure this project has: the protection the trader believes he set.
+            if (update.SessionStartEnabled == true
+                && heureDemandee == null
+                && !TryParseStartTime(_state.Settings.SessionStartTime, out _))
+            {
+                return (false, "SAFETY_START_TIME_MISSING",
+                    "The start-time rule cannot be switched on without a start time. Set it in HH:mm, local time.",
+                    BuildStatus());
+            }
+
             var settings = _state.Settings;
 
             if (update.MaxTradesWhenLosing.HasValue)
@@ -369,6 +397,15 @@ public sealed class SafetyMacro
             if (update.PauseDurationMinutes.HasValue)
                 settings.PauseDurationMinutes = Math.Clamp(update.PauseDurationMinutes.Value, MinPauseDurationMinutes, MaxPauseDurationMinutes);
 
+            // Normalised to HH:mm on the way in, so what is persisted, logged and displayed is
+            // one single spelling. "9:45" and "09:45" are the same instant and must not read as
+            // two different settings in a journal someone is trying to reconcile.
+            if (heureDemandee is { } heure)
+                settings.SessionStartTime = $"{heure.Hours:00}:{heure.Minutes:00}";
+
+            if (update.SessionStartEnabled.HasValue)
+                settings.SessionStartEnabled = update.SessionStartEnabled.Value;
+
             if (update.AutoFlattenOnDailyLoss.HasValue)
                 settings.AutoFlattenOnDailyLoss = update.AutoFlattenOnDailyLoss.Value;
 
@@ -381,7 +418,7 @@ public sealed class SafetyMacro
             // place the trader can see what the rules actually resolved to for their limits.
             _logger.LogInformation(
                 "Safety macro configured — maxTradesWhenLosing={MaxTrades}, dailyLossLimit={Loss}, maxContracts={Contracts}, lockDuration={Hours}h, "
-                + "antiTilt={Tilt} (averaging={Averaging}, advanced={Advanced}), break={Break} "
+                + "antiTilt={Tilt} (averaging={Averaging}, advanced={Advanced}), break={Break}, startTime={Start} "
                 + "— effective: escalation={Escalation}%, giveBack={GiveBack:0.##}, lossStreak={Losses}, episode={Episode}min, hold={Hold}s",
                 settings.MaxTradesWhenLosing, settings.DailyLossLimit, settings.MaxContracts, settings.LockDurationHours,
                 settings.AntiTiltEnabled ? "ON" : "OFF",
@@ -389,6 +426,9 @@ public sealed class SafetyMacro
                 settings.TiltAdvanced ? "ON" : "OFF",
                 settings.PauseAfterMinutes > 0
                     ? $"{settings.PauseDurationMinutes:0.##}min every {settings.PauseAfterMinutes:0.##}min of trading"
+                    : "OFF",
+                settings.SessionStartEnabled && settings.SessionStartTime.Length > 0
+                    ? $"no entry before {settings.SessionStartTime} local"
                     : "OFF",
                 TiltSizeEscalationPct, DerivedGiveBackLimit(), DerivedLossStreak(),
                 EffectiveEpisodeMinutes(), EffectiveHoldSeconds());
@@ -702,6 +742,14 @@ public sealed class SafetyMacro
     {
         var settings = _state.Settings;
 
+        // The start time comes first, and it is the only rule here that needs nothing from
+        // NinjaTrader to be right. Before the opening bell there is no P&L to read and no trade to
+        // count, so every other rule below is silent by construction — if this one were checked
+        // last it would still be the only one that fires, but the trader would have waited for a
+        // P&L feed to learn that the reason is a clock.
+        var beforeStart = FindStartTimeBreach();
+        if (beforeStart != null) return beforeStart;
+
         // The P&L rules come first: they are the more severe of the two families, so theirs is the
         // message the trader must read when a break and a loss limit apply at the same time.
         // Without account P&L from NinjaTrader they are meaningless — say so through PnlAvailable
@@ -728,6 +776,61 @@ public sealed class SafetyMacro
         // The mandatory break is NOT here: it has its own macro, is evaluated outside the Armed
         // gate, and is checked by its callers alongside this one. See `Evaluate` and `BuildStatus`.
         return null;
+    }
+
+    /// <summary>
+    /// Refuses entries before the configured local start time, and stops refusing on its own once
+    /// it has passed. Nothing to reset and no state to keep: the rule is a comparison against the
+    /// wall clock, so the day rolls over by itself at midnight.
+    /// </summary>
+    private LimitBreach? FindStartTimeBreach()
+    {
+        var remaining = SecondsUntilSessionStart();
+        if (remaining <= 0) return null;
+
+        return new LimitBreach("beforeSessionStart", "SAFETY_BEFORE_SESSION_START",
+            $"Trading opens at {_state.Settings.SessionStartTime} local ({FormatDuration(TimeSpan.FromSeconds(remaining))} to go). "
+            + "The safety macro blocks new positions until then.");
+    }
+
+    /// <summary>
+    /// Seconds before entries open. 0 when the rule is off, unset, or the time has passed.
+    ///
+    /// <see cref="DateTime.Now"/> and not <see cref="DateTime.UtcNow"/>, deliberately: the trader
+    /// typed a time he reads off his own clock, and everything else in this rule — the key, the
+    /// log, the journal — has to agree with that clock rather than with a converted one.
+    /// </summary>
+    private int SecondsUntilSessionStart()
+    {
+        var settings = _state.Settings;
+        if (!settings.SessionStartEnabled) return 0;
+        if (!TryParseStartTime(settings.SessionStartTime, out var start)) return 0;
+
+        var now = DateTime.Now.TimeOfDay;
+        if (now >= start) return 0;
+
+        return (int)Math.Ceiling((start - now).TotalSeconds);
+    }
+
+    /// <summary>
+    /// Reads <c>HH:mm</c> in local time. Accepts <c>9:45</c> as well as <c>09:45</c>, and nothing
+    /// else — no seconds, no AM/PM, no locale-dependent parse. A start time is compared against a
+    /// wall clock every few hundred milliseconds; it must mean exactly one thing on every machine.
+    /// </summary>
+    public static bool TryParseStartTime(string? value, out TimeSpan time)
+    {
+        time = default;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+
+        var parts = value.Trim().Split(':');
+        if (parts.Length != 2) return false;
+
+        if (!int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var hours)) return false;
+        if (!int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var minutes)) return false;
+        if (hours is < 0 or > 23 || minutes is < 0 or > 59) return false;
+
+        time = new TimeSpan(hours, minutes, 0);
+        return true;
     }
 
     // --- Mandatory break ---
@@ -1212,6 +1315,9 @@ public sealed class SafetyMacro
             PauseSecondsRemaining = pause.Remaining,
             PauseDueInSeconds = pause.DueIn,
             PauseAfterMinutes = _state.Settings.PauseAfterMinutes,
+            SessionStartEnabled = _state.Settings.SessionStartEnabled,
+            SessionStartTime = _state.Settings.SessionStartEnabled ? _state.Settings.SessionStartTime : string.Empty,
+            SessionStartInSeconds = SecondsUntilSessionStart(),
             AutoFlattenEnabled = _state.Settings.AutoFlattenOnDailyLoss,
             AutoFlattenPending = liquidation > 0,
             AutoFlattenSecondsRemaining = liquidation,

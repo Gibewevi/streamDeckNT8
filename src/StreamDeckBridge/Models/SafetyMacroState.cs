@@ -88,6 +88,34 @@ public sealed class SafetyMacroSettings
     /// </summary>
     public double PauseDurationMinutes { get; set; } = 10;
 
+    // --- Trading start time ---
+    //
+    // A wall-clock rule, and the only one here that looks at nothing which happened in the session.
+    // It refuses entries before a time the trader set in advance, and steps aside on its own once
+    // that time has passed. It exists for the hour where nothing is decided yet — the open, where a
+    // position gets taken out of impatience rather than out of a plan.
+    //
+    // Evaluated against LOCAL time of day, never against the trading day. "Before 09:45" means what
+    // a clock on the wall says, which is the only reading the trader can check at a glance while the
+    // key is red. Two consequences follow, both deliberate: the rule does not close the session
+    // again in the evening, and an overnight session opening at 18:00 is not restrained by an 09:45
+    // setting. A rule about the start of the day has no business deciding when the day ends.
+
+    /// <summary>
+    /// Whether entries are refused before <see cref="SessionStartTime"/>. Off by default: nobody
+    /// should start being refused entries after an update they did not ask for.
+    /// </summary>
+    public bool SessionStartEnabled { get; set; }
+
+    /// <summary>
+    /// Local time of day, <c>HH:mm</c>, before which entries are refused. Empty when never set.
+    ///
+    /// Stored as the string the trader typed rather than as minutes since midnight. This file is
+    /// read by a human when something has gone wrong, and <c>"09:45"</c> is checkable at a glance
+    /// where <c>585</c> is a number you have to trust.
+    /// </summary>
+    public string SessionStartTime { get; set; } = string.Empty;
+
     // --- Automatic liquidation on daily loss ---
     //
     // The only rule in this file that SENDS an order instead of refusing one. Everything else here
@@ -124,6 +152,8 @@ public sealed class SafetyMacroSettings
         TiltEpisodeMinutes = TiltEpisodeMinutes,
         PauseAfterMinutes = PauseAfterMinutes,
         PauseDurationMinutes = PauseDurationMinutes,
+        SessionStartEnabled = SessionStartEnabled,
+        SessionStartTime = SessionStartTime,
         AutoFlattenOnDailyLoss = AutoFlattenOnDailyLoss,
         AutoFlattenGraceSeconds = AutoFlattenGraceSeconds
     };
@@ -280,6 +310,12 @@ public sealed class SafetyConfigUpdate
     public double? TiltEpisodeMinutes { get; set; }
     public double? PauseAfterMinutes { get; set; }
     public double? PauseDurationMinutes { get; set; }
+    public bool? SessionStartEnabled { get; set; }
+
+    /// <summary>Local <c>HH:mm</c>. Present but unparseable is REFUSED, never read as absent: a
+    /// start time nobody can read is a protection the trader believes he armed.</summary>
+    public string? SessionStartTime { get; set; }
+
     public bool? AutoFlattenOnDailyLoss { get; set; }
     public double? AutoFlattenGraceSeconds { get; set; }
 
@@ -294,6 +330,7 @@ public sealed class SafetyConfigUpdate
         MaxTradesWhenLosing == null && DailyLossLimit == null && MaxContracts == null &&
         LockDurationHours == null && AntiTiltEnabled == null && TiltAveragingAllowed == null &&
         TiltAdvanced == null && TiltHoldSeconds == null && TiltEpisodeMinutes == null &&
+        SessionStartEnabled == null && SessionStartTime == null &&
         AutoFlattenOnDailyLoss == null && AutoFlattenGraceSeconds == null;
 
     /// <summary>True when the caller supplied nothing at all — the router rejects that outright.</summary>
@@ -302,6 +339,7 @@ public sealed class SafetyConfigUpdate
         LockDurationHours == null && AntiTiltEnabled == null && TiltAveragingAllowed == null &&
         TiltAdvanced == null && TiltHoldSeconds == null && TiltEpisodeMinutes == null &&
         PauseAfterMinutes == null && PauseDurationMinutes == null &&
+        SessionStartEnabled == null && SessionStartTime == null &&
         AutoFlattenOnDailyLoss == null && AutoFlattenGraceSeconds == null;
 }
 
@@ -359,6 +397,22 @@ public sealed class SafetyStatus
     /// beforehand — a break that lands without notice is the surest way to get the rule turned off.
     /// </summary>
     public int PauseDueInSeconds { get; set; }
+
+    // --- Trading start time ---
+
+    /// <summary>Whether entries are refused before the configured local start time.</summary>
+    public bool SessionStartEnabled { get; set; }
+
+    /// <summary>The configured local start time, <c>HH:mm</c>. Empty when the rule is off.</summary>
+    public string SessionStartTime { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Seconds left before entries open. 0 when the rule is off, or when the time has passed.
+    ///
+    /// Published as a countdown and not only as a refusal, for the same reason the mandatory break
+    /// publishes one: a key that says "refused" without saying "until when" is read as a fault.
+    /// </summary>
+    public int SessionStartInSeconds { get; set; }
 
     /// <summary>
     /// The configured break interval in minutes, 0 when the rule is off.

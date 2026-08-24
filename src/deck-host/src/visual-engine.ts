@@ -487,12 +487,16 @@ export function computeVisual(
         const resolved = copier.followers.filter((f) => f.resolved).length;
         const drifted = copier.followers.some((f) => f.drifted);
         const rejected = copier.followers.some((f) => f.lastError);
+        // Un dépassement de plafond arrête la copie comme une dérive, mais ce n'est pas la même
+        // chose à corriger : afficher DERIVE envoie chercher une divergence qui n'existe pas.
+        const overCap = copier.followers.some((f) => f.drifted && f.overCap);
 
         // Un suiveur en dérive ou en rejet : ce compte-là ne suit plus, et le trader doit
         // l'apprendre du boîtier plutôt que du journal.
         if (drifted || rejected) {
           return {
-            title, subtitle: 'COPY STOP', detail: drifted ? 'DERIVE' : 'REJET',
+            title, subtitle: 'COPY STOP',
+            detail: overCap ? 'PLAFOND' : drifted ? 'DERIVE' : 'REJET',
             bgColor: Colors.refuse, textColor: Colors.textWhite, subtitleColor: Colors.textWhite,
           };
         }
@@ -723,6 +727,18 @@ export function computeVisual(
       // Placée avant le cas général, qui n'a aucune minuterie propre à montrer.
       // Même décompte à la seconde que la touche Pause : c'est la même attente, et deux touches
       // voisines qui annoncent « 9m » et « 9:58 » pour la même chose se contrediraient.
+      // Avant l'heure de début. Rouge comme tout ce qui refuse une entrée, mais avec l'heure et
+      // le décompte plutôt que les heures du verrou : ici le trader attend une heure précise, pas
+      // la fin de sa séance, et lui montrer « 2h58 » lui ferait croire sa journée verrouillée.
+      if (safety.entriesBlocked && safety.blockReason === 'beforeSessionStart') {
+        return {
+          title: 'SAFETY:HEURE',
+          subtitle: safety.sessionStartTime || '--:--',
+          detail: formatDecompte(safety.sessionStartInSeconds),
+          bgColor: Colors.refuse, textColor: Colors.textWhite,
+        };
+      }
+
       if (safety.entriesBlocked && safety.blockReason === 'mandatoryPause') {
         return {
           title: 'SAFETY:PAUSE',

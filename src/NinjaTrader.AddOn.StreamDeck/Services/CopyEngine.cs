@@ -126,6 +126,15 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
         private sealed class FollowerHealth
         {
             public volatile bool Drifted;
+
+            /// <summary>
+            /// Why <see cref="Drifted"/> is set: the account is over its contract cap rather than
+            /// out of step with the master. Both stop entry copies, but the deck must not label
+            /// one as the other — a key reading DERIVE on an account that is simply too big sends
+            /// the trader looking for a divergence that does not exist.
+            /// </summary>
+            public volatile bool OverCap;
+
             public int Drift;
             public string DriftInstrument = string.Empty;
             public string LastError = string.Empty;
@@ -607,6 +616,12 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 string driftedInstrument = null;
                 int driftAmount = 0;
 
+                // An over-cap follower and a drifted follower are stopped the same way but are not
+                // the same incident, and must not be reported as one. Saying "0 contracts off what
+                // the master implies" about an account holding twice its cap — which is what
+                // reusing the drift wording produced — describes nothing the trader can act on.
+                var violation = "drift";
+
                 foreach (var instrumentName in InstrumentsInPlay(master, route.Account))
                 {
                     var scope = FollowerScopeKey(route.Spec.Name, instrumentName);
@@ -629,12 +644,37 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                     var opposite = Math.Sign(expected) != Math.Sign(followerNet);
                     var sizeGap = expected != followerNet;
-                    var capActive = route.Spec.MaxContracts > 0;
 
-                    if (opposite || (sizeGap && !capActive))
+                    var cap = EffectiveCap(route.Spec);
+                    var capActive = cap > 0;
+
+                    // A cap explains a follower SMALLER than the master implies. Nothing else.
+                    //
+                    // Excusing every size gap the moment a cap existed also excused a follower
+                    // sitting ABOVE that cap — the single state the cap exists to prevent, and the
+                    // only one that could never be reported. It equally excused a follower LARGER
+                    // than the master implies, which a cap can never produce.
+                    var overCap = capActive && Math.Abs(followerNet) > cap;
+                    var explainedByCap = capActive && !overCap &&
+                                         Math.Abs(followerNet) <= Math.Abs(expected);
+
+                    if (opposite || overCap || (sizeGap && !explainedByCap))
                     {
                         driftedInstrument = instrumentName;
-                        driftAmount = followerNet - expected;
+
+                        if (overCap && !opposite)
+                        {
+                            // The number that matters here is how far ABOVE the cap the account
+                            // sits, not how far it is from the master — the master may well be
+                            // over the cap too, and then the gap between them is zero.
+                            violation = "maxContracts";
+                            driftAmount = Math.Sign(followerNet) * (Math.Abs(followerNet) - cap);
+                        }
+                        else
+                        {
+                            violation = "drift";
+                            driftAmount = followerNet - expected;
+                        }
                         break;
                     }
                 }
@@ -645,24 +685,36 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 {
                     health.Drift = driftAmount;
                     health.DriftInstrument = driftedInstrument;
+                    health.OverCap = violation == "maxContracts";
                     health.Drifted = true;
 
                     if (!wasDrifted)
                     {
-                        SdLogger.EventWarn("Copier",
-                            "DRIFT on {0} / {1} — follower is {2} contract(s) off what the master implies. "
-                            + "Entry copies to this account are STOPPED; exits keep being copied. No corrective order will be sent.",
-                            route.Spec.Name, driftedInstrument, driftAmount);
-                        ReportViolation(route.Spec.Name, "drift", driftedInstrument, driftAmount, string.Empty);
+                        if (violation == "maxContracts")
+                        {
+                            SdLogger.EventWarn("Copier",
+                                "OVER CAP on {0} / {1} — the account holds {2} contract(s) more than its cap allows. "
+                                + "Entry copies to this account are STOPPED; exits keep being copied. No corrective order will be sent.",
+                                route.Spec.Name, driftedInstrument, Math.Abs(driftAmount));
+                        }
+                        else
+                        {
+                            SdLogger.EventWarn("Copier",
+                                "DRIFT on {0} / {1} — follower is {2} contract(s) off what the master implies. "
+                                + "Entry copies to this account are STOPPED; exits keep being copied. No corrective order will be sent.",
+                                route.Spec.Name, driftedInstrument, driftAmount);
+                        }
+                        ReportViolation(route.Spec.Name, violation, driftedInstrument, driftAmount, string.Empty);
                     }
                 }
                 else if (wasDrifted)
                 {
                     // Cleared by the positions agreeing again — never by anything this class did.
                     health.Drifted = false;
+                    health.OverCap = false;
                     health.Drift = 0;
                     health.DriftInstrument = string.Empty;
-                    SdLogger.Event("Copier", "Drift cleared on {0} — entry copies resume", route.Spec.Name);
+                    SdLogger.Event("Copier", "Follower {0} is back in line — entry copies resume", route.Spec.Name);
                 }
             }
         }
@@ -696,6 +748,61 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
             {
                 SdLogger.Fail("Copier", ex, "Could not enumerate positions on {0}", account.Name);
             }
+        }
+
+        /// <summary>
+        /// Trims a copied entry to whatever room the follower's contract cap still leaves, and
+        /// returns 0 when there is none.
+        ///
+        /// Two caps are considered: the follower's own, and the safety macro's global one held by
+        /// the guard enforcer. The tighter wins. It has to be honoured HERE, before the submit,
+        /// because a copy is deliberately exempt from the enforcer's cancellation — it is
+        /// registered as a copied order so the master's rule is not applied twice, and
+        /// asymmetrically, on the follower. Exempt from the cancel means the cap reaches it at the
+        /// submit or never.
+        /// </summary>
+        private int RoomUnderCap(FollowerRoute route, string instrumentName, OrderAction action, int quantity)
+        {
+            var cap = EffectiveCap(route.Spec);
+            if (cap <= 0 || route.Account == null) return quantity;
+
+            var held = NetPosition(route.Account, instrumentName);
+
+            // Same test as GuardEnforcer.GrowsExposure, and for the same reason: an order in the
+            // reducing direction cannot breach a cap on the exposure, and refusing it would trap
+            // the follower inside an oversized position.
+            var growing = held == 0
+                ? (action == OrderAction.Buy || action == OrderAction.SellShort)
+                : (held > 0 ? action == OrderAction.Buy : action == OrderAction.SellShort);
+            if (!growing) return quantity;
+
+            var room = cap - Math.Abs(held);
+            if (room <= 0)
+            {
+                SdLogger.EventWarn("Copier",
+                    "Entry NOT copied to {0} / {1} — the account holds {2} contract(s) and is at its cap of {3}",
+                    route.Spec.Name, instrumentName, Math.Abs(held), cap);
+                ReportViolation(route.Spec.Name, "maxContracts", instrumentName, Math.Abs(held), string.Empty);
+                return 0;
+            }
+
+            if (quantity <= room) return quantity;
+
+            SdLogger.EventWarn("Copier",
+                "Entry to {0} / {1} trimmed from {2} to {3} contract(s) — cap {4}, already holding {5}",
+                route.Spec.Name, instrumentName, quantity, room, cap, Math.Abs(held));
+            return room;
+        }
+
+        /// <summary>
+        /// The tighter of the follower's own cap and the safety macro's. Zero means no cap at all.
+        /// </summary>
+        private int EffectiveCap(FollowerSpec spec)
+        {
+            var guardCap = _enforcer != null ? _enforcer.MaxContracts : 0;
+            if (spec.MaxContracts <= 0) return guardCap;
+            if (guardCap <= 0) return spec.MaxContracts;
+            return Math.Min(spec.MaxContracts, guardCap);
         }
 
         /// <summary>Signed net position: positive long, negative short, zero flat.</summary>
@@ -758,6 +865,19 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
 
                 var account = sender as Account;
                 if (account == null) return;
+
+                // Enforcement on EVERY account of the copy group, not only the one the deck tracks.
+                //
+                // GuardEnforcer reaches orders through OrderMonitor, which subscribes to a single
+                // account. Any other member of the group was therefore reachable by hand with no
+                // rule watching it at all — a follower is an account like any other, and on
+                // 2026-08-21 it was the one being traded. This class is already subscribed to the
+                // master and to every follower, so it is the only place that coverage can come from.
+                //
+                // Before the copy, deliberately: an order the guard is about to cancel must not be
+                // mirrored onto the followers first. Inspect is idempotent, so the overlap with
+                // OrderMonitor on the tracked account costs nothing.
+                if (_enforcer != null && _enforcer.Inspect(account, order)) return;
 
                 var cfg = _config;
                 if (string.Equals(account.Name, cfg.Master, StringComparison.OrdinalIgnoreCase))
@@ -888,6 +1008,21 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                             "Nothing copied to {0} — {1} × {2} rounds to zero contracts",
                             route.Spec.Name, masterQuantity, route.Spec.Multiplier);
                         continue;
+                    }
+
+                    // The contract cap, applied to the POSITION this copy would produce rather than
+                    // to the order on its own.
+                    //
+                    // ScaleQuantity clamps one order and has never known what the follower already
+                    // holds: two entries of one contract under a cap of one both went through and
+                    // left the follower at two. Nothing caught it afterwards either — the drift
+                    // check treated any size gap as legitimate as soon as a cap existed.
+                    //
+                    // Exits are never touched. Closing must always remain possible, cap or no cap.
+                    if (!isExit)
+                    {
+                        quantity = RoomUnderCap(route, instrumentName, order.OrderAction, quantity);
+                        if (quantity <= 0) continue;
                     }
 
                     var linkKey = LinkKey(order.Id, route.Spec.Name);
@@ -1584,6 +1719,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Services
                 entry["maxContracts"] = route.Spec.MaxContracts;
                 entry["resolved"] = route.Account != null;
                 entry["drifted"] = health.Drifted;
+                entry["overCap"] = health.OverCap;
                 entry["drift"] = health.Drift;
                 entry["lastError"] = health.LastError ?? string.Empty;
                 followers.Add(entry);

@@ -69,15 +69,43 @@ public sealed class StateManager
         _cooldownSeconds = Math.Clamp(config.DefaultCooldownSeconds, MinCooldownSeconds, MaxCooldownSeconds);
         _sessionPath = ResolveSessionPath(config);
 
-        var savedInstrument = LoadSavedInstrument();
-        if (!string.IsNullOrWhiteSpace(savedInstrument))
+        var saved = LoadSavedSession();
+        if (!string.IsNullOrWhiteSpace(saved.Instrument))
         {
-            _state.Instrument = savedInstrument;
-            _logger.LogInformation("Restored selected instrument: {Instrument}", savedInstrument);
+            _state.Instrument = saved.Instrument!;
+            _logger.LogInformation("Restored selected instrument: {Instrument}", saved.Instrument);
+        }
+
+        if (!string.IsNullOrWhiteSpace(saved.Account))
+        {
+            _selectedAccount = saved.Account!;
+            _logger.LogInformation("Restored selected account: {Account}", saved.Account);
         }
     }
 
     private readonly string _sessionPath;
+
+    /// <summary>
+    /// The account the trader picked, kept apart from <c>_state.Account</c> on purpose.
+    ///
+    /// <c>_state.Account</c> says what NinjaTrader is tracking RIGHT NOW, and is cleared the moment
+    /// NT8 disconnects — right for display, useless for restoring a choice. This one IS the choice:
+    /// it survives the disconnection, the restart and the reboot, and it is what gets pushed back
+    /// to a freshly connected add-on.
+    ///
+    /// Not persisting it cost a real bypass on 2026-08-21. After a reboot the add-on fell back to
+    /// the first account in NinjaTrader's list while the trader kept trading another one by hand:
+    /// the macro was armed, the deck showed it red, and the guard enforcer — which watches a single
+    /// account — was watching one nobody was trading. The copier swapped master and follower at the
+    /// same instant and for the same reason, the master being the selected account.
+    /// </summary>
+    private string _selectedAccount = string.Empty;
+
+    /// <summary>The trader's account choice. Empty until one has ever been made.</summary>
+    public string SelectedAccount
+    {
+        get { lock (_lock) { return _selectedAccount; } }
+    }
 
     private static string ResolveSessionPath(BridgeConfig config)
     {
@@ -89,39 +117,57 @@ public sealed class StateManager
             "StreamDeckTrader", "session.json");
     }
 
-    private string? LoadSavedInstrument()
+    private (string? Instrument, string? Account) LoadSavedSession()
     {
         try
         {
-            if (!File.Exists(_sessionPath)) return null;
+            if (!File.Exists(_sessionPath)) return (null, null);
 
             using var doc = JsonDocument.Parse(File.ReadAllText(_sessionPath));
-            if (doc.RootElement.TryGetProperty("instrument", out var value) && value.ValueKind == JsonValueKind.String)
-                return value.GetString();
+            return (ReadString(doc.RootElement, "instrument"), ReadString(doc.RootElement, "account"));
         }
         catch (Exception ex)
         {
             _logger.LogWarning("Could not read the session file {Path}: {Error}", _sessionPath, ex.Message);
         }
 
-        return null;
+        return (null, null);
+    }
+
+    /// <summary>A missing or malformed field reads as absent, never as an exception: an unreadable
+    /// session file must cost the selection, not the startup.</summary>
+    private static string? ReadString(JsonElement root, string name)
+    {
+        return root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
     }
 
     /// <summary>
-    /// Remembers the selected instrument so a restart does not silently fall back to
-    /// another one. Called whenever the trader picks an instrument on the deck.
+    /// Remembers the selected instrument AND account, so a restart does not silently fall back to
+    /// another one. Called whenever the trader picks either on the deck.
+    ///
+    /// Both fields are rewritten every time. The file is one JSON object, so saving a single field
+    /// would drop the other — which is exactly how the account went missing while the instrument
+    /// came back, with nothing anywhere to say so.
+    ///
+    /// Callers hold <see cref="_lock"/>: both values are read straight from the fields.
     /// </summary>
-    private void SaveSelectedInstrument(string instrument)
+    private void SaveSession()
     {
         try
         {
             var dir = Path.GetDirectoryName(_sessionPath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(_sessionPath, JsonSerializer.Serialize(new { instrument }));
+            File.WriteAllText(_sessionPath, JsonSerializer.Serialize(new
+            {
+                instrument = _state.Instrument,
+                account = _selectedAccount
+            }));
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Could not persist the selected instrument: {Error}", ex.Message);
+            _logger.LogWarning("Could not persist the session selection: {Error}", ex.Message);
         }
     }
 
@@ -193,6 +239,7 @@ public sealed class StateManager
                         MaxContracts = f.MaxContracts,
                         Resolved = f.Resolved,
                         Drifted = f.Drifted,
+                        OverCap = f.OverCap,
                         Drift = f.Drift,
                         LastError = f.LastError,
                     }).ToList(),
@@ -247,6 +294,17 @@ public sealed class StateManager
         {
             _state.Account = account;
             _accountSetAt = DateTime.UtcNow;
+
+            // Persisted so a restart hands the add-on the same account instead of letting it fall
+            // back to the first one NinjaTrader lists. An empty name is never written: the account
+            // is cleared on every NT8 disconnection, and saving that would erase the choice the
+            // trader made — the disconnection is exactly when it matters most.
+            if (!string.IsNullOrWhiteSpace(account))
+            {
+                _selectedAccount = account;
+                SaveSession();
+            }
+
             _logger.LogInformation("Account set to {Account} (guarded for {Secs}s)", account, OverrideGuard.TotalSeconds);
             return _state.Account;
         }
@@ -258,7 +316,7 @@ public sealed class StateManager
         {
             _state.Instrument = instrument;
             _instrumentSetAt = DateTime.UtcNow;
-            SaveSelectedInstrument(instrument);
+            SaveSession();
             _logger.LogInformation("Instrument set to {Instrument} (guarded for {Secs}s)", instrument, OverrideGuard.TotalSeconds);
             return _state.Instrument;
         }

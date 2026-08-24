@@ -27,6 +27,7 @@ public sealed class MessageValidator
         "antiTiltEnabled", "tiltAveragingAllowed", "tiltAdvanced",
         "tiltHoldSeconds", "tiltEpisodeMinutes",
         "pauseAfterMinutes", "pauseDurationMinutes",
+        "sessionStartEnabled", "sessionStartTime",
         "autoFlattenOnDailyLoss", "autoFlattenGraceSeconds",
     };
 

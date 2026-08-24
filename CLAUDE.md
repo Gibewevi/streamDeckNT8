@@ -179,6 +179,16 @@ Règles en ajoutant un log :
   accepté. Les rejets arrivent plus tard via `OrderMonitor` → événement `orderUpdate`.
 - **La macro de sécurité ne peut pas être désarmée avant l'expiration du verrou**, par conception.
   Un refus `configureSafety`/`toggleSafety` pendant un verrou est le comportement attendu.
+- **Toute règle de sécurité est scopée à un COMPTE — et ce compte se persiste.** `GuardEnforcer`
+  n'inspecte que les comptes auxquels il est abonné, et le plafond de la macro se calcule contre la
+  position du seul compte suivi. Le compte sélectionné est aussi le **maître du copieur**
+  (`BridgeServer` : `master = state.Account`). Le 21/08/2026 il n'était pas persisté : après un
+  redémarrage l'add-on est reparti sur le premier compte listé par NinjaTrader, l'enforcement
+  surveillait un compte que personne ne tradait, le maître et son suiveur étaient intervertis — et
+  le boîtier affichait `SAFETY:MAX` en rouge pendant une heure d'ordres passés à la souris. Le
+  fichier `session.json` porte désormais `instrument` **et** `account`, et le bridge repousse
+  `setAccount` avant `setInstrument` à chaque connexion de l'add-on. Ne jamais ajouter un réglage
+  de sécurité scopé à un compte sans se demander ce qu'il devient au redémarrage.
 - **`allowLiveAccounts` vaut `true` par défaut** : les comptes réels sont autorisés sans réglage.
   C'est le seul filtre entre Sim et réel — le vérifier avant tout test qui envoie des ordres.
 - **`docs/architecture.md` a dérivé** sur plusieurs points (absence de persistance de l'état).

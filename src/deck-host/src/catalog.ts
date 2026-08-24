@@ -260,6 +260,24 @@ export const CATALOG: ActionDef[] = [
         help: 'Le seuil doit rester franchi pendant ce délai. Le P&L de séance inclut le latent : '
             + 'sans ce délai, une simple mèche liquiderait le compte au plus mauvais prix.',
       },
+      // --- Heure de début ---
+      // Règle d'horloge, et la seule de Guard qui ne regarde rien de ce qui s'est passé dans la
+      // séance. Elle vise l'heure où rien n'est encore décidé : l'ouverture, où l'on prend une
+      // position par impatience plutôt que par plan. Elle se retire toute seule à l'heure dite.
+      {
+        key: 'sessionStartEnabled', label: 'Interdire avant une heure', type: 'toggle',
+        help: 'Refuse toute ouverture de position avant l\'heure ci-dessous. Clôturer et réduire '
+            + 'restent toujours possibles. À partir de cette heure, les entrées redeviennent '
+            + 'autorisées automatiquement.',
+      },
+      {
+        key: 'sessionStartTime', label: 'Heure de début (locale)', type: 'text',
+        placeholder: '09:45', default: '09:45',
+        showIf: { key: 'sessionStartEnabled', equals: true },
+        help: 'Format HH:mm, à l\'heure de votre machine — celle que vous lisez sur votre horloge, '
+            + 'pas une heure de bourse. Le bridge REFUSE une valeur illisible plutôt que de '
+            + 'désactiver la règle en silence. La règle ne referme pas la séance le soir.',
+      },
       // min aligné sur SafetyMacro.MinLockHours : en dessous, le bridge refuse avec un
       // INVALID_PAYLOAD que rien n'expliquait à l'écran.
       { key: 'lockDurationHours', label: 'Durée du verrou (heures)', type: 'number', min: 0.05, max: 24, help: 'Le verrou ne peut pas être levé avant son expiration.' },

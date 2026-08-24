@@ -172,7 +172,7 @@ public sealed class BridgeServer : BackgroundService
                 _stateManager.SetNtConnected(true);
                 _logger.LogInformation("NinjaTrader Add-On connected");
 
-                await PushSelectedInstrument(ct);
+                await PushSelectedContext(ct);
                 // Forced: a reconnecting add-on knows nothing, and until it is told it would let
                 // through exactly the orders the macro is refusing on the deck.
                 await PushGuardPolicy(ct, force: true);
@@ -397,11 +397,48 @@ public sealed class BridgeServer : BackgroundService
     }
 
     /// <summary>
-    /// Tells the freshly connected add-on which instrument the trader selected, so NinjaTrader
-    /// tracks it straight away instead of whatever it defaulted to at startup.
+    /// Tells the freshly connected add-on which account and instrument the trader selected, so
+    /// NinjaTrader tracks them straight away instead of whatever it defaulted to at startup.
+    ///
+    /// THE ACCOUNT COMES FIRST, and it is not decoration. Left alone the add-on tracks the first
+    /// account NinjaTrader happens to list, and two safety rules quietly follow that default: the
+    /// guard enforcer watches the tracked account, and the copier's master IS the selected account.
+    /// A reboot used to point the enforcer at an account nobody was trading and swap the master
+    /// with one of its followers — while the deck went on showing the macro armed and red.
     /// </summary>
-    private async Task PushSelectedInstrument(CancellationToken ct)
+    private async Task PushSelectedContext(CancellationToken ct)
     {
+        var selectedAccount = _stateManager.SelectedAccount;
+        if (!string.IsNullOrWhiteSpace(selectedAccount))
+        {
+            // Re-adopted on this side too. PushCopierConfig runs a few lines later and reads the
+            // master off the shared state, which the disconnection emptied: without this the copier
+            // would come up with no master at all, then flip to whatever the add-on defaulted to.
+            _stateManager.SetAccount(selectedAccount);
+
+            var accountMsg = new BridgeMessage
+            {
+                Type = "command",
+                Version = "1.0",
+                RequestId = Guid.NewGuid().ToString(),
+                Timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                Source = "bridge",
+                Action = "setAccount",
+                Payload = JsonSerializer.SerializeToElement(new { account = selectedAccount })
+            };
+
+            _logger.LogInformation("Pushing selected account to NT8: {Account}", selectedAccount);
+            await SendToAddon(accountMsg, ct);
+        }
+        else
+        {
+            // No account has ever been picked on this installation. The add-on's own default then
+            // stands until the trader chooses from the deck — logged as a warning because the
+            // enforcement scope and the copier master are both resting on an arbitrary account.
+            _logger.LogWarning("No selected account to restore — NT8 keeps its default, so the guard "
+                + "enforcer and the copier master follow whichever account it picked");
+        }
+
         var state = _stateManager.GetSnapshot();
         if (string.IsNullOrWhiteSpace(state.Instrument)) return;
 
