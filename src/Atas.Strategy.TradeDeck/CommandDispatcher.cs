@@ -28,6 +28,8 @@ internal sealed class CommandDispatcher
             {
                 "buyMarket" => _engine.BuyMarket(cmd),
                 "sellMarket" => _engine.SellMarket(cmd),
+                "buyLimit" => _engine.BuyLimit(cmd),
+                "sellLimit" => _engine.SellLimit(cmd),
                 _ => BridgeMessage.Failure(cmd.RequestId, cmd.Action, "UNSUPPORTED_ACTION",
                          $"Action '{cmd.Action}' is not implemented yet by the ATAS strategy."),
             };

@@ -119,6 +119,63 @@ internal sealed class OrderEngine
         });
     }
 
+    public BridgeMessage BuyLimit(BridgeMessage cmd) => SubmitLimit(cmd, OrderDirections.Buy);
+    public BridgeMessage SellLimit(BridgeMessage cmd) => SubmitLimit(cmd, OrderDirections.Sell);
+
+    private BridgeMessage SubmitLimit(BridgeMessage cmd, OrderDirections direction)
+    {
+        var ctx = Resolve(cmd);
+        if (ctx.Error != null) return ctx.Error;
+
+        var quantity = cmd.GetInt("quantity") ?? 1;
+        var offsetTicks = cmd.GetInt("offsetTicks") ?? 0;
+
+        if (quantity < 1)
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "INVALID_QUANTITY", "Quantity must be >= 1");
+
+        var name = ContextResolver.InstrumentName(ctx.Security);
+
+        var tickSize = ctx.Security!.TickSize;
+        if (tickSize <= 0m)
+        {
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                $"Invalid tick size for {name} — cannot compute a limit price.");
+        }
+
+        // WITHOUT A FEED THIS IS 0, AND 0 IS NOT A PRICE. A limit computed from it would land a few
+        // ticks from zero: a sell limit there fills instantly AT MARKET, which is the opposite of
+        // what the trader asked for. The order is refused instead of sent.
+        var market = ContextResolver.MarketPrice(ctx.Security);
+        if (market <= 0m)
+        {
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                $"No market data for {name} — cannot compute a limit price. Open a chart or a DOM for this instrument.");
+        }
+
+        var limitPrice = RoundToTick(market + offsetTicks * tickSize, tickSize);
+        if (limitPrice <= 0m)
+        {
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
+                $"Computed limit price {limitPrice} is not valid for {name}.");
+        }
+
+        var order = NewOrder(ctx, direction, OrderTypes.Limit, quantity, DeckOrderComment);
+        order.Price = limitPrice;
+
+        var failure = Submit(cmd, order);
+        if (failure != null) return failure;
+
+        SdLog.Event("Order", "[REQ:{0}] {1} {2} {3} Limit @ {4} submitted on {5} (market={6}, offset={7} ticks)",
+            cmd.RequestId, direction, quantity, name, limitPrice, ctx.Portfolio!.AccountID, market, offsetTicks);
+
+        return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+        {
+            orderId = order.Id ?? string.Empty,
+            limitPrice,
+            message = $"{direction} {quantity} {name} Limit @ {limitPrice} submitted",
+        });
+    }
+
     /// <summary>
     /// Builds an order carrying the DECK's portfolio and security, never the chart's.
     /// </summary>
