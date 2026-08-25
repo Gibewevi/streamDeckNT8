@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    ATAS X uniquement, comme le projet indicateurs : son runtimeconfig.json annonce net10.0 et son
-    dossier d'installation est `C:\Program Files\ATAS X` — a ne pas confondre avec l'ATAS classique,
-    en `Program Files (x86)`, qui est en net10.0-windows et WPF.
+    ATAS CLASSIQUE uniquement, PAS ATAS X : le support ATAS a confirme par ecrit que les Chart
+    Strategies n'existent pas sur ATAS X (Beta), qui ne les prevoit pas avec date. Le dossier
+    d'installation du classique est `C:\Program Files (x86)\ATAS Platform`, WPF, net10.0.
   -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -15,7 +15,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <ATAS_BASE Condition="'$(ATAS_BASE)' == ''">C:\Program Files\ATAS X</ATAS_BASE>
+    <ATAS_BASE Condition="'$(ATAS_BASE)' == ''">C:\Program Files (x86)\ATAS Platform</ATAS_BASE>
   </PropertyGroup>
 
   <!--
@@ -72,9 +72,11 @@
       `Utils.Common.Network.Client.ConnectionStates`.
     -->
     <!--
-      ECART : Newtonsoft par HintPath et non par NuGet. ATAS X livre la 13.0.3, exactement celle du
-      projet add-on. La prendre la ou ATAS la charge evite deux Newtonsoft dans le meme AppDomain.
-      Repli si la version livree devenait trop ancienne :
+      ECART : Newtonsoft par HintPath et non par NuGet, pour eviter deux Newtonsoft dans le meme
+      AppDomain que celui charge par ATAS. Version a verifier localement au premier build (l'ecart
+      d'origine de ce commentaire supposait 13.0.3 par analogie avec ATAS X — cible abandonnee, voir
+      le preambule du plan ; rien ne garantit que le classique livre la meme version).
+      Repli si la version livree s'avere trop ancienne :
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" ExcludeAssets="runtime" />
     -->
     <Reference Include="Newtonsoft.Json">

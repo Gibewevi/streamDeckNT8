@@ -804,16 +804,15 @@ connecté — **étape 1 de la recette**.
   `void Dispose()`.
 - Produit : `TradeDeck.Atas.Strategy.TradeDeckStrategy : ChartStrategy`.
 
-- [ ] **Étape 1 : créer le projet**
+- [x] **Étape 1 : créer le projet**
 
 > ⏸ Redémarrée : cette étape avait été exécutée et commitée en ciblant **ATAS X**, cible abandonnée
 > le 24/08 (`docs/carte-des-deux-depots.md` non concerné, voir le préambule du plan). Le support
 > ATAS a confirmé par écrit que les Chart Strategies n'existent pas sur ATAS X ; la cible est
 > désormais **ATAS classique** (`C:\Program Files (x86)\ATAS Platform`). Seuls le commentaire et la
 > valeur par défaut d'`ATAS_BASE` changent ci-dessous — `TargetFramework` reste `net10.0`, comme
-> confirmé par la spec révisée. **Le `.csproj` sur le disque n'a pas été corrigé** (hors périmètre de
-> cette révision, qui ne touche que le plan) : le refaire est le premier geste de la reprise de cette
-> tâche.
+> confirmé par la spec révisée. **Refait le 25/08** (commit `bfaa90f`) : le `.csproj` sur le disque
+> cible désormais l'ATAS classique.
 
 Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 
@@ -904,7 +903,7 @@ Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 </Project>
 ```
 
-- [ ] **Étape 2 : compiler le projet vide pour valider les références**
+- [x] **Étape 2 : compiler le projet vide pour valider les références**
 
 > ⏸ Redémarrée avec l'étape 1 : le build exécuté visait `C:\Program Files\ATAS X`. À refaire contre
 > `C:\Program Files (x86)\ATAS Platform` une fois le `.csproj` corrigé — les six DLL référencées
@@ -912,6 +911,13 @@ Créer `src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj` :
 > `Utils.Common`) plus `Newtonsoft.Json` doivent exister à cet emplacement ; rien ne garantit qu'elles
 > portent la même version que sur ATAS X. (`StockSharp.Messages` n'est plus référencée — voir le
 > commentaire du `.csproj` ci-dessus.)
+>
+> **Refait le 25/08 contre l'installation classique** : les sept DLL existent,
+> `OFT.Platform.runtimeconfig.json` annonce `tfm: net10.0` (+ `WindowsDesktop`) donc le
+> `TargetFramework` tient, et `ATAS.DataFeedsCore.deps.json` annonce `Newtonsoft.Json 13.0.3` — même
+> version que sur ATAS X, le repli `PackageReference` reste inutile. Build lancé **en `-c Debug` et
+> non `-c Release`** : le Release réécrit `binaries/`, qui est versionné, et prouve exactement la même
+> chose ici. `Build succeeded`, 0 erreur.
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
