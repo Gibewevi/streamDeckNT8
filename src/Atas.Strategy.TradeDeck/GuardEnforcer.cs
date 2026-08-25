@@ -122,6 +122,12 @@ internal sealed class GuardEnforcer
         /// docs): the fact "our cancel failed" is recorded on the pending entry itself rather than
         /// inferred from whether the entry still exists at some instant, so it cannot be lost to a
         /// race between the two.
+        ///
+        /// COVERS ONLY THE FAILURES REPORTED WHILE THIS ENTRY EXISTED. A cancel refused BEFORE the
+        /// entry was ever built — the ordinary id-less sequence, where the entry only appears later
+        /// at the migration in InspectCore — cannot be flagged here at all, and used to be lost
+        /// outright. <see cref="_cancelFailedIds"/> is the companion record that catches that case;
+        /// <see cref="ResolveOutcome"/> consults both (R5 review, finding 1).
         /// </summary>
         public bool CancelFailed;
 
@@ -129,6 +135,39 @@ internal sealed class GuardEnforcer
     }
 
     private readonly Dictionary<string, PendingGuardAction> _pending = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Ids whose cancellation the platform reported as FAILED, recorded independently of
+    /// <see cref="_pending"/>. Read and written only under <see cref="_lock"/>.
+    ///
+    /// WHY A FLAG ON THE PENDING ENTRY IS NOT ENOUGH (R5 review, finding 1). R2 made "our cancel
+    /// failed" a flag on the entry so it could not be lost to a race with ResolveOutcome, and that
+    /// covers every case where the entry EXISTS. On the id-less path it does not exist yet, and not
+    /// by accident: an order cancelled while still id-less only gets its entry at the migration in
+    /// InspectCore, on the NEXT inspection. So the ORDINARY sequence — cancel, broker refuses it,
+    /// migration — had NotifyCancelFailed look up an id nothing had keyed yet and return, after
+    /// which the migration built a fresh entry with CancelFailed necessarily cleared; the trader's
+    /// own hand-cancel then resolved as `outcome: "stopped"`, and Bitlearn reads "stopped" as the
+    /// rule having worked. That is the R2 incident exactly, resurrected on the id-less path by the
+    /// R3 migration. A refused cancel is a fact about an ORDER, not a property of a dictionary
+    /// entry that may not have been created yet, so it is recorded here the moment it is known.
+    ///
+    /// A FACT STORE AND NOTHING MORE: nothing is cancelled from it, nothing is reported from it,
+    /// nothing periodic reads it. Its only reader is ResolveOutcome, which removes an id as it
+    /// consumes it — pruning every order this class actually resolves. What is never pruned is an
+    /// id belonging to an order this class never cancelled, because NotifyCancelFailed is called
+    /// for EVERY OrdersCancelFailed and at that instant cannot yet tell the difference — which is
+    /// the entire point. That is one short string per broker-refused cancel in a session, the same
+    /// session-scoped shape <see cref="_handled"/> already has, and it is deliberately preferred to
+    /// any size cap: a cap drops facts, and a dropped fact here IS the false clean record this
+    /// store exists to prevent.
+    ///
+    /// IT CANNOT TELL WHOSE CANCEL WAS REFUSED, and errs on purpose. If the refused cancel was the
+    /// TRADER's rather than this class's, an order that really does end up cancelled is reported
+    /// `bypassed` instead of `stopped`. That is the pessimistic direction — a bypass recorded where
+    /// the rule may in fact have held — never the reverse, and never a false clean record.
+    /// </summary>
+    private readonly HashSet<string> _cancelFailedIds = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Rate-limits the "no stable id" cancel log — see <see cref="_handledByReference"/>'s I2a
@@ -312,9 +351,17 @@ internal sealed class GuardEnforcer
         // matters most. Closing this needs a pending store keyed by REFERENCE while no id exists,
         // which is a design change to this class's whole bookkeeping rather than a patch; it was
         // parked rather than half-done, because every partial fix in this area so far has traded a
-        // noisy record for a silent one. What is NOT lost meanwhile: the order was still cancelled —
-        // the guard's primary duty — and the cancel request itself is logged by LogCancelRequested.
-        // Only the journal line to Bitlearn is missing.
+        // noisy record for a silent one.
+        //
+        // WHAT IS AND IS NOT LOST, PRECISELY (R5 review). The order was still cancelled — the
+        // guard's primary duty. No WRONG verdict is produced either: with no _pending entry,
+        // ResolveOutcome returns before deciding anything, so the failure mode here is a MISSING
+        // verdict and never a false `stopped`. What IS lost is the journal line to Bitlearn, and
+        // the local consolation is thinner than it first looks: LogCancelRequested does log the
+        // cancel request, but on this very path — id-less, with the Order instance churning — that
+        // line is throttled down to TRACE past the third occurrence of an episode (see
+        // _noIdCancelCount), and TRACE is off at the default level. In exactly the churn episode
+        // this gap is about, the trader may therefore see nothing about it at all.
         var id = order.Id ?? string.Empty;
         lock (_lock)
         {
@@ -394,9 +441,20 @@ internal sealed class GuardEnforcer
         // stopped being true then). The residue that genuinely never gets an entry is the narrower
         // one stated at that migration site: an id that only ever surfaces on an event InspectCore
         // no longer reaches.
+        //
+        // CREATE-IF-ABSENT HERE TOO (R5 review, finding 2 — the R4 fix corrected the migration site
+        // and left this one). This site is reachable with an entry already present: the
+        // `_handled.Add(id)` gate in InspectCore is released before this method re-takes the lock,
+        // and a platform read (InstrumentName, just above) sits inside that window. Thread A can
+        // win `_handled.Add(X)` and leave the lock; thread B can migrate a churned id-less instance
+        // of the SAME logical order and create entry E for X; an OrdersCancelFailed can flag E; and
+        // A would then arrive here and REPLACE E, discarding the flag — the same lost flag, the
+        // same false `stopped`, the same false clean record as the defect fixed one line up in the
+        // migration branch. Keep whichever entry already exists: its Violation describes the cancel
+        // that actually happened, and its flag is the one that must never be dropped.
         if (id.Length > 0)
         {
-            lock (_lock) _pending[id] = new PendingGuardAction(violation);
+            lock (_lock) _pending.TryAdd(id, new PendingGuardAction(violation));
         }
 
         try
@@ -407,8 +465,13 @@ internal sealed class GuardEnforcer
         catch (Exception ex)
         {
             // A cancel that throws is the one case settled on the spot: the order is alive and the
-            // macro did not stop it — remove the entry just inserted above, since ResolveOutcome has
-            // nothing left to wait for; this call already knows, and reports, the outcome.
+            // macro did not stop it — drop the pending entry for this id, since ResolveOutcome has
+            // nothing left to wait for; this call already knows, and reports, the outcome. Said
+            // exactly (R5): what is removed is the entry inserted above, OR an equivalent one a
+            // concurrent migration had already created for the same order. Removing that one costs
+            // nothing that matters — the verdict for this order is being reported as bypassed on
+            // this very line, so the outcome is recorded, not silenced, and any cancel-failure fact
+            // survives in _cancelFailedIds regardless of what happens to the entry.
             if (id.Length > 0)
             {
                 lock (_lock) _pending.Remove(id);
@@ -496,8 +559,16 @@ internal sealed class GuardEnforcer
     /// itself throws; that path has already settled the order and REPORTED it as bypassed on the
     /// spot, so an entry gone that way is a verdict recorded, not one lost. Finding nothing here can
     /// therefore only mean one of: not an order this class cancelled, an entry already resolved and
-    /// reported, or an order never keyed at all (cancelled while id-less and not yet migrated — see
+    /// reported, or an order not keyed YET (cancelled while still id-less and not yet migrated — see
     /// <see cref="_pending"/>'s own doc).
+    ///
+    /// AND FINDING NOTHING NO LONGER LOSES ANYTHING (R5 review, finding 1). That last case is not a
+    /// harmless empty lookup: it is the ORDINARY id-less sequence, and it used to end in a false
+    /// `outcome: "stopped"`. The failure is now recorded in <see cref="_cancelFailedIds"/> before
+    /// this lookup happens at all, whether or not an entry exists, and ResolveOutcome consults that
+    /// record alongside the flag. So such an order either resolves as `bypassed`, or — if its id
+    /// never reaches the migration, the gap parked in InspectCore — produces no verdict at all.
+    /// Neither of those can be a false `stopped`.
     ///
     /// Called for EVERY OrdersCancelFailed from OrderMonitor, unconditionally: cheap and correct to
     /// be a no-op whenever this class is not the one who asked for that particular cancel.
@@ -508,18 +579,42 @@ internal sealed class GuardEnforcer
         var id = order.Id ?? string.Empty;
         if (id.Length == 0) return;
 
+        bool pendingKnown;
         bool alreadyFlagged;
         lock (_lock)
         {
-            if (!_pending.TryGetValue(id, out var entry)) return;
-            alreadyFlagged = entry.CancelFailed;
-            entry.CancelFailed = true;
+            // RECORDED BEFORE ANYTHING IS LOOKED UP, AND WHETHER OR NOT AN ENTRY EXISTS (R5 review,
+            // finding 1). This used to return right here when _pending had nothing for this id, and
+            // on the id-less path it ordinarily has nothing yet — the migration that creates the
+            // entry only runs on the NEXT inspection. The fact was dropped and the order later
+            // resolved as `stopped`. See _cancelFailedIds for the full sequence.
+            _cancelFailedIds.Add(id);
+
+            if (_pending.TryGetValue(id, out var entry))
+            {
+                pendingKnown = true;
+                alreadyFlagged = entry.CancelFailed;
+                entry.CancelFailed = true;
+            }
+            else
+            {
+                pendingKnown = false;
+                alreadyFlagged = false;
+            }
         }
 
         // Logged once per order, not once per retry: a broker can reject a cancel repeatedly while
         // the platform keeps re-trying it, and the fact this class cares about — "do not credit this
         // order as stopped" — only needs recording once.
-        if (alreadyFlagged) return;
+        //
+        // Still gated on a pending entry, unchanged from before R5: this method is called for EVERY
+        // OrdersCancelFailed the platform raises, including cancels no part of the deck ever asked
+        // for, and the line below asserts that the guard's OWN cancel was refused. The record above
+        // needs no such proof; this log line does. Nothing is lost by the gate that was not lost
+        // before it: if the order is one of ours, the fact reaches the log at resolution instead, in
+        // ResolveOutcome's GUARD BYPASSED line — whenever that order reaches a verdict at all (for
+        // when it does not, see the parked gap in InspectCore).
+        if (!pendingKnown || alreadyFlagged) return;
 
         var instrument = ContextResolver.InstrumentName(order.Security);
         SdLog.EventWarn("Safety",
@@ -539,8 +634,11 @@ internal sealed class GuardEnforcer
     /// and the empty window between pop and put-back let NotifyCancelFailed race it (N2). Checking
     /// for presence without removing, reading Status() outside the lock, and only THEN taking the
     /// lock again to pop closes both: a throw leaves the entry exactly where it was, for the next
-    /// OrderChanged to retry, and NotifyCancelFailed can always find the entry because nothing ever
-    /// removes it early.
+    /// OrderChanged to retry. (The rest of that R2 sentence — "and NotifyCancelFailed can always
+    /// find the entry because nothing ever removes it early" — was dropped in R5, on two counts:
+    /// CancelAndReport's catch is a second remover, and NotifyCancelFailed no longer depends on
+    /// finding an entry at all, since it records the failure in <see cref="_cancelFailedIds"/>
+    /// whether one exists or not.)
     /// </summary>
     private void ResolveOutcome(Order order)
     {
@@ -580,7 +678,16 @@ internal sealed class GuardEnforcer
             // same entry between the ContainsKey check above and here.
             if (!_pending.TryGetValue(id, out var entry)) return;
             violation = entry.Violation;
-            cancelFailed = entry.CancelFailed;
+
+            // BOTH SOURCES OF THE SAME FACT (R5 review, finding 1). The flag carries a cancel
+            // failure reported while this entry existed; _cancelFailedIds carries one reported
+            // BEFORE it existed, which on the id-less path is the ordinary order of events — the
+            // entry is only built later, by the migration in InspectCore, with the flag necessarily
+            // cleared. Remove() is on its own line rather than folded into the || below because ||
+            // short-circuits: skipping the removal whenever the flag happened to be set would leak
+            // that id for the rest of the session.
+            var recordedFailure = _cancelFailedIds.Remove(id);
+            cancelFailed = entry.CancelFailed || recordedFailure;
             _pending.Remove(id);
         }
 
