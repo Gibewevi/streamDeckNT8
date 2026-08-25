@@ -41,6 +41,9 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
     private OrderMonitor? _monitor;
     private GuardEnforcer? _guard;
 
+    /// <summary>Task 9's execution journal. Created before the monitor, which is what feeds it.</summary>
+    private ExecutionRecorder? _recorder;
+
     /// <summary>
     /// Keeps the order monitor's connector subscriptions in step with the registry, at the same
     /// cadence as the state publisher. A connector can connect or disconnect mid-session — see
@@ -98,7 +101,12 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
             // Closes the hole the bridge cannot reach: orders placed straight into the platform
             // never cross it, so the safety macro has to be applied from inside.
             _guard = new GuardEnforcer(_resolver, _bridge, _engine, this);
-            _monitor = new OrderMonitor(_bridge, _guard);
+
+            // Task 9: before the monitor, which is what feeds it NewMyTrades from every connector
+            // the registry aggregates. `this` is the IOrderGateway that lets the journal classify a
+            // fill's stop/target order the same way OrderEngine itself does.
+            _recorder = new ExecutionRecorder(this);
+            _monitor = new OrderMonitor(_bridge, _guard, _recorder);
 
             _publisher = new StatePublisher(_resolver, _bridge, StateIntervalMs);
             // Empty instrument on purpose: a hardcoded contract goes stale and would make the deck
@@ -174,6 +182,15 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
         try { _monitor?.Dispose(); }
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while detaching the order monitor on suspend"); }
 
+        // Same reasoning again, one resource later: the journal spool holds an open file handle
+        // (FileStream), not a timer, but a chart re-suspended and reopened without this would leak
+        // one handle per cycle exactly like the timer would — OnStarted creates a brand new
+        // ExecutionRecorder unconditionally, so the old one has to be closed here first. After the
+        // monitor, which is what feeds it: closing the spool before detaching the subscription would
+        // leave a fill arriving at a disposed writer.
+        try { _recorder?.Dispose(); }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while closing the journal spool on suspend"); }
+
         try { _publisher?.Dispose(); }
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the state publisher on suspend"); }
 
@@ -197,6 +214,11 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the connector refresh timer"); }
         try { _monitor?.Dispose(); }
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while detaching the order monitor"); }
+
+        // After the monitor, which detaches the subscription that feeds it: closing the spool first
+        // would leave fills arriving at a disposed writer.
+        try { _recorder?.Dispose(); }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while closing the journal spool"); }
 
         // Before the bridge client, which it publishes through: stopping the socket first would
         // leave a publish in flight writing to a disposed client.
@@ -228,11 +250,14 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
             catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the connector refresh timer during shutdown"); }
             try { _monitor?.Dispose(); }
             catch (Exception ex) { SdLog.Fail("Session", ex, "Error while detaching the order monitor during shutdown"); }
+            try { _recorder?.Dispose(); }
+            catch (Exception ex) { SdLog.Fail("Session", ex, "Error while closing the journal spool during shutdown"); }
             try { _publisher?.Dispose(); }
             catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the state publisher during shutdown"); }
 
             _connectorRefreshTimer = null;
             _monitor = null;
+            _recorder = null;
             _guard = null;
             _dispatcher = null;
             _engine = null;

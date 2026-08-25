@@ -56,6 +56,13 @@ internal sealed class OrderMonitor : IDisposable
     /// </summary>
     private readonly GuardEnforcer? _enforcer;
 
+    /// <summary>
+    /// Task 9's execution journal. Optional for the same reason <see cref="_enforcer"/> is: a
+    /// caller that never passes one gets the pre-task-9 behaviour, nothing subscribed beyond the
+    /// order/position events this class already watched.
+    /// </summary>
+    private readonly ExecutionRecorder? _recorder;
+
     private readonly object _lock = new();
 
     /// <summary>Connectors currently subscribed, keyed by reference — a connector never compares by value.</summary>
@@ -111,10 +118,12 @@ internal sealed class OrderMonitor : IDisposable
     /// </summary>
     public Action? StateChanged { get; set; }
 
-    public OrderMonitor(BridgeClient bridge, GuardEnforcer? enforcer = null)
+    public OrderMonitor(BridgeClient bridge, GuardEnforcer? enforcer = null,
+                        ExecutionRecorder? recorder = null)
     {
         _bridge = bridge;
         _enforcer = enforcer;
+        _recorder = recorder;
     }
 
     /// <summary>
@@ -192,7 +201,7 @@ internal sealed class OrderMonitor : IDisposable
     }
 
     /// <summary>
-    /// Subscribes all six events this monitor needs from one connector — symmetric with
+    /// Subscribes all seven events this monitor needs from one connector — symmetric with
     /// <see cref="DetachOne"/> ON PURPOSE (review round 1, finding I2). DetachOne already wraps its
     /// unsubscribes in a try/catch, which is an admission that these accessors CAN throw (a connector
     /// mid-disposal or mid-reconnect); the subscribe side used to not say so. Without the try/catch
@@ -206,7 +215,7 @@ internal sealed class OrderMonitor : IDisposable
     /// </summary>
     private void AttachOne(IDataFeedConnector connector)
     {
-        var alreadySubscribed = new List<Action>(6);
+        var alreadySubscribed = new List<Action>(7);
         try
         {
             connector.OrderChanged += OnOrderChanged;
@@ -229,6 +238,14 @@ internal sealed class OrderMonitor : IDisposable
             // a fast market order can arrive a fill late.
             connector.NewOrders += OnNewOrders;
             alreadySubscribed.Add(() => connector.NewOrders -= OnNewOrders);
+
+            // Task 9: NewMyTrades on EACH connector the registry aggregates, never
+            // ChartStrategy.OnNewMyTrade and never a single connector. That difference is the reason
+            // the journal exists: at connector level we see every fill on every account the platform
+            // is connected to, including the ones placed at the DOM or the Chart Trader — the very
+            // ones the guard rules cannot prevent, only report.
+            connector.NewMyTrades += OnNewMyTrades;
+            alreadySubscribed.Add(() => connector.NewMyTrades -= OnNewMyTrades);
         }
         catch (Exception ex)
         {
@@ -258,6 +275,7 @@ internal sealed class OrderMonitor : IDisposable
             connector.OrderModifyFailed -= OnModifyFailed;
             connector.PositionsChanged -= OnPositionsChanged;
             connector.NewOrders -= OnNewOrders;
+            connector.NewMyTrades -= OnNewMyTrades;
         }
         catch (Exception ex) { SdLog.Warn("Could not unsubscribe order updates from a connector: {0}", ex.Message); }
 
@@ -353,6 +371,23 @@ internal sealed class OrderMonitor : IDisposable
             {
                 if (_enforcer.Inspect(order)) StateChanged?.Invoke();
             }
+        });
+
+    /// <summary>
+    /// Task 9's execution journal. Fills reported by the CONNECTOR, never
+    /// ChartStrategy.OnNewMyTrade — see the class-level remark on <see cref="AttachOne"/>. The
+    /// journal owns its own guard against replay fills and duplicate ids (see
+    /// <see cref="ExecutionRecorder.Record"/>); this handler is only the wire between the platform
+    /// event and that class, and never lets one bad trade in the batch stop the rest — Record
+    /// itself cannot throw, so a foreach here is safe without its own try/catch per iteration.
+    /// </summary>
+    private void OnNewMyTrades(IDataFeedConnector connector, IEnumerable<MyTrade> trades) =>
+        Safely("Journal", () =>
+        {
+            if (_recorder == null) return;
+            foreach (var trade in trades) _recorder.Record(trade);
+            // A fill moved the position: refresh the deck rather than waiting for the next tick.
+            StateChanged?.Invoke();
         });
 
     private void OnRegisterFailed(IDataFeedConnector connector, string message, Order order) =>
