@@ -39,6 +39,7 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
     private OrderEngine? _engine;
     private CommandDispatcher? _dispatcher;
     private OrderMonitor? _monitor;
+    private GuardEnforcer? _guard;
 
     /// <summary>
     /// Keeps the order monitor's connector subscriptions in step with the registry, at the same
@@ -93,7 +94,11 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
 
             _engine = new OrderEngine(_resolver, this);
             _dispatcher = new CommandDispatcher(_engine);
-            _monitor = new OrderMonitor(_bridge);
+
+            // Closes the hole the bridge cannot reach: orders placed straight into the platform
+            // never cross it, so the safety macro has to be applied from inside.
+            _guard = new GuardEnforcer(_resolver, _bridge, _engine, this);
+            _monitor = new OrderMonitor(_bridge, _guard);
 
             _publisher = new StatePublisher(_resolver, _bridge, StateIntervalMs);
             // Empty instrument on purpose: a hardcoded contract goes stale and would make the deck
@@ -228,6 +233,7 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
 
             _connectorRefreshTimer = null;
             _monitor = null;
+            _guard = null;
             _dispatcher = null;
             _engine = null;
             _publisher = null;
@@ -286,6 +292,7 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
         {
             response = message.Action switch
             {
+                "setGuardPolicy" => HandleGuardPolicy(message),
                 "setAccount" or "setInstrument" => HandleTracking(message),
                 // Out of scope, and answered honestly rather than with a comfortable lie. The bridge
                 // FORCES both on every add-on connection; replying "success" would show the trader a
@@ -298,6 +305,39 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
 
         LogOutcome(message, response, startedAt);
         _ = _bridge?.SendAsync(response);
+    }
+
+    /// <summary>
+    /// Adopts the safety policy the bridge publishes. Handled here rather than in the dispatcher
+    /// because it sends no order and touches no position: it only tells the enforcer what to refuse
+    /// when an order arrives from outside the deck.
+    /// </summary>
+    private BridgeMessage HandleGuardPolicy(BridgeMessage message)
+    {
+        if (_guard == null || _publisher == null)
+            return BridgeMessage.Failure(message.RequestId, message.Action, "CONTEXT_MISSING", "Guard enforcer is not initialized.");
+
+        var blocked = message.GetBool("blocked");
+        var reason = message.GetString("reason");
+        var maxContracts = message.GetInt("maxContracts") ?? 0;
+
+        // A policy that refuses something, adopted while nobody has told us which account to watch,
+        // is the shape of the 2026-08-21 bypass: armed, displayed red on the deck, and pointed at an
+        // account the trader was not using. The policy is still applied — half a guard beats none —
+        // but it never passes in silence again.
+        if ((blocked || maxContracts > 0) && !_accountConfirmedByBridge)
+        {
+            SdLog.EventWarn("Safety",
+                "SECURITY: adopting a blocking policy (blocked={0} reason={1} maxContracts={2}) while the bridge has NOT named the account — "
+                + "enforcement is running on '{3}', picked by default at startup. Orders on any other account are NOT being watched.",
+                blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts,
+                string.IsNullOrEmpty(_publisher.TrackedAccount) ? "(none)" : _publisher.TrackedAccount);
+        }
+
+        _guard.SetTrackedAccount(_publisher.TrackedAccount);
+        _guard.UpdatePolicy(blocked, reason, maxContracts);
+
+        return BridgeMessage.Response(message.RequestId, message.Action, true, new { blocked, maxContracts });
     }
 
     private BridgeMessage HandleTracking(BridgeMessage message)
@@ -318,6 +358,10 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
         if (!string.IsNullOrWhiteSpace(account)) _accountConfirmedByBridge = true;
 
         _publisher.UpdateTracking(account, instrument);
+
+        // The enforcer follows the tracked account, always. A guard watching an account nobody
+        // trades is the failure mode this line exists to prevent.
+        _guard?.SetTrackedAccount(_publisher.TrackedAccount);
 
         return BridgeMessage.Response(message.RequestId, message.Action, true, new
         {

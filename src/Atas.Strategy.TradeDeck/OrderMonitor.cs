@@ -48,6 +48,14 @@ namespace TradeDeck.Atas.Strategy;
 internal sealed class OrderMonitor : IDisposable
 {
     private readonly BridgeClient _bridge;
+
+    /// <summary>
+    /// Task 8's guard. Optional: a caller that never passes one (a unit test, or an earlier task's
+    /// wiring) gets exactly the pre-task-8 behaviour — every event still reaches the deck, nothing
+    /// extra is inspected or cancelled.
+    /// </summary>
+    private readonly GuardEnforcer? _enforcer;
+
     private readonly object _lock = new();
 
     /// <summary>Connectors currently subscribed, keyed by reference — a connector never compares by value.</summary>
@@ -103,7 +111,11 @@ internal sealed class OrderMonitor : IDisposable
     /// </summary>
     public Action? StateChanged { get; set; }
 
-    public OrderMonitor(BridgeClient bridge) => _bridge = bridge;
+    public OrderMonitor(BridgeClient bridge, GuardEnforcer? enforcer = null)
+    {
+        _bridge = bridge;
+        _enforcer = enforcer;
+    }
 
     /// <summary>
     /// Reconciles the connectors this monitor listens to against what the registry currently reports.
@@ -180,7 +192,7 @@ internal sealed class OrderMonitor : IDisposable
     }
 
     /// <summary>
-    /// Subscribes all five events this monitor needs from one connector — symmetric with
+    /// Subscribes all six events this monitor needs from one connector — symmetric with
     /// <see cref="DetachOne"/> ON PURPOSE (review round 1, finding I2). DetachOne already wraps its
     /// unsubscribes in a try/catch, which is an admission that these accessors CAN throw (a connector
     /// mid-disposal or mid-reconnect); the subscribe side used to not say so. Without the try/catch
@@ -194,7 +206,7 @@ internal sealed class OrderMonitor : IDisposable
     /// </summary>
     private void AttachOne(IDataFeedConnector connector)
     {
-        var alreadySubscribed = new List<Action>(5);
+        var alreadySubscribed = new List<Action>(6);
         try
         {
             connector.OrderChanged += OnOrderChanged;
@@ -211,6 +223,12 @@ internal sealed class OrderMonitor : IDisposable
 
             connector.PositionsChanged += OnPositionsChanged;
             alreadySubscribed.Add(() => connector.PositionsChanged -= OnPositionsChanged);
+
+            // Task 8: the earliest sighting of an order placed outside the deck. Without this,
+            // GuardEnforcer only ever learns about an external order through OrderChanged, which on
+            // a fast market order can arrive a fill late.
+            connector.NewOrders += OnNewOrders;
+            alreadySubscribed.Add(() => connector.NewOrders -= OnNewOrders);
         }
         catch (Exception ex)
         {
@@ -239,6 +257,7 @@ internal sealed class OrderMonitor : IDisposable
             connector.OrdersCancelFailed -= OnCancelFailed;
             connector.OrderModifyFailed -= OnModifyFailed;
             connector.PositionsChanged -= OnPositionsChanged;
+            connector.NewOrders -= OnNewOrders;
         }
         catch (Exception ex) { SdLog.Warn("Could not unsubscribe order updates from a connector: {0}", ex.Message); }
 
@@ -263,6 +282,15 @@ internal sealed class OrderMonitor : IDisposable
         Safely("Order", () =>
         {
             if (order == null) return;
+
+            // Enforcement first, and before any other consideration: this is the only moment an
+            // order placed outside the deck can still be stopped. Every millisecond spent elsewhere
+            // is a millisecond it may fill in.
+            if (_enforcer != null && _enforcer.Inspect(order))
+            {
+                StateChanged?.Invoke();
+                return;
+            }
 
             var status = order.Status();
             var inScope = InScope(order);
@@ -307,6 +335,20 @@ internal sealed class OrderMonitor : IDisposable
                 StateChanged?.Invoke();
         });
     }
+
+    private void OnNewOrders(IDataFeedConnector connector, IEnumerable<Order> orders) =>
+        Safely("Safety", () =>
+        {
+            if (_enforcer == null) return;
+            // The earliest sighting of an order placed outside the deck. OrderChanged follows, but
+            // on a market order the two may be a fill apart. Inspect guards itself against throwing
+            // (see its own doc), so one bad order in the batch cannot stop the rest — a bracket's
+            // entry, stop and target can all arrive in the same NewOrders callback.
+            foreach (var order in orders)
+            {
+                if (_enforcer.Inspect(order)) StateChanged?.Invoke();
+            }
+        });
 
     private void OnRegisterFailed(IDataFeedConnector connector, string message, Order order) =>
         Safely("Order", () =>
