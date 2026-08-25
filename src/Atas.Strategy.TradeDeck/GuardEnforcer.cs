@@ -31,7 +31,12 @@ namespace TradeDeck.Atas.Strategy;
 ///
 /// IT KNOWS NO REASON BY NAME. `reason` travels through untouched — dailyLoss, tradeLimit,
 /// beforeSessionStart or anything the bridge adds later. The clock, the arming and the countdown are
-/// the bridge's business alone; this class never reads the time.
+/// the bridge's business alone, and NO REFUSAL PATH HERE EVER READS THE CLOCK: not one branch of
+/// InspectCore, of the cancel decision or of the outcome verdict depends on what time it is, so this
+/// class can never arm, disarm or expire a rule of its own accord. The single clock read in this
+/// file (DateTime.UtcNow in LogCancelRequested — see _noIdCancelCount) bounds LOG VOLUME and nothing
+/// else: it can change how loudly an event is written, never whether an order is cancelled nor how
+/// that order is reported.
 ///
 /// THE HOLE THIS DOES NOT CLOSE. This class only ever sees an order through a connector event
 /// (OrderChanged / NewOrders — see OrderMonitor). In degraded mode (task 3: host registry
@@ -94,8 +99,17 @@ internal sealed class GuardEnforcer
 
     /// <summary>
     /// One order this class asked to cancel, waiting to find out how the story ends. Keyed by
-    /// order id — see <see cref="_handledByReference"/> for the id-less case, which is never
-    /// tracked to a conclusion here for lack of a key to track it by.
+    /// order id.
+    ///
+    /// AN ORDER CANCELLED WHILE STILL ID-LESS DOES GET AN ENTRY HERE (R3 review, I2b). The older
+    /// wording of this doc — "the id-less case is never tracked to a conclusion" — stopped being
+    /// true then: the migration branch in InspectCore creates the entry at the first moment a key
+    /// exists, i.e. the first inspection that sees a real id on an instance this class had already
+    /// cancelled. What stays genuinely untracked is narrower, and is stated in full at that
+    /// migration site: an order whose id only ever surfaces on an event InspectCore no longer
+    /// reaches — the TERMINAL one (an instant fill, or the cancel confirmation itself), or any event
+    /// past the point where a filter above now stops it — never reaches the migration and therefore
+    /// never produces a verdict at all.
     /// </summary>
     private sealed class PendingGuardAction
     {
@@ -287,6 +301,20 @@ internal sealed class GuardEnforcer
             violation = "maxContracts";
         }
 
+        // PARKED GAP — THE MIGRATION BELOW ONLY EVER RUNS ON AN ORDER STILL BEING INSPECTED (R4
+        // review; recorded deliberately, NOT fixed in this round). Every filter above has already
+        // run by the time an id-less order can hand its new id to that migration: it must still be
+        // ContextResolver.IsActive and must still violate the CURRENT policy. So an order this class
+        // cancelled while it was id-less, whose id first appears on its TERMINAL event — an instant
+        // fill on a liquid future, or the cancel confirmation itself — or only after the block
+        // cleared, never reaches the migration, never gets a _pending entry, and produces NO verdict
+        // at all. On the instant-fill case the missing line is `GUARD BYPASSED`, the one line that
+        // matters most. Closing this needs a pending store keyed by REFERENCE while no id exists,
+        // which is a design change to this class's whole bookkeeping rather than a patch; it was
+        // parked rather than half-done, because every partial fix in this area so far has traded a
+        // noisy record for a silent one. What is NOT lost meanwhile: the order was still cancelled —
+        // the guard's primary duty — and the cancel request itself is logged by LogCancelRequested.
+        // Only the journal line to Bitlearn is missing.
         var id = order.Id ?? string.Empty;
         lock (_lock)
         {
@@ -313,7 +341,21 @@ internal sealed class GuardEnforcer
                     // is the CURRENT policy's verdict for this order, computed just above; the
                     // original id-less cancel is not expected to have used a different one, since
                     // id assignment follows acknowledgement almost immediately.
-                    _pending[id] = new PendingGuardAction(violation);
+                    //
+                    // CREATE ONLY IF ABSENT — AN INDEXER ASSIGNMENT IS A DEFECT HERE (R4 review).
+                    // This migration is one-shot per (instance, id) PAIR, not per id, and instance
+                    // churn is real on this platform (see _handledByReference's I2a note: ATAS can
+                    // hand back a different Order object per event for the same logical order). Two
+                    // id-less instances of one logical order can therefore both sit in the weak
+                    // table and both reach this line carrying the same id. `_pending[id] = new ...`
+                    // would let the second REPLACE the entry the first created — discarding a
+                    // CancelFailed flag an OrdersCancelFailed had set in between, after which the
+                    // trader's own hand-cancel resolves as outcome:"stopped" and Bitlearn records a
+                    // clean day on an order the guard never stopped. That is precisely the failure
+                    // the R2 flag exists to prevent, so this write must never clobber: a duplicate
+                    // entry is impossible anyway (the first one is kept), a LOST FLAG is what has to
+                    // be impossible.
+                    _pending.TryAdd(id, new PendingGuardAction(violation));
                     return false;
                 }
 
@@ -346,8 +388,12 @@ internal sealed class GuardEnforcer
         // exists to prevent, and Bitlearn reads "stopped" as the rule having worked. Inserting
         // first closes the window outright: by the time Cancel() can raise anything, the entry
         // already exists for NotifyCancelFailed to find. Only done when an id exists to key it by
-        // (R1 review, I2) — see LogCancelRequested / _handledByReference for the id-less case,
-        // which has no key to track a conclusion by regardless of ordering.
+        // (R1 review, I2); an order cancelled while still id-less gets its entry LATER, at the
+        // migration branch in InspectCore, the first moment a key exists (R3 review, I2b — this
+        // comment used to say the id-less case could never be tracked to a conclusion, which
+        // stopped being true then). The residue that genuinely never gets an entry is the narrower
+        // one stated at that migration site: an id that only ever surfaces on an event InspectCore
+        // no longer reaches.
         if (id.Length > 0)
         {
             lock (_lock) _pending[id] = new PendingGuardAction(violation);
@@ -439,11 +485,19 @@ internal sealed class GuardEnforcer
     /// order — the natural next move after a broker-rejected cancel — could then resolve through
     /// ResolveOutcome as `outcome: "stopped"`, crediting THIS class with a cancel that was actually
     /// the trader's own; Bitlearn reads "stopped" as the rule having worked). Flagging the STILL-
-    /// PRESENT pending entry instead of popping-and-reporting removes the race outright: the entry is
-    /// never removed by anyone until <see cref="ResolveOutcome"/> has an actual terminal status in
-    /// hand, so this method can always find it (barring the id-less case, where there was never an
-    /// entry to find), and ResolveOutcome — whichever OrderChanged eventually reaches it — is
-    /// guaranteed to see the flag and report `bypassed`, never `stopped`, regardless of timing.
+    /// PRESENT pending entry instead of popping-and-reporting removes the race outright. The exact
+    /// guarantee, stated as it actually stands (R4 review: this used to claim the entry "is never
+    /// removed by anyone" before ResolveOutcome holds a terminal status, and there has been a second
+    /// remover since R3). <see cref="ResolveOutcome"/> never removes an entry before it has an
+    /// actual terminal status in hand, so an entry still waiting for its verdict is always here to
+    /// be flagged, and ResolveOutcome — whichever OrderChanged eventually reaches it — is then
+    /// guaranteed to see the flag and report `bypassed`, never `stopped`, regardless of timing. The
+    /// ONE other place that removes an entry is <see cref="CancelAndReport"/>'s catch, when Cancel()
+    /// itself throws; that path has already settled the order and REPORTED it as bypassed on the
+    /// spot, so an entry gone that way is a verdict recorded, not one lost. Finding nothing here can
+    /// therefore only mean one of: not an order this class cancelled, an entry already resolved and
+    /// reported, or an order never keyed at all (cancelled while id-less and not yet migrated — see
+    /// <see cref="_pending"/>'s own doc).
     ///
     /// Called for EVERY OrdersCancelFailed from OrderMonitor, unconditionally: cheap and correct to
     /// be a no-op whenever this class is not the one who asked for that particular cancel.
