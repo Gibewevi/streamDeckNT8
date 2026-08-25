@@ -3107,7 +3107,7 @@ et non après.
   (dé)connecter en cours de session, comme le Rithmic du 24/08 qui portait un portefeuille invisible
   du graphique. Les deux paramètres facultatifs du constructeur arrivent aux tâches 8 et 9.
 
-- [ ] **Étape 1 : écrire le moteur d'ordres**
+- [x] **Étape 1 : écrire le moteur d'ordres**
 
 Créer `src/Atas.Strategy.TradeDeck/OrderEngine.cs` :
 
@@ -3355,7 +3355,7 @@ internal sealed class OrderEngine
 }
 ```
 
-- [ ] **Étape 2 : écrire l'aiguilleur**
+- [x] **Étape 2 : écrire l'aiguilleur**
 
 Créer `src/Atas.Strategy.TradeDeck/CommandDispatcher.cs`. Les onze branches encore absentes sont
 laissées en `UNSUPPORTED_ACTION` et remplies aux tâches 5 à 7 — chacune est nommée dès maintenant
@@ -3408,7 +3408,7 @@ internal sealed class CommandDispatcher
 }
 ```
 
-- [ ] **Étape 3 : écrire le moniteur d'ordres**
+- [x] **Étape 3 : écrire le moniteur d'ordres**
 
 Créer `src/Atas.Strategy.TradeDeck/OrderMonitor.cs` :
 
@@ -3624,7 +3624,7 @@ internal sealed class OrderMonitor : IDisposable
 }
 ```
 
-- [ ] **Étape 4 : câbler le tout dans la stratégie**
+- [x] **Étape 4 : câbler le tout dans la stratégie**
 
 Dans `TradeDeckStrategy.cs`, ajouter `using ATAS.DataFeedsCore;` en tête (le type `Order` y vit),
 puis déclarer l'implémentation de la passerelle sur la classe :
@@ -3748,7 +3748,7 @@ Enfin, dans `OnBridgeMessage`, insérer la branche des commandes marchandes **en
         };
 ```
 
-- [ ] **Étape 5 : compiler**
+- [x] **Étape 5 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -3838,7 +3838,7 @@ Attendu :
 `OrdersRegisterFailed` est bien branché — ATAS peut aussi n'émettre qu'un `OrderChanged` avec
 `State == Failed`, que le moniteur traite déjà.
 
-- [ ] **Étape 9 : committer**
+- [x] **Étape 9 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
