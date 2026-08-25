@@ -31,6 +31,7 @@ public class TradeDeckStrategy : ChartStrategy
 
     private BridgeClient? _bridge;
 
+    private ConnectorRegistry? _registry;
     private ContextResolver? _resolver;
     private StatePublisher? _publisher;
 
@@ -70,13 +71,13 @@ public class TradeDeckStrategy : ChartStrategy
             _bridge.ConnectionChanged += OnConnectionChanged;
             _bridge.Start();
 
-            _resolver = new ContextResolver(() => Connector);
-            // TradingManager's getter is protected on ATAS.Indicators.Indicator: reachable from this
-            // class (TradeDeckStrategy derives from ChartStrategy derives from Indicator), NOT from
-            // StatePublisher. Passed in as a delegate rather than exposing it sideways — same reason
-            // `this` is handed over as a ChartStrategy rather than letting StatePublisher reach for
-            // a static reference to it. See StatePublisher.ReportClassicSurfaceDiagnostics.
-            _publisher = new StatePublisher(_resolver, _bridge, () => this, () => TradingManager, StateIntervalMs);
+            // ChartStrategy.Connector is confirmed always null on classic ATAS — never used here.
+            // The registry is the primary path; ContextResolver degrades to the protected
+            // Indicator.TradingManager getter (reachable only from this class, passed down as a
+            // delegate) when the registry cannot be reached.
+            _registry = new ConnectorRegistry();
+            _resolver = new ContextResolver(_registry, () => TradingManager);
+            _publisher = new StatePublisher(_resolver, _bridge, StateIntervalMs);
             // Empty instrument on purpose: a hardcoded contract goes stale and would make the deck
             // show — and trade — something the trader never picked. The bridge replays its
             // selection on every connection.
@@ -142,6 +143,7 @@ public class TradeDeckStrategy : ChartStrategy
 
             _publisher = null;
             _resolver = null;
+            _registry = null;
 
             SdLog.Event("Session", "=== TradeDeck ATAS strategy session ended ===");
         }

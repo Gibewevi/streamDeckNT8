@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 
 using ATAS.DataFeedsCore;
+using ATAS.Indicators;
 
 namespace TradeDeck.Atas.Strategy;
 
@@ -10,49 +11,56 @@ namespace TradeDeck.Atas.Strategy;
 /// Turns the deck's selection — two strings, an account name and an instrument name — into the ATAS
 /// objects an order needs.
 ///
-/// RESOLVED AGAINST THE CONNECTOR, NEVER AGAINST THE CHART. The chart the strategy is attached to is
-/// only a host; Order carries its own Portfolio and Security, so the deck can trade an instrument
-/// the chart does not display. Every lookup below therefore goes through Connector.Portfolios /
-/// Connector.Securities, and never through ChartStrategy.Portfolio / .Security.
-/// </summary>
-/// <summary>
-/// What <see cref="ContextResolver.GetAccountNames(out AccountResolutionStats)"/> saw while
-/// resolving accounts — not just the result, but why anything that didn't make it got dropped.
+/// RESOLVED AGAINST THE AGGREGATED HOST REGISTRY, NEVER AGAINST THE CHART, AND NEVER AGAINST A SINGLE
+/// CONNECTOR. There is no such thing as "the" connector: portfolios are spread across whichever of
+/// the platform's connectors are actually connected (measured live: 2 of 12, one of them a Rithmic
+/// connector carrying a portfolio invisible from the chart). Every account/instrument/position/order
+/// lookup below therefore walks <see cref="ConnectorRegistry.GetConnectors"/>, never a single
+/// connector — and Order carries its own Portfolio and Security, so the deck can trade an instrument
+/// the chart does not display.
 ///
-/// Exists for one diagnosis: "availableAccounts is empty, and we cannot tell whether the connector
-/// is absent, connected but portfolio-less, or full of portfolios this method is silently
-/// rejecting." That question came up first while field-testing against classic ATAS, with a
-/// connected demo account visible in the platform UI but nothing on the deck's Account key.
+/// DEGRADED MODE. When the registry is unreachable (<see cref="IsDegraded"/>), every lookup below
+/// falls back to the chart's own <c>ITradingManager</c> — one account, one instrument, the chart's.
+/// This is not a partial failure to patch around: it is the delivered fallback (see Contraintes
+/// globales), entered and left silently except for the one transition log line in
+/// <see cref="ConnectorRegistry.GetConnectors"/> (via <c>IsAvailable</c> flipping) — this class adds
+/// no logging of its own for the transition, it only reads the registry's current answer on each
+/// call.
 /// </summary>
-internal readonly struct AccountResolutionStats
-{
-    public bool ConnectorNull { get; init; }
-    public bool PortfoliosNull { get; init; }
-    public int PortfolioCount { get; init; }
-    public int DroppedBlankAccountId { get; init; }
-    public int DroppedReplay { get; init; }
-    public int DuplicatesMerged { get; init; }
-}
-
 internal sealed class ContextResolver
 {
-    private readonly Func<IDataFeedConnector?> _connector;
+    private readonly ConnectorRegistry _registry;
+    private readonly Func<ITradingManager?> _tradingManager;
 
-    public ContextResolver(Func<IDataFeedConnector?> connector) => _connector = connector;
+    public ContextResolver(ConnectorRegistry registry, Func<ITradingManager?> tradingManager)
+    {
+        _registry = registry;
+        _tradingManager = tradingManager;
+    }
 
-    public IDataFeedConnector? Connector => _connector();
+    /// <summary>True once the host registry has proven unreachable — read for logging/diagnostics only.</summary>
+    public bool IsDegraded => !_registry.IsAvailable;
+
+    /// <summary>Every connector currently carrying a portfolio. Empty in degraded mode.</summary>
+    public IReadOnlyList<IDataFeedConnector> Connectors => _registry.GetConnectors();
+
+    public IDataFeedConnector? ConnectorFor(Portfolio? portfolio) => _registry.ConnectorFor(portfolio);
 
     public Portfolio? FindPortfolio(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
 
-        var portfolios = Connector?.Portfolios;
-        if (portfolios == null) return null;
+        var connectors = _registry.GetConnectors();
+        if (connectors.Count == 0) return DegradedPortfolio(name);
 
-        foreach (var portfolio in portfolios)
+        foreach (var connector in connectors)
         {
-            if (string.Equals(portfolio?.AccountID, name, StringComparison.OrdinalIgnoreCase))
-                return portfolio;
+            var portfolios = SafePortfolios(connector);
+            foreach (var portfolio in portfolios)
+            {
+                if (string.Equals(portfolio?.AccountID, name, StringComparison.OrdinalIgnoreCase))
+                    return portfolio;
+            }
         }
 
         SdLog.Warn("Account not found: {0}", name);
@@ -60,46 +68,86 @@ internal sealed class ContextResolver
     }
 
     /// <summary>
-    /// Rate limit for the ambiguous-prefix warning below — FindSecurity runs on the 500ms
-    /// publication path (via StatePublisher), so an unguarded warning on every tick a prefix stays
-    /// ambiguous would produce hundreds of thousands of log lines a day. Same pattern as
-    /// _lastPnlWarning in the NinjaTrader add-on's StatePublisher: one warning per minute, not one
-    /// per resolution.
+    /// Chart-scoped fallback for FindPortfolio when the registry is unreachable. Only ONE portfolio
+    /// exists in this mode — the chart's own, via TradingManager — so the lookup degrades to
+    /// "is this the one account we have", rather than a search.
     /// </summary>
-    private DateTime _lastAmbiguousSecurityWarning = DateTime.MinValue;
+    private Portfolio? DegradedPortfolio(string name)
+    {
+        var portfolio = _tradingManager()?.Portfolio;
+        if (portfolio == null) return null;
+        if (string.Equals(portfolio.AccountID, name, StringComparison.OrdinalIgnoreCase)) return portfolio;
+
+        SdLog.Warn("Account '{0}' not found — degraded mode only exposes the chart's own account ('{1}')",
+            name, portfolio.AccountID ?? "?");
+        return null;
+    }
 
     /// <summary>
-    /// Matches the deck's instrument string against what the connector knows.
+    /// Rate limit for the ambiguous-prefix warning below. THREAD-SAFE ON PURPOSE: unlike the
+    /// NinjaTrader-era version of this field (a bare DateTime, safe only because a single serialised
+    /// 500ms publisher was the only caller), FindSecurity is reached from task 4's OrderMonitor and
+    /// task 8's GuardEnforcer too — both driven by connector events, which do not arrive on the chart
+    /// thread. A torn read/write on a bare DateTime here would not crash, but could let two threads
+    /// both pass the rate-limit check on the same ambiguity and double-log it, or — worse — corrupt
+    /// the field into a value that suppresses the warning forever. The lock is tiny and only taken
+    /// on the rare ambiguous-prefix path, never on the exact-match fast path.
+    /// </summary>
+    private readonly object _ambiguousWarnLock = new();
+    private DateTime _lastAmbiguousSecurityWarning = DateTime.MinValue;
+
+    private bool ShouldWarnAmbiguous()
+    {
+        lock (_ambiguousWarnLock)
+        {
+            if ((DateTime.UtcNow - _lastAmbiguousSecurityWarning).TotalMinutes < 1) return false;
+            _lastAmbiguousSecurityWarning = DateTime.UtcNow;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Matches the deck's instrument string against what the registry knows, across every connector.
     ///
-    /// Three passes, narrowest first. The deck sends whatever the trader typed on the Instrument
-    /// key — "MNQ", "MNQ 09-26", or the broker's own symbol — and each broker names its contracts
-    /// differently. Matching Code exactly first means an unambiguous symbol never gets hijacked by
-    /// a prefix match on another one.
+    /// Three passes, narrowest first, exact match always wins regardless of which connector or
+    /// position in the enumeration it came from — see the ambiguity handling below. The deck sends
+    /// whatever the trader typed on the Instrument key — "MNQ", "MNQ 09-26", or the broker's own
+    /// symbol — and each broker names its contracts differently.
+    ///
+    /// PREFIX MATCHES ARE COLLECTED, NOT LATCHED. Taking the first prefix match in enumeration order
+    /// would let the SAME deck keypress silently resolve to a DIFFERENT contract after a reconnect —
+    /// whichever connector happens to enumerate first is not a stable choice, and nothing would be
+    /// in the log to explain where an order went. Instead every prefix match, from every connector,
+    /// is collected and the ambiguity is resolved deterministically below.
     /// </summary>
     public Security? FindSecurity(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
 
-        var securities = Connector?.Securities;
-        if (securities == null) return null;
+        var connectors = _registry.GetConnectors();
+        if (connectors.Count == 0) return DegradedSecurity(name);
 
         var wanted = name.Trim();
         List<Security>? prefixCandidates = null;
 
-        foreach (var security in securities)
+        foreach (var connector in connectors)
         {
-            if (security == null) continue;
-
-            if (string.Equals(security.Code, wanted, StringComparison.OrdinalIgnoreCase)) return security;
-            if (string.Equals(security.Instrument, wanted, StringComparison.OrdinalIgnoreCase)) return security;
-
-            // Collected rather than returned at once: an exact match found later in the list must
-            // still win over a prefix match found earlier, and — when more than one security
-            // shares the prefix — the choice below must not depend on which one the connector
-            // happened to enumerate first.
-            if (!string.IsNullOrEmpty(security.Code) && security.Code.StartsWith(wanted, StringComparison.OrdinalIgnoreCase))
+            foreach (var security in SafeSecurities(connector))
             {
-                (prefixCandidates ??= new List<Security>()).Add(security);
+                if (security == null) continue;
+
+                if (string.Equals(security.Code, wanted, StringComparison.OrdinalIgnoreCase)) return security;
+                if (string.Equals(security.Instrument, wanted, StringComparison.OrdinalIgnoreCase)) return security;
+
+                // Collected rather than returned at once: an exact match found later — on this
+                // connector or another one — must still win over a prefix match found earlier, and
+                // — when more than one security shares the prefix, possibly across connectors — the
+                // choice below must not depend on which connector or which security the aggregation
+                // happened to enumerate first.
+                if (!string.IsNullOrEmpty(security.Code) && security.Code.StartsWith(wanted, StringComparison.OrdinalIgnoreCase))
+                {
+                    (prefixCandidates ??= new List<Security>()).Add(security);
+                }
             }
         }
 
@@ -112,10 +160,11 @@ internal sealed class ContextResolver
         if (prefixCandidates.Count == 1) return prefixCandidates[0];
 
         // AMBIGUOUS PREFIX, RESOLVED DETERMINISTICALLY — AND SAID OUT LOUD. Several contract
-        // months can share a root ("MNQ" prefixes both a December and a March contract).
-        // Whichever the connector happened to list first is not a criterion: it can change between
-        // reconnects, which would silently move the SAME deck command onto a DIFFERENT contract
-        // with nothing in the log to explain why an order landed somewhere unexpected.
+        // months can share a root ("MNQ" prefixes both a December and a March contract), and now
+        // possibly across different connectors too. Whichever one the aggregation happened to
+        // enumerate first is not a criterion: it can change between reconnects, which would silently
+        // move the SAME deck command onto a DIFFERENT contract with nothing in the log to explain why
+        // an order landed somewhere unexpected.
         //
         // Tie-break: soonest Expiration first (the front month is what a trader typing the bare
         // root almost always means), with securities that carry no real expiration — Expiration
@@ -128,9 +177,8 @@ internal sealed class ContextResolver
             .ThenBy(s => s.Code, StringComparer.OrdinalIgnoreCase)
             .First();
 
-        if ((DateTime.UtcNow - _lastAmbiguousSecurityWarning).TotalMinutes >= 1)
+        if (ShouldWarnAmbiguous())
         {
-            _lastAmbiguousSecurityWarning = DateTime.UtcNow;
             var rejected = string.Join(", ", prefixCandidates.Where(s => s != chosen).Select(s => s.Code));
             SdLog.EventWarn("Instrument",
                 "Ambiguous instrument '{0}' matched {1} securities by prefix — chose {2} (front month), rejected: {3}",
@@ -138,6 +186,19 @@ internal sealed class ContextResolver
         }
 
         return chosen;
+    }
+
+    private Security? DegradedSecurity(string name)
+    {
+        var security = _tradingManager()?.Security;
+        if (security == null) return null;
+        if (string.Equals(security.Code, name, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(security.Instrument, name, StringComparison.OrdinalIgnoreCase))
+            return security;
+
+        SdLog.Warn("Instrument '{0}' not found — degraded mode only exposes the chart's own instrument ('{1}')",
+            name, security.Code ?? "?");
+        return null;
     }
 
     /// <summary>
@@ -151,15 +212,13 @@ internal sealed class ContextResolver
     {
         if (portfolio == null || security == null) return null;
 
-        var positions = Connector?.Positions;
-        if (positions == null) return null;
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null) return IsDegraded ? DegradedPosition(portfolio, security) : null;
 
-        foreach (var position in positions)
+        foreach (var position in SafePositions(connector))
         {
             if (position == null) continue;
-            if (!ReferenceEquals(position.Portfolio, portfolio) &&
-                !string.Equals(position.Portfolio?.AccountID, portfolio.AccountID, StringComparison.OrdinalIgnoreCase))
-                continue;
+            if (!SamePortfolio(position.Portfolio, portfolio)) continue;
             if (!SameSecurity(position.Security, security)) continue;
 
             return position.Volume != 0 ? position : null;
@@ -168,92 +227,93 @@ internal sealed class ContextResolver
         return null;
     }
 
+    private Position? DegradedPosition(Portfolio portfolio, Security security)
+    {
+        var tm = _tradingManager();
+        var position = tm?.Position;
+        if (position == null || position.Volume == 0m) return null;
+        if (!SamePortfolio(position.Portfolio, portfolio) || !SameSecurity(position.Security, security)) return null;
+        return position;
+    }
+
     /// <summary>
-    /// Account names the deck may select.
+    /// Every open position on this portfolio, across whichever connector owns it — used by
+    /// flattenAccount, which liquidates the whole account rather than one instrument.
+    /// </summary>
+    public List<Position> FindAllPositions(Portfolio? portfolio)
+    {
+        var found = new List<Position>();
+        if (portfolio == null) return found;
+
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null)
+        {
+            if (IsDegraded)
+            {
+                var position = _tradingManager()?.Position;
+                if (position != null && position.Volume != 0m && SamePortfolio(position.Portfolio, portfolio))
+                    found.Add(position);
+            }
+            return found;
+        }
+
+        foreach (var position in SafePositions(connector))
+        {
+            if (position == null || position.Volume == 0m) continue;
+            if (!SamePortfolio(position.Portfolio, portfolio)) continue;
+            found.Add(position);
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Account names the deck may select, aggregated across every connected connector.
     ///
     /// Real accounts first, then simulated ones — the same order the NinjaTrader add-on publishes,
     /// so the Account key's list does not reshuffle when a trader moves between platforms.
     /// IsRealAccount is a FACT ATAS gives us, not a naming convention: the NinjaTrader side had to
     /// infer it from the provider, and the bridge still infers it from a "Sim" prefix.
-    /// </summary>
-    public List<string> GetAccountNames() => GetAccountNames(out _);
-
-    /// <summary>
-    /// Same resolution as <see cref="GetAccountNames()"/>, plus a snapshot of WHY each portfolio did
-    /// or didn't make it into the result.
     ///
-    /// Added while field-testing against classic ATAS: the deck's Account key came back empty
-    /// (availableAccounts=[]) with a connected demo account sitting right there in the platform, and
-    /// nothing in the log could tell whether Connector.Portfolios was null, empty, or full of
-    /// portfolios this method was silently dropping. The overload keeps the exact same filtering as
-    /// the no-stats method — same list, same order — it just also counts what happened along the
-    /// way, in the one enumeration this method already does.
+    /// DEGRADED MODE returns AT MOST ONE NAME — the chart's own account. That is not a bug to fix:
+    /// it is the entire point of the fallback, and it is what tells the trader, honestly, that the
+    /// deck can no longer see the rest of the platform's accounts.
     /// </summary>
-    public List<string> GetAccountNames(out AccountResolutionStats stats)
+    public List<string> GetAccountNames()
     {
+        var connectors = _registry.GetConnectors();
+        if (connectors.Count == 0) return DegradedAccountNames();
+
         var live = new List<string>();
         var sim = new List<string>();
 
-        var connector = Connector;
-        var portfolios = connector?.Portfolios;
-
-        var portfolioCount = 0;
-        var droppedBlankAccountId = 0;
-        var droppedReplay = 0;
-
-        if (portfolios != null)
+        foreach (var connector in connectors)
         {
-            // DEFENSIVE ON PURPOSE: this runs on the 500ms state-publish tick, off the ATAS chart
-            // thread that owns portfolio mutation. An enumerator that faults partway through — the
-            // connector rebuilding its portfolio list mid-walk, a broker's Portfolio object throwing
-            // out of IsReplay() — must cost this tick's diagnostics, never the tick itself; the
-            // stateUpdate below still has to go out with whatever was counted so far.
-            try
+            foreach (var portfolio in SafePortfolios(connector))
             {
-                foreach (var portfolio in portfolios)
-                {
-                    portfolioCount++;
+                var name = portfolio?.AccountID;
+                if (string.IsNullOrWhiteSpace(name)) continue;
 
-                    var name = portfolio?.AccountID;
-                    if (string.IsNullOrWhiteSpace(name)) { droppedBlankAccountId++; continue; }
+                // A REPLAY PORTFOLIO IS NOT A TRADABLE ACCOUNT. Replay walks historical data and
+                // produces real Order and MyTrade objects: offering it on the Account key would let
+                // the trader place "orders" that go nowhere while the journal files fabricated
+                // trades to Bitlearn as if they had happened. The NinjaTrader add-on guarded the
+                // same hazard by excluding the accounts named Backtest and Playback101 — ATAS states
+                // it as a fact instead of a name.
+                if (SafeIsReplay(portfolio!)) continue;
 
-                    // A REPLAY PORTFOLIO IS NOT A TRADABLE ACCOUNT. Replay walks historical data and
-                    // produces real Order and MyTrade objects: offering it on the Account key would
-                    // let the trader place "orders" that go nowhere while the journal files
-                    // fabricated trades to Bitlearn as if they had happened. The NinjaTrader add-on
-                    // guarded the same hazard by excluding the accounts named Backtest and
-                    // Playback101 — ATAS states it as a fact instead of a name.
-                    if (portfolio!.IsReplay()) { droppedReplay++; continue; }
-
-                    if (portfolio.IsRealAccount) live.Add(name); else sim.Add(name);
-                }
-            }
-            catch (Exception ex)
-            {
-                SdLog.TraceEvent("Account",
-                    "Portfolios enumeration faulted after {0} portfolio(s) seen ({1}) — reporting what was counted so far",
-                    portfolioCount, ex.GetType().Name);
+                if (portfolio.IsRealAccount) live.Add(name); else sim.Add(name);
             }
         }
 
-        var addedBeforeDistinct = live.Count + sim.Count;
-        var resolved = live.Concat(sim).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return live.Concat(sim).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
 
-        stats = new AccountResolutionStats
-        {
-            ConnectorNull = connector == null,
-            PortfoliosNull = portfolios == null,
-            PortfolioCount = portfolioCount,
-            DroppedBlankAccountId = droppedBlankAccountId,
-            DroppedReplay = droppedReplay,
-            // Not a drop the loop above ever explains — it can only appear if two distinct
-            // portfolios resolve to the same AccountID (case-insensitively) and the final Distinct()
-            // merges them. Reported separately so an "otherwise" always has somewhere to go instead
-            // of a silent gap between portfolioCount and resolved.Count.
-            DuplicatesMerged = addedBeforeDistinct - resolved.Count,
-        };
-
-        return resolved;
+    private List<string> DegradedAccountNames()
+    {
+        var portfolio = _tradingManager()?.Portfolio;
+        if (portfolio == null || string.IsNullOrWhiteSpace(portfolio.AccountID)) return new List<string>();
+        if (SafeIsReplay(portfolio)) return new List<string>();
+        return new List<string> { portfolio.AccountID };
     }
 
     public List<Order> FindActiveOrders(Portfolio? portfolio, Security? security)
@@ -261,10 +321,14 @@ internal sealed class ContextResolver
         var found = new List<Order>();
         if (portfolio == null || security == null) return found;
 
-        var orders = Connector?.Orders;
-        if (orders == null) return found;
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null)
+        {
+            if (IsDegraded) found.AddRange(DegradedOrders(portfolio, security, allInstruments: false));
+            return found;
+        }
 
-        foreach (var order in orders)
+        foreach (var order in SafeOrders(connector))
         {
             if (!IsActive(order)) continue;
             if (!SamePortfolio(order!.Portfolio, portfolio)) continue;
@@ -280,10 +344,14 @@ internal sealed class ContextResolver
         var found = new List<Order>();
         if (portfolio == null) return found;
 
-        var orders = Connector?.Orders;
-        if (orders == null) return found;
+        var connector = _registry.ConnectorFor(portfolio);
+        if (connector == null)
+        {
+            if (IsDegraded) found.AddRange(DegradedOrders(portfolio, security: null, allInstruments: true));
+            return found;
+        }
 
-        foreach (var order in orders)
+        foreach (var order in SafeOrders(connector))
         {
             if (!IsActive(order)) continue;
             if (!SamePortfolio(order!.Portfolio, portfolio)) continue;
@@ -291,6 +359,26 @@ internal sealed class ContextResolver
         }
 
         return found;
+    }
+
+    /// <summary>
+    /// Degraded-mode order lookup, via TradingManager.Orders — confirmed live to show every order on
+    /// the chart's account+instrument pair REGARDLESS OF ORIGIN, including a manual ChartTrader order
+    /// (Comment empty). That is the discriminator GuardEnforcer relies on even in degraded mode.
+    /// </summary>
+    private IEnumerable<Order> DegradedOrders(Portfolio portfolio, Security? security, bool allInstruments)
+    {
+        var tm = _tradingManager();
+        var orders = tm?.Orders;
+        if (orders == null) yield break;
+
+        foreach (var order in orders)
+        {
+            if (!IsActive(order)) continue;
+            if (!SamePortfolio(order!.Portfolio, portfolio)) continue;
+            if (!allInstruments && !SameSecurity(order.Security, security)) continue;
+            yield return order;
+        }
     }
 
     /// <summary>Working stop orders, sorted by trigger price ascending.</summary>
@@ -388,5 +476,42 @@ internal sealed class ContextResolver
         if (a.Id != 0 && a.Id == b.Id) return true;
         return !string.IsNullOrEmpty(a.SecurityId) &&
                string.Equals(a.SecurityId, b.SecurityId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // --- Defensive accessors -----------------------------------------------------------------
+    //
+    // Every lookup above walks collections owned by a connector this class does not control, on the
+    // 500ms publish tick. A broker's connector rebuilding its portfolio list mid-walk, or throwing
+    // out of a property it owns, must cost this ONE lookup, never the tick's real stateUpdate — same
+    // reasoning as ConnectorRegistry.SafePortfolioCount.
+
+    private static IEnumerable<Portfolio> SafePortfolios(IDataFeedConnector connector)
+    {
+        try { return connector.Portfolios ?? Enumerable.Empty<Portfolio>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Portfolios read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Portfolio>(); }
+    }
+
+    private static IEnumerable<Security> SafeSecurities(IDataFeedConnector connector)
+    {
+        try { return connector.Securities ?? Enumerable.Empty<Security>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Securities read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Security>(); }
+    }
+
+    private static IEnumerable<Position> SafePositions(IDataFeedConnector connector)
+    {
+        try { return connector.Positions ?? Enumerable.Empty<Position>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Positions read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Position>(); }
+    }
+
+    private static IEnumerable<Order> SafeOrders(IDataFeedConnector connector)
+    {
+        try { return connector.Orders ?? Enumerable.Empty<Order>(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "Orders read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Order>(); }
+    }
+
+    private static bool SafeIsReplay(Portfolio portfolio)
+    {
+        try { return portfolio.IsReplay(); }
+        catch (Exception ex) { SdLog.TraceEvent("Context", "IsReplay() faulted: {0}", ex.GetType().Name); return false; }
     }
 }
