@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Threading;
 
@@ -25,7 +24,12 @@ internal sealed class StatePublisher : IDisposable
     private readonly int _intervalMs;
 
     private Timer? _timer;
-    private bool _disposed;
+
+    // VOLATILE: read from the timer callback thread (Publish, PublishNow) and written from
+    // whichever thread ATAS calls Dispose on (OnStopping, OnSuspended, and OnStopped's defensive
+    // second call). A stale cached read here is a timer tick firing after Dispose meant to have
+    // stopped it — the same class of bug this project's CLAUDE.md calls out for ClientWebSocket.
+    private volatile bool _disposed;
 
     /// <summary>
     /// Guards against two publishes overlapping. The deck showing stale data is bad; two frames

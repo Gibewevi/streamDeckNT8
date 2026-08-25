@@ -104,6 +104,17 @@ public class TradeDeckStrategy : ChartStrategy
     protected override void OnSuspended()
     {
         SdLog.EventWarn("Session", "Strategy suspended (chart closed) — dropping the bridge connection");
+
+        // Same ordering and same reason as OnStopping: dispose the publisher — which sends through
+        // the bridge client — before the client itself, so no in-flight publish writes to a
+        // disposed socket. ATAS's suspend/resume contract does not document whether OnStarted can
+        // follow a suspend without an intervening OnStopping, so this path stops the publisher too
+        // rather than assume OnStopping is always the one that will; Dispose is idempotent, so
+        // whichever path runs first does the real work and the other is a no-op — the alternative
+        // is a live 500ms timer leaked per chart reopen that no trader could ever diagnose.
+        try { _publisher?.Dispose(); }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the state publisher on suspend"); }
+
         try { _bridge?.Stop(); }
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the bridge client on suspend"); }
     }
@@ -140,6 +151,14 @@ public class TradeDeckStrategy : ChartStrategy
                 _bridge.Dispose();
                 _bridge = null;
             }
+
+            // Defensive, not redundant: OnStopping already disposes the publisher on the normal
+            // path, but nothing here can prove ATAS always calls OnStopping before OnStopped on
+            // every path (e.g. after OnSuspended). Dispose is idempotent, so calling it again here
+            // costs nothing on the normal path and closes the gap on any path that skips OnStopping —
+            // nulling the field without disposing would otherwise leak the 500ms timer.
+            try { _publisher?.Dispose(); }
+            catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the state publisher during shutdown"); }
 
             _publisher = null;
             _resolver = null;

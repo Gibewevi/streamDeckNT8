@@ -19,13 +19,21 @@ namespace TradeDeck.Atas.Strategy;
 /// connector — and Order carries its own Portfolio and Security, so the deck can trade an instrument
 /// the chart does not display.
 ///
-/// DEGRADED MODE. When the registry is unreachable (<see cref="IsDegraded"/>), every lookup below
-/// falls back to the chart's own <c>ITradingManager</c> — one account, one instrument, the chart's.
-/// This is not a partial failure to patch around: it is the delivered fallback (see Contraintes
-/// globales), entered and left silently except for the one transition log line in
-/// <see cref="ConnectorRegistry.GetConnectors"/> (via <c>IsAvailable</c> flipping) — this class adds
-/// no logging of its own for the transition, it only reads the registry's current answer on each
-/// call.
+/// DEGRADED MODE. The fallback to the chart's own <c>ITradingManager</c> — one account, one
+/// instrument, the chart's — is gated on "no connector could answer THIS question", never on
+/// <see cref="IsDegraded"/> (whether the registry as a whole is reachable). Those are different
+/// states, and account/position/order lookups below gate on the former: the registry can be fully
+/// reachable — <see cref="Connectors"/> non-empty, the account and instrument both resolve — while
+/// the one portfolio being asked about currently carries no connector (ATAS started before the
+/// broker attached, or a mid-session reconnect). Gating on IsDegraded there used to publish
+/// exists:false / Flat over a real position while TradingManager had the right answer the whole
+/// time. IsDegraded itself stays meaningful for logging and for <see cref="GetAccountNames"/>
+/// (which genuinely can only see one account with no registry at all) — it is just never the
+/// switch a single lookup uses to decide whether to fall back. This is not a partial failure to
+/// patch around: it is the delivered fallback (see Contraintes globales), entered and left
+/// silently except for the one transition log line in <see cref="ConnectorRegistry.GetConnectors"/>
+/// (via <c>IsAvailable</c> flipping) — this class adds no logging of its own for the transition, it
+/// only reads the registry's current answer on each call.
 /// </summary>
 internal sealed class ContextResolver
 {
@@ -63,7 +71,8 @@ internal sealed class ContextResolver
             }
         }
 
-        SdLog.Warn("Account not found: {0}", name);
+        if (ShouldWarn("account-not-found:" + name))
+            SdLog.Warn("Account not found: {0}", name);
         return null;
     }
 
@@ -78,30 +87,50 @@ internal sealed class ContextResolver
         if (portfolio == null) return null;
         if (string.Equals(portfolio.AccountID, name, StringComparison.OrdinalIgnoreCase)) return portfolio;
 
-        SdLog.Warn("Account '{0}' not found — degraded mode only exposes the chart's own account ('{1}')",
-            name, portfolio.AccountID ?? "?");
+        if (ShouldWarn("account-not-found-degraded:" + name))
+            SdLog.Warn("Account '{0}' not found — degraded mode only exposes the chart's own account ('{1}')",
+                name, portfolio.AccountID ?? "?");
         return null;
     }
 
     /// <summary>
-    /// Rate limit for the ambiguous-prefix warning below. THREAD-SAFE ON PURPOSE: unlike the
-    /// NinjaTrader-era version of this field (a bare DateTime, safe only because a single serialised
-    /// 500ms publisher was the only caller), FindSecurity is reached from task 4's OrderMonitor and
-    /// task 8's GuardEnforcer too — both driven by connector events, which do not arrive on the chart
-    /// thread. A torn read/write on a bare DateTime here would not crash, but could let two threads
-    /// both pass the rate-limit check on the same ambiguity and double-log it, or — worse — corrupt
-    /// the field into a value that suppresses the warning forever. The lock is tiny and only taken
-    /// on the rare ambiguous-prefix path, never on the exact-match fast path.
+    /// Rate limit for every "could not resolve" warning below: the ambiguous-prefix warning in
+    /// FindSecurity, and the not-found warnings in FindPortfolio, FindSecurity and their
+    /// degraded-mode counterparts.
+    ///
+    /// UNGUARDED, THIS IS UNBOUNDED ON THE PUBLISH PATH. StatePublisher.Publish calls
+    /// FindSecurity(TrackedInstrument) every 500ms. Unlike the account (auto-corrected to the
+    /// first connected one — see StatePublisher.AdoptDefaultAccountIfNeeded), the instrument is
+    /// NEVER auto-corrected: once the bridge names an instrument the registry cannot match — the
+    /// migration case, NT8's "MNQ 12-26" spelling against ATAS's "MNQZ6" — every tick warns
+    /// forever without this limiter. That is ~2 lines/second, ~172,800/day, through a locked
+    /// AutoFlush disk write twice a second, until the day's log file rolls mid-incident and takes
+    /// the real diagnostic window down with it.
+    ///
+    /// THREAD-SAFE ON PURPOSE, separately from the log-volume reason above: unlike the
+    /// NinjaTrader-era version of this rate limit (a bare DateTime, safe only because a single
+    /// serialised 500ms publisher was the only caller), FindSecurity and FindPortfolio are reached
+    /// from task 4's OrderMonitor and task 8's GuardEnforcer too — both driven by connector
+    /// events, which do not arrive on the chart thread. A torn read/write on a bare DateTime here
+    /// would not crash, but could let two threads both pass the rate-limit check on the same
+    /// condition and double-log it, or — worse — corrupt the field into a value that suppresses
+    /// the warning forever. The lock is tiny and only taken on the rare warning path, never on a
+    /// successful lookup.
+    ///
+    /// Keyed per condition (e.g. "instrument-not-found:MNQ 12-26") rather than one shared
+    /// timestamp: a warning about a missing account must not silently swallow an unrelated warning
+    /// about a missing instrument that happens to fire in the same minute.
     /// </summary>
-    private readonly object _ambiguousWarnLock = new();
-    private DateTime _lastAmbiguousSecurityWarning = DateTime.MinValue;
+    private readonly object _warnRateLimitLock = new();
+    private readonly Dictionary<string, DateTime> _lastWarnByKey = new(StringComparer.Ordinal);
 
-    private bool ShouldWarnAmbiguous()
+    private bool ShouldWarn(string key)
     {
-        lock (_ambiguousWarnLock)
+        lock (_warnRateLimitLock)
         {
-            if ((DateTime.UtcNow - _lastAmbiguousSecurityWarning).TotalMinutes < 1) return false;
-            _lastAmbiguousSecurityWarning = DateTime.UtcNow;
+            if (_lastWarnByKey.TryGetValue(key, out var last) && (DateTime.UtcNow - last).TotalMinutes < 1)
+                return false;
+            _lastWarnByKey[key] = DateTime.UtcNow;
             return true;
         }
     }
@@ -153,7 +182,8 @@ internal sealed class ContextResolver
 
         if (prefixCandidates == null || prefixCandidates.Count == 0)
         {
-            SdLog.Warn("Instrument not found: {0}", name);
+            if (ShouldWarn("instrument-not-found:" + wanted))
+                SdLog.Warn("Instrument not found: {0}", name);
             return null;
         }
 
@@ -177,7 +207,7 @@ internal sealed class ContextResolver
             .ThenBy(s => s.Code, StringComparer.OrdinalIgnoreCase)
             .First();
 
-        if (ShouldWarnAmbiguous())
+        if (ShouldWarn("ambiguous-instrument:" + wanted))
         {
             var rejected = string.Join(", ", prefixCandidates.Where(s => s != chosen).Select(s => s.Code));
             SdLog.EventWarn("Instrument",
@@ -196,8 +226,9 @@ internal sealed class ContextResolver
             string.Equals(security.Instrument, name, StringComparison.OrdinalIgnoreCase))
             return security;
 
-        SdLog.Warn("Instrument '{0}' not found — degraded mode only exposes the chart's own instrument ('{1}')",
-            name, security.Code ?? "?");
+        if (ShouldWarn("instrument-not-found-degraded:" + name))
+            SdLog.Warn("Instrument '{0}' not found — degraded mode only exposes the chart's own instrument ('{1}')",
+                name, security.Code ?? "?");
         return null;
     }
 
@@ -212,8 +243,16 @@ internal sealed class ContextResolver
     {
         if (portfolio == null || security == null) return null;
 
+        // NO CONNECTOR COULD ANSWER — not "the registry is unreachable" — is the fallback gate.
+        // The registry can be fully reachable (connectors.Count > 0, account and instrument both
+        // resolve) while THIS portfolio currently carries no connector: ATAS started before the
+        // broker attached, or a mid-session reconnect. IsDegraded would stay false there and this
+        // used to return null outright, publishing exists:false / Flat over a real position while
+        // TradingManager had the right answer the whole time — the host's Auto BE / Auto TP-SL
+        // would then act on that lie. DegradedPosition re-checks portfolio and security match, so
+        // falling back unconditionally cannot answer about the wrong account.
         var connector = _registry.ConnectorFor(portfolio);
-        if (connector == null) return IsDegraded ? DegradedPosition(portfolio, security) : null;
+        if (connector == null) return DegradedPosition(portfolio, security);
 
         foreach (var position in SafePositions(connector))
         {
@@ -221,7 +260,12 @@ internal sealed class ContextResolver
             if (!SamePortfolio(position.Portfolio, portfolio)) continue;
             if (!SameSecurity(position.Security, security)) continue;
 
-            return position.Volume != 0 ? position : null;
+            // KEEP SCANNING PAST A ZERO-VOLUME ROW. ATAS can carry more than one Position row for
+            // the same portfolio+security pair (a closed-then-reopened position, a partial fill
+            // still settling) — returning null on the FIRST match, flat or not, let an earlier
+            // flat row shadow a later row that was actually open. Only conclude flat once every
+            // matching row has been seen.
+            if (position.Volume != 0) return position;
         }
 
         return null;
@@ -245,15 +289,14 @@ internal sealed class ContextResolver
         var found = new List<Position>();
         if (portfolio == null) return found;
 
+        // Same gate as FindPosition above — no connector carries this portfolio right now, not
+        // "the registry as a whole is unreachable".
         var connector = _registry.ConnectorFor(portfolio);
         if (connector == null)
         {
-            if (IsDegraded)
-            {
-                var position = _tradingManager()?.Position;
-                if (position != null && position.Volume != 0m && SamePortfolio(position.Portfolio, portfolio))
-                    found.Add(position);
-            }
+            var position = _tradingManager()?.Position;
+            if (position != null && position.Volume != 0m && SamePortfolio(position.Portfolio, portfolio))
+                found.Add(position);
             return found;
         }
 
@@ -321,10 +364,11 @@ internal sealed class ContextResolver
         var found = new List<Order>();
         if (portfolio == null || security == null) return found;
 
+        // Same gate as FindPosition — no connector for THIS portfolio, not registry unreachable.
         var connector = _registry.ConnectorFor(portfolio);
         if (connector == null)
         {
-            if (IsDegraded) found.AddRange(DegradedOrders(portfolio, security, allInstruments: false));
+            found.AddRange(DegradedOrders(portfolio, security, allInstruments: false));
             return found;
         }
 
@@ -344,10 +388,11 @@ internal sealed class ContextResolver
         var found = new List<Order>();
         if (portfolio == null) return found;
 
+        // Same gate as FindPosition — no connector for THIS portfolio, not registry unreachable.
         var connector = _registry.ConnectorFor(portfolio);
         if (connector == null)
         {
-            if (IsDegraded) found.AddRange(DegradedOrders(portfolio, security: null, allInstruments: true));
+            found.AddRange(DegradedOrders(portfolio, security: null, allInstruments: true));
             return found;
         }
 
@@ -484,29 +529,76 @@ internal sealed class ContextResolver
     // 500ms publish tick. A broker's connector rebuilding its portfolio list mid-walk, or throwing
     // out of a property it owns, must cost this ONE lookup, never the tick's real stateUpdate — same
     // reasoning as ConnectorRegistry.SafePortfolioCount.
+    //
+    // THE ENUMERATION ITSELF, NOT JUST THE PROPERTY GETTER, MUST BE INSIDE THE TRY. A connector
+    // mutating its collection WHILE this walks it — a burst of fills arriving mid-tick — throws
+    // InvalidOperationException from the enumerator's MoveNext, not from the getter. Wrapping only
+    // `connector.Orders` and returning the live IEnumerable let that exception escape into the
+    // caller's foreach, past this class, into StatePublisher.Publish's catch: the WHOLE tick's
+    // stateUpdate was dropped and an ERROR with a full stack trace got logged, repeatedly, at
+    // exactly the moment orders were moving — the deck freezes on stale protection data at the
+    // worst possible time. Materialising to a list INSIDE the try keeps whatever was read before
+    // the throw instead of discarding it — the cost of a torn read is one missing row, not the
+    // whole tick.
 
     private static IEnumerable<Portfolio> SafePortfolios(IDataFeedConnector connector)
     {
-        try { return connector.Portfolios ?? Enumerable.Empty<Portfolio>(); }
-        catch (Exception ex) { SdLog.TraceEvent("Context", "Portfolios read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Portfolio>(); }
+        var result = new List<Portfolio>();
+        try
+        {
+            var portfolios = connector.Portfolios;
+            if (portfolios != null) foreach (var p in portfolios) result.Add(p);
+        }
+        catch (Exception ex)
+        {
+            SdLog.TraceEvent("Context", "Portfolios read faulted after {0} entrie(s): {1}", result.Count, ex.GetType().Name);
+        }
+        return result;
     }
 
     private static IEnumerable<Security> SafeSecurities(IDataFeedConnector connector)
     {
-        try { return connector.Securities ?? Enumerable.Empty<Security>(); }
-        catch (Exception ex) { SdLog.TraceEvent("Context", "Securities read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Security>(); }
+        var result = new List<Security>();
+        try
+        {
+            var securities = connector.Securities;
+            if (securities != null) foreach (var s in securities) result.Add(s);
+        }
+        catch (Exception ex)
+        {
+            SdLog.TraceEvent("Context", "Securities read faulted after {0} entrie(s): {1}", result.Count, ex.GetType().Name);
+        }
+        return result;
     }
 
     private static IEnumerable<Position> SafePositions(IDataFeedConnector connector)
     {
-        try { return connector.Positions ?? Enumerable.Empty<Position>(); }
-        catch (Exception ex) { SdLog.TraceEvent("Context", "Positions read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Position>(); }
+        var result = new List<Position>();
+        try
+        {
+            var positions = connector.Positions;
+            if (positions != null) foreach (var p in positions) result.Add(p);
+        }
+        catch (Exception ex)
+        {
+            SdLog.TraceEvent("Context", "Positions read faulted after {0} entrie(s): {1}", result.Count, ex.GetType().Name);
+        }
+        return result;
     }
 
     private static IEnumerable<Order> SafeOrders(IDataFeedConnector connector)
     {
-        try { return connector.Orders ?? Enumerable.Empty<Order>(); }
-        catch (Exception ex) { SdLog.TraceEvent("Context", "Orders read faulted: {0}", ex.GetType().Name); return Enumerable.Empty<Order>(); }
+        var result = new List<Order>();
+        try
+        {
+            var orders = connector.Orders;
+            if (orders != null) foreach (var o in orders) result.Add(o);
+        }
+        catch (Exception ex)
+        {
+            SdLog.TraceEvent("Context", "Orders read faulted after {0} entrie(s): {1}", result.Count, ex.GetType().Name);
+        }
+        return result;
     }
 
     private static bool SafeIsReplay(Portfolio portfolio)

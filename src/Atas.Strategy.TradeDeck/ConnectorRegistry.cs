@@ -36,7 +36,15 @@ internal sealed class ConnectorRegistry
     // What IS re-read on every call is the DATA — Connectors, Portfolios — because those genuinely
     // change: a broker connects, another disconnects, mid-session.
     private static readonly object InitLock = new();
-    private static bool _initAttempted;
+    private static bool _initSucceeded;
+    // SPACED RETRY, NOT A ONE-SHOT LATCH. A bare "did we already try" flag left a strategy that
+    // started before OFT.Platform.Core or CommonServiceLocator had loaded stuck in degraded mode
+    // for the rest of the ATAS process: EnsureInitialized re-entered and returned immediately,
+    // recovering only if the trader relaunched ATAS. This timestamp gates a retry to at most once
+    // a minute instead — a late-attaching host assembly gets picked up, and the cost stays a lock
+    // acquire plus one DateTime comparison on every call that is not due a retry, never a full
+    // reflection pass on the 500ms hot path.
+    private static DateTime _lastInitAttemptUtc = DateTime.MinValue;
     private static object? _tradingCore;          // ITradingCore instance, optional fast path
     private static object? _connectorsManager;     // IConnectorsManager instance — load-bearing
     private static PropertyInfo? _connectorsProperty;
@@ -48,7 +56,18 @@ internal sealed class ConnectorRegistry
 
     public ConnectorRegistry() => EnsureInitialized();
 
-    public bool IsAvailable => _connectorsManager != null && _connectorsProperty != null;
+    public bool IsAvailable
+    {
+        get
+        {
+            // Retries (spaced, see _lastInitAttemptUtc) live behind every read of availability, not
+            // just the constructor — the registry instance is typically constructed once for the
+            // whole strategy lifetime, so a call made here is what actually gives a late-attaching
+            // host assembly a chance to be found later in the session.
+            EnsureInitialized();
+            return _connectorsManager != null && _connectorsProperty != null;
+        }
+    }
 
     /// <summary>
     /// Every connector currently carrying at least one portfolio.
@@ -103,6 +122,11 @@ internal sealed class ConnectorRegistry
     public IDataFeedConnector? ConnectorFor(Portfolio? portfolio)
     {
         if (portfolio == null) return null;
+
+        // Same spaced-retry entry point as IsAvailable — this method reads _tradingCore directly,
+        // ahead of any call to GetConnectors() in this tick, so it needs its own chance to notice a
+        // late-attaching host.
+        EnsureInitialized();
 
         if (_tradingCore != null && _getConnectorByPortfolio != null)
         {
@@ -169,18 +193,25 @@ internal sealed class ConnectorRegistry
     }
 
     /// <summary>
-    /// Resolves CommonServiceLocator -> ITradingCore / IConnectorsManager once, by assembly simple
-    /// name and full type name. EVERY STEP OWNS ITS OWN FAILURE PATH: the worst outcome of any of
-    /// them failing is IsAvailable staying false, never an exception escaping to the caller — this
-    /// runs from a strategy's OnStarted, and a constructor that throws would refuse to load the
-    /// whole cockpit over a diagnostic nobody asked for.
+    /// Resolves CommonServiceLocator -> ITradingCore / IConnectorsManager, by assembly simple name
+    /// and full type name. EVERY STEP OWNS ITS OWN FAILURE PATH: the worst outcome of any of them
+    /// failing is IsAvailable staying false, never an exception escaping to the caller — this runs
+    /// from a strategy's OnStarted, and a constructor that throws would refuse to load the whole
+    /// cockpit over a diagnostic nobody asked for.
+    ///
+    /// RETRIED ON A SPACED SCHEDULE UNTIL IT SUCCEEDS, THEN CACHED FOR GOOD — see
+    /// _lastInitAttemptUtc. Once _initSucceeded is true the handles never change identity while
+    /// ATAS runs (see the static fields' comment at the top of the class) and this returns
+    /// immediately; until then, every call from IsAvailable/GetConnectors/ConnectorFor is a
+    /// candidate to try again, throttled to once a minute.
     /// </summary>
     private static void EnsureInitialized()
     {
         lock (InitLock)
         {
-            if (_initAttempted) return;
-            _initAttempted = true;
+            if (_initSucceeded) return;
+            if ((DateTime.UtcNow - _lastInitAttemptUtc).TotalMinutes < 1) return;
+            _lastInitAttemptUtc = DateTime.UtcNow;
 
             try
             {
@@ -232,6 +263,7 @@ internal sealed class ConnectorRegistry
 
                 _connectorsManager = manager;
                 _connectorsProperty = connectorsProperty;
+                _initSucceeded = true;
             }
             catch (Exception ex)
             {
