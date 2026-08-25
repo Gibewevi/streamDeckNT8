@@ -582,7 +582,18 @@ internal sealed class ContextResolver
     /// <summary>
     /// Degraded-mode order lookup, via TradingManager.Orders — confirmed live to show every order on
     /// the chart's account+instrument pair REGARDLESS OF ORIGIN, including a manual ChartTrader order
-    /// (Comment empty). That is the discriminator GuardEnforcer relies on even in degraded mode.
+    /// (Comment empty).
+    ///
+    /// GUARDENFORCER IS NOT A CONSUMER OF THIS, IN DEGRADED MODE OR ANY OTHER (final branch review,
+    /// finding 4). This doc used to call the origin-blindness above "the discriminator GuardEnforcer
+    /// relies on even in degraded mode", which is false twice over: that class calls no Find*Orders
+    /// overload at all, and it only ever sees an order through a CONNECTOR EVENT — of which degraded
+    /// mode has none, so it is entirely inert there (its own class doc says so, as does
+    /// docs/atas-chemin-ordre.md). The sentence mattered because the next reader building the
+    /// deferred degraded-mode poll would have believed the case was already covered and skipped it.
+    /// What origin-blindness genuinely serves is the ORDER-MANAGING verbs — CancelWorkingOrders,
+    /// CancelOrders, Reverse and the Move/BreakEven lookups — which must keep seeing a manual order
+    /// while degraded exactly as they do through a connector.
     /// </summary>
     private IEnumerable<Order> DegradedOrders(Portfolio portfolio, Security? security, bool allInstruments)
     {

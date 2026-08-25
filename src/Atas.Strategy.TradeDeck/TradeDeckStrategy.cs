@@ -130,6 +130,18 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
             // delegate is the seam instead.
             _monitor.TrackedAccountName = () => _publisher?.TrackedAccount;
 
+            // FINAL BRANCH REVIEW, FINDING 1 — the guard gets the SAME live binding, for a reason
+            // one line away from being obvious. It used to be handed the tracked account as a
+            // snapshot, on setAccount and on setGuardPolicy only, while StatePublisher silently
+            // re-points that account to the connector's first one whenever the tracked one drops
+            // off the list (AdoptDefaultAccountIfNeeded — every connector flap). After such a flap
+            // the next setGuardPolicy — the frame the bridge sends WHEN THE MACRO ARMS — pushed the
+            // drifted account into the enforcer while the deck kept trading the original one, so
+            // every hand-placed order went uninspected with the macro displayed armed and red:
+            // 2026-08-21 exactly. Read live, the drift and the re-bind are the same act and cannot
+            // come apart. Set here, after the publisher exists, like the monitor's own binding.
+            _guard.TrackedAccountName = () => _publisher?.TrackedAccount;
+
             // NEVER ChartStrategy.Connector (always null, confirmed by measurement — task 3). The
             // monitor's subscriptions are reconciled against the registry's CURRENT connector list on
             // the same cadence as the state publisher: a connector can appear mid-session (the
@@ -354,6 +366,14 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
         // its own doc) — R2 review caught the wording asserting the opposite of what the code now
         // does. The two branches below say exactly what GuardEnforcer will actually do in each case,
         // not a single sentence that can only be right for one of them.
+        //
+        // FINAL BRANCH REVIEW, FINDING 1 — REWORDED WITH THE BINDING. Both branches used to describe
+        // an account this method had just PUSHED into the enforcer; the enforcer now reads it live
+        // from the publisher at every inspection instead, so the account named below is the one
+        // tracked AT THIS INSTANT and it will follow the publisher on its own from here — including
+        // through the default-account fallback this warning is about. Said out loud, because the
+        // previous wording would otherwise read as a promise that enforcement stays pinned where
+        // this line left it, which is the very belief the finding was about.
         if ((blocked || maxContracts > 0) && !_accountConfirmedByBridge)
         {
             var trackedAccount = _publisher.TrackedAccount;
@@ -376,12 +396,14 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
                 // the bridge as the account the trader is using.
                 SdLog.EventWarn("Safety",
                     "SECURITY: adopting a blocking policy (blocked={0} reason={1} maxContracts={2}) while the bridge has NOT named the account — "
-                    + "enforcement is running on '{3}', picked by default at startup and NOT yet confirmed by the bridge. Orders on any other account are NOT being watched.",
+                    + "enforcement is running on '{3}', the account tracked at this instant, picked by default at startup and NOT yet confirmed by the bridge. "
+                    + "Orders on any other account are NOT being watched, and enforcement follows the tracked account if it changes.",
                     blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts, trackedAccount);
             }
         }
 
-        _guard.SetTrackedAccount(_publisher.TrackedAccount);
+        // No account is pushed here any more: GuardEnforcer.TrackedAccountName reads the publisher
+        // live at every inspection — see the binding in OnStarted and that property's own doc.
         _guard.UpdatePolicy(blocked, reason, maxContracts);
 
         return BridgeMessage.Response(message.RequestId, message.Action, true, new { blocked, maxContracts });
@@ -404,11 +426,11 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
         // The account now comes from the bridge, not from this side's startup guess.
         if (!string.IsNullOrWhiteSpace(account)) _accountConfirmedByBridge = true;
 
+        // The enforcer follows the tracked account, always — and now it does so BY CONSTRUCTION:
+        // there is no re-binding call here because GuardEnforcer reads the publisher live (final
+        // branch review, finding 1). The line that used to sit here re-pushed a snapshot, which was
+        // correct at this instant and stale at the next connector flap.
         _publisher.UpdateTracking(account, instrument);
-
-        // The enforcer follows the tracked account, always. A guard watching an account nobody
-        // trades is the failure mode this line exists to prevent.
-        _guard?.SetTrackedAccount(_publisher.TrackedAccount);
 
         return BridgeMessage.Response(message.RequestId, message.Action, true, new
         {

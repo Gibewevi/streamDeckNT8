@@ -55,12 +55,13 @@ internal sealed class OrderEngine
     public const string DeckOrderComment = "StreamDeck";
 
     /// <summary>
-    /// Comments carried by the two protective orders the bracket macro owns.
+    /// Comments carried by the protective orders THIS ENGINE owns — the bracket's two legs and the
+    /// break-even stop.
     ///
     /// They are what separates "the stop this macro placed for this position" from "a stop the
-    /// trader put there himself" — a manual stop, a break-even, a stop dragged on the chart. Only
-    /// the first kind is ever repriced or resized: silently moving a stop the trader placed with his
-    /// own hands would take away the protection he chose.
+    /// trader put there himself" — a manual stop, a stop dragged on the chart. Only the first kind
+    /// is ever repriced, resized or swept: silently moving a stop the trader placed with his own
+    /// hands would take away the protection he chose.
     ///
     /// Same strings as the NinjaTrader add-on, deliberately: the server already reads them in the
     /// journal to tell an exit at the stop from an exit at the target.
@@ -68,6 +69,47 @@ internal sealed class OrderEngine
     public const string BracketStopComment = "StreamDeck_SL";
     public const string BracketTargetComment = "StreamDeck_TP";
     public const string BreakEvenComment = "StreamDeck_BE";
+
+    /// <summary>
+    /// THE set of comments this engine can stamp on a PROTECTIVE order — the one place that answers
+    /// "is this order a protection we placed?", so no sweep can be written against a subset again.
+    ///
+    /// FINAL BRANCH REVIEW, FINDING 2. <see cref="CancelStaleBracketLegs"/> compared against two
+    /// string literals at the comparison site and simply did not know about
+    /// <see cref="BreakEvenComment"/>, added later. The sequence that costs money: long, Break-Even
+    /// pressed (a StreamDeck_BE Sell Stop at entry), then a reversal AT MARKET without the Reverse
+    /// key — which would have cancelled everything — and Auto TP/SL fires attachBracket. The sweep
+    /// cancelled the stale SL/TP legs and left the BE Sell Stop working UNDER THE NEW SHORT, where
+    /// AttachBracket then classifies it `kept:foreign` and Move/BreakEven filter it out by
+    /// direction, so nothing ever touches it again. When it triggers it ADDS to the short — the
+    /// exact hazard CancelStaleBracketLegs' own comment names — and GuardEnforcer will not stop it
+    /// either, because IsOurs is true.
+    ///
+    /// The three below are exhaustive as of this review, verified against every NewOrder call site:
+    /// the other comments this engine produces are DeckOrderComment and its _Flatten / _Liquidate /
+    /// _Reverse suffixes, all of which name an order that CLOSES or opens exposure, never one that
+    /// protects a position. A fourth protective comment must be added HERE, not at a call site.
+    /// </summary>
+    private static readonly string[] ProtectiveComments =
+    {
+        BracketStopComment,
+        BracketTargetComment,
+        BreakEvenComment,
+    };
+
+    /// <summary>
+    /// True when <paramref name="comment"/> is one this engine stamps on a protective order. See
+    /// <see cref="ProtectiveComments"/> for why the set lives in one place.
+    /// </summary>
+    public static bool IsProtectiveComment(string? comment)
+    {
+        if (string.IsNullOrEmpty(comment)) return false;
+        foreach (var known in ProtectiveComments)
+        {
+            if (string.Equals(comment, known, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
 
     private readonly ContextResolver _resolver;
     private readonly IOrderGateway _gateway;
@@ -404,16 +446,27 @@ internal sealed class OrderEngine
             });
         }
 
-        var failure = Cancel(cmd, orders);
-        if (failure != null) return failure;
+        // Best effort (final branch review, finding 3): every order is attempted even when one
+        // throws, so a single sick order can no longer leave the rest of the instrument's book
+        // working while the deck is told the batch failed.
+        var outcome = Cancel(cmd, orders);
+
+        if (!outcome.AllCancelled)
+        {
+            // Never a plain success on a partial, and the real counts travel WITH the refusal
+            // rather than being discarded by a bare Failure(...) — same shape as FlattenAccount.
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "ORDER_REJECTED",
+                $"Only {outcome.Cancelled}/{outcome.Requested} order(s) cancelled for {name} — {outcome.FailureSummary}",
+                new { ordersCancelled = outcome.Cancelled });
+        }
 
         SdLog.Event("Order", "[REQ:{0}] Cancelled {1} working order(s) for {2} on {3} (position untouched)",
-            cmd.RequestId, orders.Count, name, ctx.Portfolio!.AccountID);
+            cmd.RequestId, outcome.Cancelled, name, ctx.Portfolio!.AccountID);
 
         return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
         {
-            ordersCancelled = orders.Count,
-            message = $"Cancelled {orders.Count} order(s) for {name}",
+            ordersCancelled = outcome.Cancelled,
+            message = $"Cancelled {outcome.Cancelled} order(s) for {name}",
         });
     }
 
@@ -432,10 +485,20 @@ internal sealed class OrderEngine
         var name = ContextResolver.InstrumentName(ctx.Security);
         var orders = _resolver.FindActiveOrders(ctx.Portfolio, ctx.Security);
 
+        // FINAL BRANCH REVIEW, FINDING 3 — THE CANCEL NO LONGER SHORT-CIRCUITS THE KEY. This used
+        // to return the moment Cancel reported a throw, which on a book of three orders meant:
+        // order 1 cancelled, orders 2 and 3 still working, THE POSITION NEVER CLOSED, and a red key
+        // naming one failure. Close All's whole promise is "flat and nothing resting"; the state it
+        // could still reach must be reached before anything is reported. So: attempt every cancel,
+        // keep the counts, then flatten regardless, and refuse at the END with what actually
+        // happened — never a plain success on a partial.
+        var cancelled = 0;
+        var cancelFailures = new List<string>();
         if (orders.Count > 0)
         {
-            var cancelFailure = Cancel(cmd, orders);
-            if (cancelFailure != null) return cancelFailure;
+            var outcome = Cancel(cmd, orders);
+            cancelled = outcome.Cancelled;
+            if (!outcome.AllCancelled) cancelFailures.AddRange(outcome.Failures);
         }
 
         // REVIEW ROUND 1, FINDING I2 — WHY NO WAIT HERE: Cancel is fire-and-forget, and a
@@ -453,24 +516,50 @@ internal sealed class OrderEngine
         // used to report INSTRUMENT_NOT_FOUND to the deck after the orders above had already been
         // cancelled — a red key claiming nothing happened over a state that had, in fact, changed.
         var flatten = FlattenPosition(cmd, ctx);
-        if (flatten.Error != null) return flatten;
 
         // REVIEW ROUND 1, FINDING minor 1: the flatten above can legitimately find nothing to
         // close (success, positionsFlattened: 0) when Close All is pressed with only working
         // orders and no position — that used to be reported as "position closed" regardless. Read
         // the real count back out instead of assuming it matched what was requested.
-        var positionsClosed = flatten.Result?["positionsFlattened"]?.Value<int>() ?? 0;
+        var positionsClosed = flatten.Error == null
+            ? flatten.Result?["positionsFlattened"]?.Value<int>() ?? 0
+            : 0;
+
+        if (flatten.Error != null || cancelFailures.Count > 0)
+        {
+            // ONE refusal describing BOTH halves. Returning the flatten's own message alone would
+            // hide the orders left working, and returning the cancel failures alone would hide a
+            // position still open — and this key is the one a trader presses when he wants both
+            // gone. The counts ride along so the deck and the log agree on what is still live.
+            var parts = new List<string>();
+            if (cancelFailures.Count > 0)
+                parts.Add($"only {cancelled}/{orders.Count} order(s) cancelled — {string.Join("; ", cancelFailures)}");
+            if (flatten.Error != null)
+                parts.Add($"position NOT closed — {flatten.Error.Message}");
+
+            SdLog.Fail("Position", null,
+                "[REQ:{0}] Close All INCOMPLETE on {1} — {2}/{3} order(s) cancelled, {4} position(s) closed: {5}",
+                cmd.RequestId, name, cancelled, orders.Count, positionsClosed, string.Join(" | ", parts));
+
+            // The flatten's own code when it is the one that failed (ORDER_REJECTED today, but read
+            // rather than assumed); ORDER_REJECTED when only the cancels did.
+            var code = flatten.Error?.Code is { Length: > 0 } flattenCode ? flattenCode : "ORDER_REJECTED";
+
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, code,
+                $"Close All incomplete on {name}: {string.Join("; ", parts)}",
+                new { ordersCancelled = cancelled, positionsFlattened = positionsClosed });
+        }
 
         SdLog.Event("Position", "[REQ:{0}] Close All on {1} — {2} order(s) cancelled, {3} position(s) closed",
-            cmd.RequestId, name, orders.Count, positionsClosed);
+            cmd.RequestId, name, cancelled, positionsClosed);
 
         return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
         {
-            ordersCancelled = orders.Count,
+            ordersCancelled = cancelled,
             positionsFlattened = positionsClosed,
             message = positionsClosed > 0
                 ? $"Cancelled all orders and closed position for {name}"
-                : $"Cancelled {orders.Count} order(s) for {name} — no open position to close",
+                : $"Cancelled {cancelled} order(s) for {name} — no open position to close",
         });
     }
 
@@ -514,12 +603,33 @@ internal sealed class OrderEngine
         var wasLong = position.Volume > 0m;
 
         var stale = _resolver.FindActiveOrders(ctx.Portfolio, ctx.Security);
+        var cancelled = 0;
         if (stale.Count > 0)
         {
-            var cancelFailure = Cancel(cmd, stale);
-            if (cancelFailure != null) return cancelFailure;
+            // FINAL BRANCH REVIEW, FINDING 3 — best effort on the cancels, but the reversal itself
+            // still does NOT go out if any of them failed, and that is deliberate. The reason this
+            // verb cancels first is that a stop from the old long is a SELL: left working, it ADDS
+            // to the new short instead of protecting it. Doubling a position on top of a protection
+            // this engine knows it failed to remove is the one outcome worse than not reversing at
+            // all. What changed is that every cancel is now attempted before that decision is made
+            // — a throw on the first order no longer leaves the rest of the book untouched — and
+            // the refusal carries the real counts instead of one exception message.
+            var outcome = Cancel(cmd, stale);
+            cancelled = outcome.Cancelled;
+
+            if (!outcome.AllCancelled)
+            {
+                SdLog.Fail("Order", null,
+                    "[REQ:{0}] Reverse ABORTED on {1}: only {2}/{3} working order(s) cancelled — reversing over a protection still working would double the new position instead of guarding it",
+                    cmd.RequestId, ContextResolver.InstrumentName(ctx.Security), cancelled, stale.Count);
+
+                return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "ORDER_REJECTED",
+                    $"Reverse not sent: only {cancelled}/{stale.Count} working order(s) could be cancelled — {outcome.FailureSummary}",
+                    new { ordersCancelled = cancelled, reversed = false });
+            }
+
             SdLog.Event("Order", "[REQ:{0}] Reverse: cancelled {1} working order(s) before reversing",
-                cmd.RequestId, stale.Count);
+                cmd.RequestId, cancelled);
         }
 
         // REVIEW ROUND 1, FINDING I2 — WHY NO WAIT HERE: same fire-and-forget Cancel as
@@ -542,9 +652,9 @@ internal sealed class OrderEngine
 
         return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
         {
-            ordersCancelled = stale.Count,
-            message = stale.Count > 0
-                ? $"Reverse from {(wasLong ? "Long" : "Short")} {currentQuantity} → {direction} {currentQuantity * 2m} ({stale.Count} order(s) cancelled)"
+            ordersCancelled = cancelled,
+            message = cancelled > 0
+                ? $"Reverse from {(wasLong ? "Long" : "Short")} {currentQuantity} → {direction} {currentQuantity * 2m} ({cancelled} order(s) cancelled)"
                 : $"Reverse from {(wasLong ? "Long" : "Short")} {currentQuantity} → {direction} {currentQuantity * 2m}",
         });
     }
@@ -1087,12 +1197,15 @@ internal sealed class OrderEngine
     }
 
     /// <summary>
-    /// Cancels the bracket legs THIS macro left behind that would now grow the position instead of
-    /// closing it — what remains of a bracket after the position flipped side.
+    /// Cancels the protective orders THIS ENGINE left behind that would now grow the position
+    /// instead of closing it — what remains of a bracket, or of a break-even stop, after the
+    /// position flipped side.
     ///
-    /// Scoped to our own two comments on purpose. The macro may clean up after itself; it may never
-    /// cancel a protection the trader placed. And a failure here must not stop the new bracket from
-    /// going out — an orphan order is bad, an unprotected position is worse.
+    /// Scoped to our own comments on purpose, and to ALL of them: see
+    /// <see cref="ProtectiveComments"/> for the break-even stop this sweep used to walk straight
+    /// past, and what that leaves working under the new position. The macro may clean up after
+    /// itself; it may never cancel a protection the trader placed. And a failure here must not stop
+    /// the new bracket from going out — an orphan order is bad, an unprotected position is worse.
     /// </summary>
     private void CancelStaleBracketLegs(BridgeMessage cmd, TradingContext ctx, bool isLong)
     {
@@ -1102,16 +1215,30 @@ internal sealed class OrderEngine
 
             var stale = _resolver.FindActiveOrders(ctx.Portfolio, ctx.Security)
                 .Where(o => o.Direction == grows)
-                .Where(o => string.Equals(o.Comment, BracketStopComment, StringComparison.OrdinalIgnoreCase)
-                         || string.Equals(o.Comment, BracketTargetComment, StringComparison.OrdinalIgnoreCase))
+                .Where(o => IsProtectiveComment(o.Comment))
                 .ToList();
 
             if (stale.Count == 0) return;
 
-            Cancel(cmd, stale);
+            var outcome = Cancel(cmd, stale);
+
+            // Reported at the level the truth deserves. A leg this sweep could NOT cancel is a
+            // protective order left working on the wrong side of the new position — the very thing
+            // the method exists to remove — so it must never be folded into the same line as a
+            // clean sweep. It still does not abort the caller: an unprotected position is worse
+            // than an orphan order, per this method's own contract above.
+            if (!outcome.AllCancelled)
+            {
+                SdLog.Fail("Protection", null,
+                    "[REQ:{0}] Only {1}/{2} stale protective order(s) cancelled on {3} — {4} still working on the wrong side of the new {5} and able to ADD to it: {6}",
+                    cmd.RequestId, outcome.Cancelled, stale.Count, ContextResolver.InstrumentName(ctx.Security),
+                    outcome.Failures.Count, isLong ? "Long" : "Short", outcome.FailureSummary);
+                return;
+            }
+
             SdLog.EventWarn("Protection",
-                "[REQ:{0}] {1} stale bracket leg(s) cancelled on {2}: left by a position of the opposite side, they would have ADDED to the current {3}",
-                cmd.RequestId, stale.Count, ContextResolver.InstrumentName(ctx.Security), isLong ? "Long" : "Short");
+                "[REQ:{0}] {1} stale protective order(s) cancelled on {2}: left by a position of the opposite side, they would have ADDED to the current {3}",
+                cmd.RequestId, outcome.Cancelled, ContextResolver.InstrumentName(ctx.Security), isLong ? "Long" : "Short");
         }
         catch (Exception ex)
         {
@@ -1129,7 +1256,17 @@ internal sealed class OrderEngine
     /// </summary>
     public BridgeMessage MoveStop(BridgeMessage cmd) => Move(cmd, stops: true);
 
-    /// <summary>Mirror of MoveStop for the targets, and for the same reason.</summary>
+    /// <summary>
+    /// Mirror of MoveStop for the targets, and for the same reason.
+    ///
+    /// MIRROR OF THE MECHANISM, NOT OF THE MEANING (final branch review, finding 5). The arithmetic
+    /// in Move is identical for both — up on a long, down on a short — but a target sits on the
+    /// FAVOURABLE side of the market where a stop sits on the unfavourable one, so the same positive
+    /// deltaTicks that TIGHTENS a stop pushes a target FURTHER AWAY. The documentation had
+    /// generalised MoveStop's "positive = tighter" over both commands; it now states them
+    /// separately, and this note is here so the next reader of the shared Move does not re-derive
+    /// the wrong half.
+    /// </summary>
     public BridgeMessage MoveTarget(BridgeMessage cmd) => Move(cmd, stops: false);
 
     private BridgeMessage Move(BridgeMessage cmd, bool stops)
@@ -1178,7 +1315,10 @@ internal sealed class OrderEngine
         // is the command whose entire job is to reprice a stop, so the "instant market exit" risk
         // the task's own constraints call out applies here most directly of the four. deltaTicks > 0
         // tightens the stop TOWARD the market; a large enough delta pushes it past the market with
-        // nothing to catch it before now. OrderPrice, not MarketPrice — an order-pricing question,
+        // nothing to catch it before now. ON THE TARGET SIDE THE SAME SIGN GOES THE OTHER WAY (final
+        // branch review, finding 5): a positive delta moves a target AWAY from the market, so it is
+        // a NEGATIVE one that can walk a target past it. The wrongSide test below is written per
+        // side for exactly that reason — do not collapse it back into one rule. OrderPrice, not MarketPrice — an order-pricing question,
         // same reasoning as BreakEven and AttachBracket above.
         var market = ContextResolver.OrderPrice(ctx.Security);
 
@@ -1338,24 +1478,78 @@ internal sealed class OrderEngine
         }
     }
 
-    public BridgeMessage? Cancel(BridgeMessage cmd, IReadOnlyList<Order> orders)
+    /// <summary>
+    /// What a batch cancel actually did. Counts, not a boolean: every caller has to be able to tell
+    /// the deck how many orders are still working.
+    /// </summary>
+    public readonly struct CancelOutcome
     {
-        try
+        /// <summary>How many orders the caller handed over, active or not.</summary>
+        public int Requested { get; init; }
+
+        /// <summary>How many cancel requests actually left for the broker without throwing.</summary>
+        public int Cancelled { get; init; }
+
+        /// <summary>One message per order this engine could not even ask to cancel.</summary>
+        public IReadOnlyList<string> Failures { get; init; }
+
+        public bool AllCancelled => Failures == null || Failures.Count == 0;
+
+        public string FailureSummary => Failures == null ? string.Empty : string.Join("; ", Failures);
+    }
+
+    /// <summary>
+    /// Cancels a batch, BEST EFFORT: every order is attempted, failures are collected, and the real
+    /// counts come back to the caller.
+    ///
+    /// FINAL BRANCH REVIEW, FINDING 3 — WHY IT IS NOT ONE try AROUND THE LOOP ANY MORE. It was the
+    /// last multi-item verb on this side still aborting on the first throw, while FlattenAccount,
+    /// BreakEven, AttachBracket and Move had all adopted this contract after review. Its worst
+    /// caller is CancelOrders, the Close All key: with three working orders and a throw on the
+    /// second, order 1 was cancelled, orders 2 and 3 were left working, the method RETURNED BEFORE
+    /// FLATTENING so the position stayed open, and the deck was handed an ORDER_REJECTED naming
+    /// only the first failure. That is precisely the "red key over a state that did in fact change"
+    /// FlattenPosition's own note was written to prevent, one method along.
+    ///
+    /// It returns a struct rather than a BridgeMessage? because "how much of it worked" is the part
+    /// every caller was missing: a caller that only knows "something threw" cannot tell the trader
+    /// how many orders are still live, and reporting the batch size — as the success paths used to
+    /// — is a plain lie the moment one cancel fails.
+    /// </summary>
+    public CancelOutcome Cancel(BridgeMessage cmd, IReadOnlyList<Order> orders)
+    {
+        var cancelled = 0;
+        var failures = new List<string>();
+
+        foreach (var order in orders)
         {
-            foreach (var order in orders)
+            // The documentation asks for this check before cancelling: an order that already
+            // reached a terminal state only produces a "cancel rejected" that means nothing. Not a
+            // failure, and not counted as a cancellation either — it is simply nothing to do.
+            if (!ContextResolver.IsActive(order)) continue;
+
+            try
             {
-                // The documentation asks for this check before cancelling: an order that already
-                // reached a terminal state only produces a "cancel rejected" that means nothing.
-                if (!ContextResolver.IsActive(order)) continue;
                 _gateway.Cancel(order);
+                cancelled++;
             }
-            return null;
+            catch (Exception ex)
+            {
+                // Logged per order, on the spot: the summary below carries the counts, but only
+                // this line carries WHICH order and the platform's own exception.
+                SdLog.Fail("Order", ex, "[REQ:{0}] Failed to cancel order {1}",
+                    cmd.RequestId, order.Id ?? "?");
+                failures.Add(ex.Message);
+            }
         }
-        catch (Exception ex)
+
+        if (failures.Count > 0)
         {
-            SdLog.Fail("Order", ex, "[REQ:{0}] Failed to cancel {1} order(s)", cmd.RequestId, orders.Count);
-            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "ORDER_REJECTED", ex.Message);
+            SdLog.Fail("Order", null, "[REQ:{0}] Only {1}/{2} order(s) cancelled — {3} failure(s)",
+                cmd.RequestId, cancelled, orders.Count, failures.Count);
         }
+
+        return new CancelOutcome { Requested = orders.Count, Cancelled = cancelled, Failures = failures };
     }
 
     /// <summary>

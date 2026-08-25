@@ -64,7 +64,35 @@ internal sealed class GuardEnforcer
     private bool _blocked;
     private string _reason = string.Empty;
     private int _maxContracts;
-    private string _trackedAccount = string.Empty;
+
+    /// <summary>
+    /// The account this class enforces on, read LIVE at every inspection — never a value pushed in
+    /// once and stored here.
+    ///
+    /// WHY A DELEGATE AND NOT A SETTER (final branch review, finding 1). The first cut had a
+    /// SetTrackedAccount(string) whose only two callers passed StatePublisher.TrackedAccount as a
+    /// SNAPSHOT, taken when the bridge sent setAccount or setGuardPolicy. But
+    /// StatePublisher.AdoptDefaultAccountIfNeeded re-points the tracked account to accounts[0] on
+    /// any publish tick where the tracked one has vanished from the connector list — every
+    /// connector flap, including the Rithmic reconnect this branch's own field trial recorded. The
+    /// snapshot then went stale, and the NEXT setGuardPolicy — which is precisely the frame the
+    /// bridge sends WHEN THE MACRO ARMS — pushed the drifted account into this class while the deck
+    /// kept trading the original one (orders carry their own account field). Every hand-placed
+    /// order on the account actually being traded went uninspected, no guardViolation was ever
+    /// emitted, and the deck showed the macro armed and red: 2026-08-21 reconstructed exactly, on
+    /// the platform whose port was supposed to be free of it. On NinjaTrader the equivalent drift
+    /// was harmless only because the 500ms publish tick re-bound the guard's twin (OrderMonitor)
+    /// every time round; the ATAS port gave OrderMonitor a live delegate and left this class on a
+    /// setter. Reading live closes the whole class of "who called the setter last" bug rather than
+    /// one instance of it, and matches what OrderMonitor.TrackedAccountName already does.
+    ///
+    /// STILL FAILS CLOSED, unchanged: unset, or returning null/empty, means InspectCore inspects
+    /// and cancels NOTHING — see the account-scope gate there for why guessing is the worse error.
+    /// Deliberately NOT wrapped in a try/catch of its own: a throw travels to Inspect's top-level
+    /// handler, which logs it and leaves the order untouched, so a broken binding is recorded
+    /// rather than silently read as "no account".
+    /// </summary>
+    public Func<string?>? TrackedAccountName { get; set; }
 
     /// <summary>Orders already acted upon, so a second update does not cancel twice.</summary>
     private readonly HashSet<string> _handled = new(StringComparer.Ordinal);
@@ -219,11 +247,6 @@ internal sealed class GuardEnforcer
         _gateway = gateway;
     }
 
-    public void SetTrackedAccount(string account)
-    {
-        lock (_lock) _trackedAccount = account ?? string.Empty;
-    }
-
     /// <summary>Adopts the policy the bridge publishes whenever it changes.</summary>
     public void UpdatePolicy(bool blocked, string? reason, int maxContracts)
     {
@@ -279,16 +302,20 @@ internal sealed class GuardEnforcer
     {
         if (order == null) return false;
 
+        // OUTSIDE the lock, on purpose: the delegate reads StatePublisher's own tracking lock, and
+        // this class must never hold _lock across a call it does not own — same rule the platform
+        // read in ResolveOutcome follows, for the same reason (the bridge thread adopting a policy
+        // must not be stalled behind a foreign lock on a connector event thread).
+        var account = TrackedAccountName?.Invoke() ?? string.Empty;
+
         bool blocked;
         string reason;
         int cap;
-        string account;
         lock (_lock)
         {
             blocked = _blocked;
             reason = _reason;
             cap = _maxContracts;
-            account = _trackedAccount;
         }
 
         // BEFORE every early return below: an order we already acted on must be followed to its
@@ -312,6 +339,10 @@ internal sealed class GuardEnforcer
         // See TradeDeckStrategy.HandleGuardPolicy's SECURITY warning for the trader-facing half of
         // this: with no account confirmed, enforcement is OFF, and the bridge-side macro is the
         // only remaining net — exactly the same statement already made for degraded mode above.
+        //
+        // `account` here is READ LIVE, this tick, through TrackedAccountName — never a value some
+        // earlier call pushed in. See that property's own doc: a stored snapshot is what let the
+        // publisher's default-account fallback point this gate at an account nobody was trading.
         if (account.Length == 0) return false;
         if (!string.Equals(order.Portfolio?.AccountID, account, StringComparison.OrdinalIgnoreCase))
             return false;
@@ -654,10 +685,10 @@ internal sealed class GuardEnforcer
         try
         {
             // order.Status() is a platform read, made OUTSIDE the lock (R1 review, minor finding):
-            // the R1 version made this call while holding _lock, which UpdatePolicy,
-            // SetTrackedAccount and MaxContracts also take — a slow platform read here, on a
-            // connector event thread, could stall the bridge thread trying to adopt a brand-new
-            // policy at the exact moment it matters most.
+            // the R1 version made this call while holding _lock, which UpdatePolicy and
+            // MaxContracts also take — a slow platform read here, on a connector event thread,
+            // could stall the bridge thread trying to adopt a brand-new policy at the exact moment
+            // it matters most.
             terminal = TerminalOutcome(order);
         }
         catch (Exception ex)

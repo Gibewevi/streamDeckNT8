@@ -97,9 +97,13 @@ Aucune configuration spécifique — utilise le compte, instrument et quantité 
   - Configurable : n'importe quelle valeur positive
 
 ### Move Stop / Move Target
-- **deltaTicks** :
-  - `+1` → rapproche du prix (resserre)
-  - `-1` → éloigne du prix (donne plus de marge)
+- **deltaTicks** : le signe ne veut **pas dire la même chose** sur les deux touches. Le calcul est
+  unique (`prix + delta × tick` en long, `prix − delta × tick` en short), mais le stop est du côté
+  défavorable et la cible du côté favorable, donc un même `+1` les déplace en sens opposés par
+  rapport au marché.
+  - **Move Stop** — `+1` → rapproche le stop du prix (resserre) ; `-1` → l'éloigne (plus de marge).
+  - **Move Target** — `+1` → **éloigne** la cible du prix (objectif plus ambitieux) ; `-1` → la
+    rapproche (prise de profit plus tôt).
 
 ### Qty Preset
 - **quantity** : la valeur que ce bouton fixe (1, 2, 5, 10, 20...)

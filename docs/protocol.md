@@ -188,6 +188,10 @@ position resterait actif et viendrait s'ajouter à la nouvelle au lieu de la pro
   }
 }
 ```
+> `deltaTicks` : **le signe n'a pas le même effet que sur `moveStop`.** Le calcul est le même
+> (`prix + delta × tick` en long, `prix − delta × tick` en short), mais la cible est du côté
+> favorable du marché : positif = **éloigne** la cible du prix (objectif plus ambitieux), négatif =
+> la rapproche (prise de profit plus tôt). La direction est relative au sens de la position.
 
 #### `attachBracket` — pose le take profit et le stop loss
 Calcule les deux niveaux depuis le **prix moyen** de la position ouverte, dans son sens, et les
