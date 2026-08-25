@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 using ATAS.DataFeedsCore;
 using ATAS.Indicators;
@@ -97,6 +98,16 @@ internal sealed class ExecutionRecorder : IDisposable
     /// <summary>Says the DateTimeKind of the first fill once, so the timestamps can be audited.</summary>
     private bool _kindReported;
 
+    /// <summary>
+    /// Fills dropped since the last "Journal:ReplayUnknown" warning was allowed through — see
+    /// FIX ROUND 2, FINDING I3 at the call site. The rate limiter keeps the log quiet; this keeps
+    /// the drop from being silent about HOW MANY. Interlocked rather than _warnLock: incremented
+    /// from whichever connector thread is currently in Record, read/reset only inside the already
+    /// rate-limited branch, and a log line's exact count being off by one under concurrent access
+    /// costs nothing this class' three governing rules care about.
+    /// </summary>
+    private int _replayUnknownDropped;
+
     public ExecutionRecorder(IOrderGateway gateway, string? directory = null)
     {
         _gateway = gateway;
@@ -138,11 +149,18 @@ internal sealed class ExecutionRecorder : IDisposable
             // Bitlearn has ingested it.
             if (!TryCheckReplay(trade, out var isReplay))
             {
+                // FIX ROUND 2, FINDING I3: the warning used to say nothing about HOW MANY fills were
+                // dropped between two allowed log lines. A connector that never populates Portfolio
+                // would empty the journal at up to one log line an hour — from the log alone that
+                // looks like a quiet session, not an emptying one. Counted the same way SafeTrades
+                // counts its own losses; reported and reset only when the limiter lets a line through.
+                Interlocked.Increment(ref _replayUnknownDropped);
                 if (ShouldWarn("Journal:ReplayUnknown"))
                 {
+                    var total = Interlocked.Exchange(ref _replayUnknownDropped, 0);
                     SdLog.EventWarn("Journal",
-                        "Could not determine whether fill {0} came from Replay mode (Portfolio missing, or the check itself faulted) — NOT recorded: writing a possible replay fill as a real trade would be unrecoverable, worse than skipping it",
-                        trade.Id ?? "?");
+                        "Could not determine replay status for {0} fill(s) since the last warning (Portfolio missing, or the check itself faulted) — NOT recorded: writing a possible replay fill as a real trade would be unrecoverable, worse than skipping it. Most recent: {1}",
+                        total, trade.Id ?? "?");
                 }
                 return;
             }
@@ -234,15 +252,21 @@ internal sealed class ExecutionRecorder : IDisposable
         var security = trade.Security;
         var account = ResolveAccount(trade);
 
-        // FIX ROUND 1, FINDING I1 (second half). An empty account is not merely a cosmetic gap:
-        // deck-host/src/uploader.ts:239 drops a journal line whose account is empty from the batch
-        // it uploads WHILE STILL ADVANCING ITS CURSOR PAST IT — so this fill is not retried later,
-        // it is gone the moment the host next runs. This is the only place a reader of this file
-        // will ever meet that fact, so it is spelled out here rather than assumed known.
+        // FIX ROUND 1, FINDING I1 (second half), CORRECTED IN ROUND 2. The round-1 comment claimed
+        // deck-host drops a journal line with an empty account while advancing its cursor past it —
+        // that was wrong, and stated as fact rather than checked. deck-host/src/uploader.ts's
+        // `retenu(compte, filtre) = filtre.tous || filtre.noms.has(compte)` is gated by `filtre.tous`
+        // alone: `comptesJournalises` only ever sets `tous`, never populates `noms` any more (dead
+        // code, per its own comment), so an empty account is retained or dropped exactly like any
+        // other line — purely by whether journalling is on for that connector's account key
+        // elsewhere in the layout. Nothing here confirms what Bitlearn itself does with an account
+        // it cannot attribute, since this port does not touch that server. What IS certain, and is
+        // reason enough to keep this warning: an empty account gives the server nothing to attach
+        // this fill's P&amp;L to, wherever in the pipeline that eventually surfaces.
         if (string.IsNullOrEmpty(account) && ShouldWarn("Journal:NoAccount"))
         {
             SdLog.EventWarn("Journal",
-                "No account on fill {0} — the deck-host silently drops a journal line with an empty account while advancing its upload cursor past it, so this fill will be lost permanently, not merely retried",
+                "No account on fill {0} — nothing for the server to attribute this fill's P&L to once uploaded",
                 trade.Id ?? "?");
         }
 
@@ -290,8 +314,12 @@ internal sealed class ExecutionRecorder : IDisposable
             {
                 record["pointValue"] = pointValue;
             }
-            else if (ShouldWarn("Journal:NoPointValue"))
+            else if (ShouldWarn("Journal:NoPointValue:" + ContextResolver.InstrumentName(security)))
             {
+                // FIX ROUND 2: keyed per instrument, not by a single shared "Journal:NoPointValue"
+                // key — a second mispriced symbol within the same hour used to be swallowed by the
+                // first one's rate limit even though it is a distinct, unrelated fact worth its own
+                // line.
                 SdLog.EventWarn("Journal", "No point value for {0} (tickSize={1}, tickCost={2}) — the field is omitted",
                     ContextResolver.InstrumentName(security), security.TickSize, security.TickCost);
             }
@@ -376,29 +404,35 @@ internal sealed class ExecutionRecorder : IDisposable
     }
 
     /// <summary>
-    /// Says out loud that a fill carried a commission reported as EXACTLY zero, because the
-    /// consequence is invisible otherwise: the Bitlearn journal computes net = gross - commission,
-    /// so a zero silently publishes a GROSS P&amp;L that looks perfectly legitimate.
+    /// Says out loud that a fill carried no cost data, because the consequence is invisible
+    /// otherwise: the Bitlearn journal computes net = gross - commission, so a fill priced without
+    /// one silently publishes a GROSS P&amp;L that looks perfectly legitimate.
     ///
     /// Ported from the NinjaTrader add-on (Services/ExecutionRecorder.cs, WarnIfNoCommission) after
     /// a named incident there: months of live journals showing P&amp;L before costs, while the
     /// simulation account — which had a commission template — looked correct and hid the problem.
-    /// Reviewer finding I4: the ATAS port had no equivalent, so a connector reporting Commission as
-    /// 0 instead of null would reproduce that exact incident silently.
     ///
-    /// A NULL commission is not this case — it already prints distinctly as an empty value on both
-    /// sides of the wire (see the field's own comment in Describe) and needs no separate warning.
-    /// Warning, not error: the fill itself is still recorded correctly, and a trader who genuinely
-    /// pays no commission is entitled to a quiet log.
+    /// FIX ROUND 2, FINDING I4: the round-1 version fired only on trade.Commission == 0m, which on
+    /// a NULLABLE decimal means trade.Commission != 0m is a LIFTED comparison — true for null, so
+    /// the check returned early and never warned on the value ATAS most likely uses to express "no
+    /// cost data" in the first place. That is exactly the state this guard exists to catch: the
+    /// reference's non-nullable double could only spell "no cost data" as 0.0, but ATAS's own
+    /// nullable field can spell it as null OR 0m, and the incident this guard is named after does
+    /// not care which encoding is in use. GetValueOrDefault() folds both into the same check.
+    /// Warning, not error: the fill itself is still recorded correctly (a null stays distinguishable
+    /// from a reported zero in the file itself — see the field's own comment in Describe — this
+    /// warning only says a human should look), and a trader who genuinely pays no commission is
+    /// entitled to a quiet log once the condition has been seen and warned about.
     /// </summary>
     private void WarnIfNoCommission(MyTrade trade, string account)
     {
-        if (trade.Commission != 0m) return; // null (not reported) or a genuine non-zero value
+        if (trade.Commission.GetValueOrDefault() != 0m) return; // a genuine non-zero value
         if (!ShouldWarn("Journal:NoCommission")) return;
 
         SdLog.EventWarn("Journal",
-            "Commission reported as exactly zero on a fill for {0} — verify the connector actually reports it, otherwise the Bitlearn journal publishes P&L GROSS of costs",
-            string.IsNullOrEmpty(account) ? "(unknown account)" : account);
+            "No commission reported on a fill for {0} (commission={1}) — verify the connector actually reports it, otherwise the Bitlearn journal publishes P&L GROSS of costs",
+            string.IsNullOrEmpty(account) ? "(unknown account)" : account,
+            trade.Commission.HasValue ? "0" : "null");
     }
 
     /// <summary>

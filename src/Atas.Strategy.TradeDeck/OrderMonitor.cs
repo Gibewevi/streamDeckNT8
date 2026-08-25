@@ -397,11 +397,18 @@ internal sealed class OrderMonitor : IDisposable
             // exception, unscoped because a position move on ANY account still means the picture
             // this class draws could be stale). A fill on an account the trader is not tracking
             // must not refresh a key that has nothing to do with it.
+            //
+            // FIX ROUND 2, FINDING N1: the round-1 version read trade?.AccountID ?? trade?.Portfolio
+            // ?.AccountID directly in this foreach, OUTSIDE InScopeAccount's own try/catch. A
+            // throwing getter there would have escaped straight to Safely and abandoned every
+            // remaining fill in the batch — the exact I2 failure mode, re-created one layer up by a
+            // fix meant to close a minor. InScopeAccount(MyTrade) below reads the account INSIDE its
+            // own guard instead, so no platform property read on this path sits unguarded.
             var trackedFillSeen = false;
             foreach (var trade in batch)
             {
                 _recorder?.Record(trade);
-                if (InScopeAccount(trade?.AccountID ?? trade?.Portfolio?.AccountID)) trackedFillSeen = true;
+                if (InScopeAccount(trade)) trackedFillSeen = true;
             }
 
             // A fill moved the tracked position: refresh the deck rather than waiting for the next
@@ -425,7 +432,11 @@ internal sealed class OrderMonitor : IDisposable
         var result = new List<MyTrade>();
         try
         {
-            foreach (var trade in trades) result.Add(trade);
+            // Matches ContextResolver.SafeOrders' shape: nothing observed today makes the connector
+            // hand over a null IEnumerable (a null would fault into the catch below and be reported
+            // like any other fault), but the sibling method checks explicitly rather than relying on
+            // that, so this one does too (fix round 2).
+            if (trades != null) foreach (var trade in trades) result.Add(trade);
         }
         catch (Exception ex)
         {
@@ -478,6 +489,30 @@ internal sealed class OrderMonitor : IDisposable
         {
             var tracked = TrackedAccountName?.Invoke();
             if (string.IsNullOrWhiteSpace(tracked)) return true; // not yet known — fail OPEN
+            if (string.IsNullOrWhiteSpace(accountId)) return true; // cannot tell — fail OPEN
+            return string.Equals(accountId, tracked, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            SdLog.TraceEvent("Order", "Account scope check faulted, letting the event through: {0}", ex.GetType().Name);
+            return true; // fail OPEN — see the class-level remark on why a spurious flash beats a silent drop
+        }
+    }
+
+    /// <summary>
+    /// MyTrade overload of <see cref="InScopeAccount(string?)"/>. Reads trade.AccountID and
+    /// trade.Portfolio.AccountID INSIDE this method's own try/catch, unlike the round-1
+    /// OnNewMyTrades which read them directly in its foreach — a platform property throwing there
+    /// escaped straight to Safely and abandoned every remaining fill in the batch (round 2, finding
+    /// N1: the exact failure I2 was raised for, re-created one layer up by a fix for a minor).
+    /// </summary>
+    private bool InScopeAccount(MyTrade? trade)
+    {
+        try
+        {
+            var tracked = TrackedAccountName?.Invoke();
+            if (string.IsNullOrWhiteSpace(tracked)) return true; // not yet known — fail OPEN
+            var accountId = trade?.AccountID ?? trade?.Portfolio?.AccountID;
             if (string.IsNullOrWhiteSpace(accountId)) return true; // cannot tell — fail OPEN
             return string.Equals(accountId, tracked, StringComparison.OrdinalIgnoreCase);
         }
