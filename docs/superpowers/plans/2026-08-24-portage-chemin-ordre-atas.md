@@ -4283,7 +4283,7 @@ renforcée, en choisir un laissait le reste de la position sans protection au vi
 - Produit : `OrderEngine.BreakEven`, `.AttachBracket`, `.MoveStop`, `.MoveTarget`, toutes de
   signature `BridgeMessage Xxx(BridgeMessage cmd)`.
 
-- [ ] **Étape 1 : ajouter le vocabulaire des protections**
+- [x] **Étape 1 : ajouter le vocabulaire des protections**
 
 Dans `OrderEngine.cs`, sous `DeckOrderComment` :
 
@@ -4304,7 +4304,7 @@ Dans `OrderEngine.cs`, sous `DeckOrderComment` :
     public const string BreakEvenComment = "StreamDeck_BE";
 ```
 
-- [ ] **Étape 2 : écrire le break-even**
+- [x] **Étape 2 : écrire le break-even**
 
 ```csharp
     /// <summary>
@@ -4404,7 +4404,7 @@ Dans `OrderEngine.cs`, sous `DeckOrderComment` :
     }
 ```
 
-- [ ] **Étape 3 : écrire le bracket**
+- [x] **Étape 3 : écrire le bracket**
 
 ```csharp
     /// <summary>
@@ -4660,7 +4660,7 @@ Dans `OrderEngine.cs`, sous `DeckOrderComment` :
 
 Ajouter en tête de `OrderEngine.cs` : `using System.Globalization;` et `using System.Linq;`.
 
-- [ ] **Étape 4 : écrire les deux déplacements**
+- [x] **Étape 4 : écrire les deux déplacements**
 
 ```csharp
     /// <summary>
@@ -4760,7 +4760,7 @@ Ajouter en tête de `OrderEngine.cs` : `using System.Globalization;` et `using S
     }
 ```
 
-- [ ] **Étape 5 : ouvrir les quatre dernières branches**
+- [x] **Étape 5 : ouvrir les quatre dernières branches**
 
 Dans `CommandDispatcher.Dispatch` :
 
@@ -4776,7 +4776,7 @@ Dans `CommandDispatcher.Dispatch` :
 Les treize branches sont désormais présentes : le `default` ne doit plus être atteint que par une
 action inconnue du protocole.
 
-- [ ] **Étape 6 : compiler**
+- [x] **Étape 6 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -4809,7 +4809,7 @@ réflexion à ce moment-là, elle n'est pas listée dans « Surface d'API ATAS u
 traiter l'absence comme « support inconnu » et **s'arrêter et le signaler** plutôt que de livrer un
 bracket dont une jambe survit.
 
-- [ ] **Étape 8 : committer**
+- [x] **Étape 8 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
