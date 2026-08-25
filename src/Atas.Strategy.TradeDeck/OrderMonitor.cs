@@ -285,12 +285,11 @@ internal sealed class OrderMonitor : IDisposable
 
             // Enforcement first, and before any other consideration: this is the only moment an
             // order placed outside the deck can still be stopped. Every millisecond spent elsewhere
-            // is a millisecond it may fill in.
-            if (_enforcer != null && _enforcer.Inspect(order))
-            {
-                StateChanged?.Invoke();
-                return;
-            }
+            // is a millisecond it may fill in. The verdict is held, not acted on immediately — see
+            // below — so the standard transition line for THIS event still gets logged either way
+            // (R1 review, minor finding: the two logs used to fall out of step for a cancelled
+            // event, and lining them up by order id is how an incident gets reconstructed here).
+            var cancelledByGuard = _enforcer != null && _enforcer.Inspect(order);
 
             var status = order.Status();
             var inScope = InScope(order);
@@ -314,6 +313,12 @@ internal sealed class OrderMonitor : IDisposable
                     order.Id ?? "?", status, order.State, order.Direction, order.Type,
                     order.QuantityToFill, order.Unfilled,
                     ContextResolver.InstrumentName(order.Security));
+            }
+
+            if (cancelledByGuard)
+            {
+                StateChanged?.Invoke();
+                return;
             }
 
             if (order.State == OrderStates.Failed)
@@ -358,7 +363,15 @@ internal sealed class OrderMonitor : IDisposable
         });
 
     private void OnCancelFailed(IDataFeedConnector connector, string message, Order order) =>
-        Safely("Order", () => ReportRejection(order, "CancelRejected", message));
+        Safely("Order", () =>
+        {
+            // Task 8, R1 minor: tells the guard its OWN cancel was refused, so a later hand-cancel
+            // of the same order is never misreported as this class having stopped it — see
+            // GuardEnforcer.NotifyCancelFailed's own doc for the 12/08-mirror-image incident this
+            // prevents. A no-op whenever the guard was not the one waiting on this order.
+            _enforcer?.NotifyCancelFailed(order, message);
+            ReportRejection(order, "CancelRejected", message);
+        });
 
     private void OnModifyFailed(IDataFeedConnector connector, Order order, Order newOrder, string error) =>
         Safely("Order", () => ReportRejection(order, "ModifyRejected", error));

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 using ATAS.DataFeedsCore;
 using ATAS.Indicators;
@@ -60,6 +61,17 @@ internal sealed class GuardEnforcer
 
     /// <summary>Orders already acted upon, so a second update does not cancel twice.</summary>
     private readonly HashSet<string> _handled = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Same purpose as <see cref="_handled"/>, for the order that has no id to key on (R1 review,
+    /// finding I2: an empty `order.Id` used to skip dedup entirely, firing a fresh Cancel and a
+    /// fresh EventWarn on EVERY subsequent OrderChanged for that same order — a cancel-request
+    /// storm against the broker for the length of one order's life, right when the log needs to
+    /// stay readable). A ConditionalWeakTable so an order that never resolves cannot leak for the
+    /// life of the session, matching the pattern OrderEngine's own `_ours` table already uses for
+    /// exactly the same "no reliable key, fall back to identity" situation.
+    /// </summary>
+    private readonly ConditionalWeakTable<Order, object> _handledByReference = new();
 
     /// <summary>
     /// Orders a cancel was requested for, waiting to find out whether it worked.
@@ -164,14 +176,30 @@ internal sealed class GuardEnforcer
 
         if (!blocked && cap <= 0) return false;
 
-        // SCOPED TO THE TRACKED ACCOUNT. Every safety rule of this protocol is scoped to one
-        // account, and enforcing on a portfolio nobody designated is how, on 2026-08-21, a locked
-        // macro coexisted with an hour of hand-placed orders.
-        if (account.Length > 0 &&
-            !string.Equals(order.Portfolio?.AccountID, account, StringComparison.OrdinalIgnoreCase))
+        // SCOPED TO THE TRACKED ACCOUNT, AND FAILS CLOSED WITHOUT ONE. Every safety rule of this
+        // protocol is scoped to one account, and enforcing on a portfolio nobody designated is how,
+        // on 2026-08-21, a locked macro coexisted with an hour of hand-placed orders. The FIRST cut
+        // of this class got the empty case backwards (R1 review, finding I1): `account.Length > 0`
+        // gated the mismatch check, so an EMPTY tracked account — routine at a fresh OnStarted,
+        // before the bridge's first setAccount arrives, or between chart start and a connector
+        // attaching (see the Rithmic case elsewhere in this file) — skipped the filter entirely and
+        // cancelled external orders on every account any connector reported. That is the SAME
+        // failure as 2026-08-21 wearing a different hat: enforcement acting on an account nobody
+        // confirmed, only this time by cancelling a trader's order on an account the deck was never
+        // even pointed at (their live funded account, say) instead of missing one. With no tracked
+        // account this class must inspect and cancel NOTHING — which is exactly what the
+        // SECURITY warning in TradeDeckStrategy.HandleGuardPolicy already claims happens; this line
+        // is what makes that claim true instead of contradicting it.
+        if (account.Length == 0) return false;
+        if (!string.Equals(order.Portfolio?.AccountID, account, StringComparison.OrdinalIgnoreCase))
             return false;
 
-        // The bridge already ran every rule against this one before it was sent.
+        // Best-effort recognition of our own order, no more than that — see OrderEngine.IsOurs's own
+        // doc for the exact limit: a DOM ticket a trader happens to comment "StreamDeck" by hand is
+        // classified as ours too, and slips through here unlogged, same as everywhere else IsOurs is
+        // trusted. This is NOT "the bridge already vetted this order" (R1 review, minor finding) —
+        // the bridge never sees a hand-typed order at all, which is the entire reason this class
+        // exists.
         if (_engine.IsOurs(order)) return false;
 
         if (!ContextResolver.IsActive(order)) return false;
@@ -193,7 +221,16 @@ internal sealed class GuardEnforcer
         var id = order.Id ?? string.Empty;
         lock (_lock)
         {
-            if (id.Length > 0 && !_handled.Add(id)) return false;
+            // Two dedup tables, not one with a bypass for the empty case (R1 review, finding I2):
+            // an order without an id used to skip dedup altogether and re-fire Cancel plus an
+            // EventWarn on every following OrderChanged for the same order — a cancel-request storm
+            // against the broker, and a wall of identical log lines, for the rest of that order's
+            // life. Falling back to object identity keeps the same "already acted on it" guarantee
+            // when there is no string key to use.
+            var alreadyHandled = id.Length > 0
+                ? !_handled.Add(id)
+                : !_handledByReference.TryAdd(order, id);
+            if (alreadyHandled) return false;
         }
 
         return CancelAndReport(order, violation);
@@ -227,8 +264,61 @@ internal sealed class GuardEnforcer
         // every one of them had been journalled as cancelled:true, so Bitlearn read the day as 100%
         // rule compliance while every trade carried a bypass. The verdict is whatever state the
         // order reaches NEXT, and ResolveOutcome sends it.
-        lock (_lock) _pending[order.Id ?? string.Empty] = violation;
+        //
+        // ONLY WHEN AN ID EXISTS TO LOOK IT BACK UP BY. Keying this dictionary with
+        // `order.Id ?? string.Empty` used to let every id-less order collide on the SAME "" entry
+        // (R1 review, finding I2): each new cancel silently overwrote the previous one's pending
+        // verdict, and ResolveOutcome already refuses an empty id (see its own early return), so
+        // that entry could never resolve either way — a slow, permanent leak of exactly one slot.
+        // The reference-based dedup above already stops the retry storm for this case; the outcome
+        // of an id-less order's cancel is simply never tracked to a conclusion, which is honest
+        // given there is no key left to track it by.
+        var id = order.Id ?? string.Empty;
+        if (id.Length > 0)
+        {
+            lock (_lock) _pending[id] = violation;
+        }
+
         return true;
+    }
+
+    /// <summary>
+    /// The platform confirms this class's OWN cancel request did not take — a broker-side rejection
+    /// of the cancel, reported asynchronously via OrdersCancelFailed. Distinct from the synchronous
+    /// exception path in <see cref="CancelAndReport"/>: that one is a throw out of Cancel() itself,
+    /// this one is a connector event that can arrive well after Cancel() already returned normally.
+    ///
+    /// WITHOUT THIS HOOK: the id would stay in <see cref="_pending"/> waiting for a terminal status.
+    /// If the trader then cancelled the SAME order by hand — the natural next move after seeing a
+    /// broker reject a cancel — the eventual Canceled status would reach <see cref="ResolveOutcome"/>
+    /// and report `outcome: "stopped"`, crediting THIS class with a cancel that was actually the
+    /// trader's own. Bitlearn would read that as the rule having worked. That is the exact mirror
+    /// image of the 2026-08-12 incident already referenced above (a real fill misreported as a
+    /// cancel); this closes the same class of misreport for a cancel-that-failed instead of a
+    /// fill-that-beat-the-cancel (R1 review, minor finding).
+    ///
+    /// Called for EVERY OrdersCancelFailed from OrderMonitor, unconditionally: cheap and correct to
+    /// be a no-op whenever this class is not the one who asked for that particular cancel.
+    /// </summary>
+    public void NotifyCancelFailed(Order? order, string? reason)
+    {
+        if (order == null) return;
+        var id = order.Id ?? string.Empty;
+        if (id.Length == 0) return;
+
+        string violation;
+        lock (_lock)
+        {
+            if (!_pending.TryGetValue(id, out violation!)) return;
+            _pending.Remove(id);
+        }
+
+        var instrument = ContextResolver.InstrumentName(order.Security);
+        SdLog.EventWarn("Safety",
+            "EXTERNAL ORDER CANCEL FAILED — {0} {1} qty={2} on {3}: the guard's own cancel was refused ({4}); this order is NOT counted as stopped",
+            order.Direction, order.Type, order.QuantityToFill, instrument, string.IsNullOrEmpty(reason) ? "?" : reason);
+
+        Report(order, violation, OutcomeBypassed, string.IsNullOrEmpty(reason) ? "Cancel refused by the broker" : reason);
     }
 
     /// <summary>
@@ -243,18 +333,32 @@ internal sealed class GuardEnforcer
         if (id.Length == 0) return;
 
         string violation;
-        string outcome;
         lock (_lock)
         {
             if (!_pending.TryGetValue(id, out violation!)) return;
-
-            var terminal = TerminalOutcome(order);
-            if (terminal == null) return;
-
-            outcome = terminal;
+            // Popped now, under lock: see the re-insert below for why this has to be pop-then-maybe-
+            // put-back rather than read-then-remove around the Status() call.
             _pending.Remove(id);
         }
 
+        // order.Status() is a platform read, made OUTSIDE the lock (R1 review, minor finding): the
+        // FIRST cut of this method made this call while holding _lock, which UpdatePolicy,
+        // SetTrackedAccount and MaxContracts also take — a slow platform read here, on a connector
+        // event thread, could stall the bridge thread trying to adopt a brand-new policy at the
+        // exact moment it matters most.
+        var terminal = TerminalOutcome(order);
+        if (terminal == null)
+        {
+            // Not a conclusion yet — put it back for the next OrderChanged on this id to try again.
+            // Narrow, accepted race: another thread inspecting the SAME order id between the pop
+            // above and this put-back would momentarily not see it as pending. That can only delay
+            // this report, never cause an extra cancel or misreport one — order updates for a single
+            // id are not expected to race across connector threads in practice.
+            lock (_lock) _pending[id] = violation;
+            return;
+        }
+
+        var outcome = terminal;
         var instrument = ContextResolver.InstrumentName(order.Security);
         if (outcome == OutcomeStopped)
         {
