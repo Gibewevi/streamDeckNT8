@@ -98,8 +98,8 @@ Aucune configuration spécifique — utilise le compte, instrument et quantité 
 
 ### Move Stop / Move Target
 - **deltaTicks** :
-  - `+1` → éloigne du prix (donne plus de marge)
-  - `-1` → rapproche du prix (resserre)
+  - `+1` → rapproche du prix (resserre)
+  - `-1` → éloigne du prix (donne plus de marge)
 
 ### Qty Preset
 - **quantity** : la valeur que ce bouton fixe (1, 2, 5, 10, 20...)

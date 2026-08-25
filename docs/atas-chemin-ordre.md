@@ -9,8 +9,8 @@ support ATAS. **Un trader utilise NinjaTrader OU ATAS** : le bridge n'accepte qu
 
 Ni le bridge ni le deck-host ne savent qui est au bout du fil. Ils ne connaissent que
 [`protocol.md`](protocol.md), et c'est la propriété qui a rendu ce portage possible : **aucune ligne
-des deux n'a été modifiée** — vérifié sur l'ensemble de la branche, pas seulement le dernier commit
-(voir « Vérifié » plus bas).
+des deux n'a été modifiée** — vérifié sur l'ensemble de la branche
+(`git diff --stat main -- src/StreamDeckBridge src/deck-host`), pas seulement le dernier commit.
 
 **Validé sur la plateforme réelle le 25/08/2026** : avec la stratégie démarrée sur un graphique
 quelconque, le trader pilote compte **et** instrument depuis le boîtier, y compris un compte porté
@@ -96,9 +96,14 @@ lui aussi, journalisé une fois au démarrage.
   jamais s'y fier ni les retenter en repli : ce n'est pas un cas rare, c'est systématique sur le
   classique. L'accès réel passe par le registre de connecteurs de l'hôte, en réflexion pure — voir
   `docs/superpowers/specs/2026-08-21-portage-chemin-ordre-atas-design.md`.
-- **`attachBracket` avec une jambe refusée et l'autre posée répond `success: true`.** C'est le
-  protocole qui l'impose, pas un choix de ce portage — mais c'est le cas non borné : une position
-  avec un objectif, **sans stop**, et une touche verte qui ne le montre pas.
+- **`attachBracket` avec une jambe refusée et l'autre posée répond `success: true` — mais
+  seulement quand le refus est « marché déjà passé le niveau ».** Une jambe qui échoue réellement à
+  se soumettre (rejet broker, erreur réseau) répond `Failure` / `ORDER_REJECTED`
+  (`OrderEngine.cs:1035-1053`) même quand l'autre jambe est posée : ce cas-là se voit sur la touche.
+  Le cas silencieux est l'autre : le niveau calculé est déjà de l'autre côté du marché, la jambe est
+  comptée « refusée » sans que rien n'ait échoué à s'envoyer, l'autre jambe part, et la réponse est
+  `success: true` — protocole oblige, pas un choix de ce portage. C'est le cas non borné : une
+  position avec un objectif, **sans stop**, et une touche verte qui ne le montre pas.
 
 ## Ce qui reste à vérifier sur machine
 
@@ -114,8 +119,12 @@ portage clos :
 
 ## Le fichier partagé
 
-`JournalSeal.cs` vit dans `src/NinjaTrader.AddOn.StreamDeck/Utilities/` et est compilé **par les
-deux** : NinjaScript chez le trader, et le projet ATAS par lien MSBuild. Il reste donc en **C# 9 /
-`net48`**, et sa forme canonique doit rester identique **au caractère près** à
-`deck-host/src/seal.ts` et à `Bitlearn/lib/tradeDeck/integrity.js`. Après toute modification :
-`dotnet build src/NinjaTrader.Scripts` **et** le build ATAS, les deux ou aucun.
+`JournalSeal.cs` vit dans `src/NinjaTrader.AddOn.StreamDeck/Utilities/` et est compilé par
+NinjaScript chez le trader, par `NinjaTrader.AddOn.StreamDeck.csproj`, et par
+`src/Atas.Strategy.TradeDeck/` qui le lie par `<Compile Include>` — **jamais** par
+`NinjaTrader.Scripts.csproj`, qui ne le compile pas : ce projet ne glob que son propre dossier, et
+`JournalSeal.cs` n'y vit pas. Il reste donc en **C# 9 / `net48`**, et sa forme canonique doit
+rester identique **au caractère près** à `deck-host/src/seal.ts` et à
+`Bitlearn/lib/tradeDeck/integrity.js`. Après toute modification :
+`dotnet build src/NinjaTrader.AddOn.StreamDeck` **et** le build `Atas.Strategy.TradeDeck`, les deux
+ou aucun.

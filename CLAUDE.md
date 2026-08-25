@@ -217,13 +217,20 @@ Règles en ajoutant un log :
   (`src/streamdeck-ninjatrader/`), y compris ses deux fichiers sous `node_modules/typescript/bin/`
   — les détacher laisserait un arbre à moitié versionné. Rappel : `.gitignore` ne s'applique pas
   aux fichiers déjà suivis, il faut un `git rm --cached`.
-- **`TdSwingEngine.cs`, `TdStopSelector.cs` et `JournalSeal.cs` sont compilés par PLUSIEURS chaînes**
-  — NinjaScript chez le trader, `NinjaTrader.Scripts.csproj`, et les projets ATAS
-  `src/Atas.Indicators.TradeDeck/` et `src/Atas.Strategy.TradeDeck/` qui les lient par
-  `<Compile Include>`. Ils doivent donc rester en **C# 9 / `net48`** — namespace à portée de fichier,
+- **`TdSwingEngine.cs`, `TdStopSelector.cs` et `JournalSeal.cs` sont chacun compilés par PLUSIEURS
+  chaînes — mais pas les mêmes, à ne pas fusionner en une seule règle.** `TdSwingEngine.cs` et
+  `TdStopSelector.cs` : NinjaScript chez le trader, `NinjaTrader.Scripts.csproj`, et
+  `src/Atas.Indicators.TradeDeck/` par `<Compile Include>` (`TdSwingEngine.cs` est en plus lié
+  depuis `src/NinjaTrader.AddOn.StreamDeck/` — pas `TdStopSelector.cs`). `JournalSeal.cs` :
+  NinjaScript chez le trader, `NinjaTrader.AddOn.StreamDeck.csproj`, et
+  `src/Atas.Strategy.TradeDeck/` par `<Compile Include>` — **jamais** `NinjaTrader.Scripts.csproj`,
+  qui ne le compile pas. Tous doivent rester en **C# 9 / `net48`** — namespace à portée de fichier,
   `record` ou `required` compilent côté ATAS et cassent la compilation NinjaScript **entière** chez
-  le trader, indicateurs personnels compris. Après toute modification de l'un d'eux :
-  `dotnet build src/NinjaTrader.Scripts` **et** les builds ATAS, tous ou aucun.
+  le trader, indicateurs personnels compris. Après modification, compiler la chaîne qui compile
+  RÉELLEMENT le fichier touché : pour les `Td*.cs`, `dotnet build src/NinjaTrader.Scripts` **et** le
+  build `Atas.Indicators.TradeDeck` ; pour `JournalSeal.cs`,
+  `dotnet build src/NinjaTrader.AddOn.StreamDeck` **et** le build `Atas.Strategy.TradeDeck` —
+  `NinjaTrader.Scripts` ne le valide pas et laisserait croire qu'il l'a fait.
   `JournalSeal.cs` a une contrainte de plus : sa forme canonique doit rester identique **au
   caractère près** à `deck-host/src/seal.ts` et à `Bitlearn/lib/tradeDeck/integrity.js`, faute de
   quoi plus rien ne scelle — silencieusement, puisque ce côté-ci croit toujours signer correctement.
