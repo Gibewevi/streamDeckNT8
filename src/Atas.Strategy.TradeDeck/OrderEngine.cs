@@ -177,6 +177,237 @@ internal sealed class OrderEngine
     }
 
     /// <summary>
+    /// Closes the position on the selected instrument with an opposite market order.
+    ///
+    /// An explicit order rather than Connector.ClosePositionAsync, and for the same reason the
+    /// trading manager's SetStopLoss is avoided: what the deck aims at must never depend on what a
+    /// helper decides to look at. The order carries the deck's portfolio and security, and its size
+    /// is the position's own — nothing is inferred.
+    ///
+    /// Idempotent by design: flat means success with nothing sent. A trader pressing Flatten twice
+    /// must not open a short.
+    /// </summary>
+    public BridgeMessage Flatten(BridgeMessage cmd)
+    {
+        var ctx = Resolve(cmd);
+        if (ctx.Error != null) return ctx.Error;
+
+        var name = ContextResolver.InstrumentName(ctx.Security);
+        var position = _resolver.FindPosition(ctx.Portfolio, ctx.Security);
+
+        if (position == null)
+        {
+            return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+            {
+                positionsFlattened = 0,
+                message = $"No open position for {name}",
+            });
+        }
+
+        var quantity = Math.Abs(position.Volume);
+        var direction = position.Volume > 0m ? OrderDirections.Sell : OrderDirections.Buy;
+
+        var order = NewOrder(ctx, direction, OrderTypes.Market, quantity, DeckOrderComment + "_Flatten");
+        var failure = Submit(cmd, order);
+        if (failure != null) return failure;
+
+        SdLog.Event("Position", "[REQ:{0}] Flatten {1} on {2} — {3} {4}",
+            cmd.RequestId, name, ctx.Portfolio!.AccountID, direction, quantity);
+
+        return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+        {
+            positionsFlattened = 1,
+            message = $"Flatten {name} submitted",
+        });
+    }
+
+    /// <summary>
+    /// Closes EVERY position on the account and cancels every working order on it.
+    ///
+    /// Distinct from Flatten, which only touches the selected instrument. This one backs the
+    /// automatic liquidation on daily loss, and there the ACCOUNT is the unit that matters: the
+    /// limit is computed on account P&amp;L, so announcing "the day is over" while a position stays
+    /// open on an instrument the trader was not watching would be worse than doing nothing — he
+    /// would believe he was flat.
+    ///
+    /// ORDERS ARE CANCELLED FIRST, and account-wide, including on instruments carrying no position:
+    /// a resting entry that fills afterwards would reopen exactly the exposure just closed.
+    ///
+    /// Never reachable from a key press. Its only caller is the safety macro, via the bridge.
+    /// </summary>
+    public BridgeMessage FlattenAccount(BridgeMessage cmd)
+    {
+        var accountName = cmd.GetString("account");
+        if (string.IsNullOrWhiteSpace(accountName))
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "CONTEXT_MISSING", "Account name is required.");
+
+        var portfolio = _resolver.FindPortfolio(accountName);
+        if (portfolio == null)
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "ACCOUNT_NOT_FOUND", $"Account '{accountName}' not found.");
+
+        var orders = _resolver.FindAllActiveOrders(portfolio);
+        var cancelFailure = orders.Count > 0 ? Cancel(cmd, orders) : null;
+        if (cancelFailure != null) return cancelFailure;
+
+        var flattened = 0;
+        // FindAllPositions, NOT a raw connector: the portfolio can live on any connector the registry
+        // aggregates (task 3), and in degraded mode this call transparently falls back to the
+        // chart's own TradingManager.Position — no branch needed here for that case.
+        var positions = _resolver.FindAllPositions(portfolio);
+        foreach (var position in positions)
+        {
+            if (position == null || position.Volume == 0m) continue;
+            if (position.Security == null) continue;
+
+            var ctx = new TradingContext { Portfolio = portfolio, Security = position.Security };
+            var direction = position.Volume > 0m ? OrderDirections.Sell : OrderDirections.Buy;
+            var order = NewOrder(ctx, direction, OrderTypes.Market, Math.Abs(position.Volume),
+                                 DeckOrderComment + "_Liquidate");
+
+            var failure = Submit(cmd, order);
+            if (failure != null)
+            {
+                // The worst outcome this whole feature can produce: the trader is told the day
+                // is closed while a position is still live. Reported as a failure so the deck
+                // turns red instead of pretending it worked.
+                SdLog.Fail("Safety", null, "[REQ:{0}] ACCOUNT LIQUIDATION FAILED on {1} for {2}",
+                    cmd.RequestId, accountName, ContextResolver.InstrumentName(position.Security));
+                return failure;
+            }
+
+            flattened++;
+        }
+
+        SdLog.EventWarn("Safety", "[REQ:{0}] ACCOUNT LIQUIDATION on {1} — {2} order(s) cancelled, {3} position(s) flattened",
+            cmd.RequestId, accountName, orders.Count, flattened);
+
+        return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+        {
+            ordersCancelled = orders.Count,
+            positionsFlattened = flattened,
+            message = $"Account {accountName} liquidated: {flattened} position(s), {orders.Count} order(s)",
+        });
+    }
+
+    /// <summary>
+    /// Cancels the working orders of the instrument WITHOUT touching the position.
+    /// Idempotent: success with ordersCancelled = 0 when there is nothing to cancel.
+    /// </summary>
+    public BridgeMessage CancelWorkingOrders(BridgeMessage cmd)
+    {
+        var ctx = Resolve(cmd);
+        if (ctx.Error != null) return ctx.Error;
+
+        var name = ContextResolver.InstrumentName(ctx.Security);
+        var orders = _resolver.FindActiveOrders(ctx.Portfolio, ctx.Security);
+
+        if (orders.Count == 0)
+        {
+            return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+            {
+                ordersCancelled = 0,
+                message = $"No working order for {name}",
+            });
+        }
+
+        var failure = Cancel(cmd, orders);
+        if (failure != null) return failure;
+
+        SdLog.Event("Order", "[REQ:{0}] Cancelled {1} working order(s) for {2} on {3} (position untouched)",
+            cmd.RequestId, orders.Count, name, ctx.Portfolio!.AccountID);
+
+        return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+        {
+            ordersCancelled = orders.Count,
+            message = $"Cancelled {orders.Count} order(s) for {name}",
+        });
+    }
+
+    /// <summary>
+    /// "Close All": cancels every pending order AND closes the position. Kept deliberately
+    /// destructive — this backs the Close All key.
+    ///
+    /// Cancel first, then flatten. The other order would leave a resting entry able to reopen the
+    /// position the flatten had just closed.
+    /// </summary>
+    public BridgeMessage CancelOrders(BridgeMessage cmd)
+    {
+        var ctx = Resolve(cmd);
+        if (ctx.Error != null) return ctx.Error;
+
+        var name = ContextResolver.InstrumentName(ctx.Security);
+        var orders = _resolver.FindActiveOrders(ctx.Portfolio, ctx.Security);
+
+        if (orders.Count > 0)
+        {
+            var cancelFailure = Cancel(cmd, orders);
+            if (cancelFailure != null) return cancelFailure;
+        }
+
+        var flatten = Flatten(cmd);
+        if (flatten.Error != null) return flatten;
+
+        SdLog.Event("Position", "[REQ:{0}] Close All on {1} — {2} order(s) cancelled, position closed",
+            cmd.RequestId, name, orders.Count);
+
+        return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+        {
+            ordersCancelled = orders.Count,
+            message = $"Cancelled all orders and closed position for {name}",
+        });
+    }
+
+    /// <summary>
+    /// Reverses the position: cancel the protections, then ONE market order of twice the size.
+    ///
+    /// The protective orders of the position being closed go first. Submitting the reversal alone
+    /// leaves them working, and a stop from the old long is a SELL: after the reversal it would ADD
+    /// to the new short instead of protecting it.
+    ///
+    /// One order of 2× rather than a close followed by an open: two orders leave a window in which
+    /// the account is flat and the second one has not landed, and a partial fill in that window
+    /// leaves a size nobody chose.
+    /// </summary>
+    public BridgeMessage Reverse(BridgeMessage cmd)
+    {
+        var ctx = Resolve(cmd);
+        if (ctx.Error != null) return ctx.Error;
+
+        var position = _resolver.FindPosition(ctx.Portfolio, ctx.Security);
+        if (position == null)
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_POSITION", "No open position to reverse.");
+
+        var currentQuantity = Math.Abs(position.Volume);
+        var wasLong = position.Volume > 0m;
+
+        var stale = _resolver.FindActiveOrders(ctx.Portfolio, ctx.Security);
+        if (stale.Count > 0)
+        {
+            var cancelFailure = Cancel(cmd, stale);
+            if (cancelFailure != null) return cancelFailure;
+            SdLog.Event("Order", "[REQ:{0}] Reverse: cancelled {1} working order(s) before reversing",
+                cmd.RequestId, stale.Count);
+        }
+
+        var direction = wasLong ? OrderDirections.Sell : OrderDirections.Buy;
+        var order = NewOrder(ctx, direction, OrderTypes.Market, currentQuantity * 2m, DeckOrderComment + "_Reverse");
+
+        var failure = Submit(cmd, order);
+        if (failure != null) return failure;
+
+        SdLog.Event("Position", "[REQ:{0}] Reverse {1} {2} → {3} {4}",
+            cmd.RequestId, wasLong ? "Long" : "Short", currentQuantity, direction, currentQuantity * 2m);
+
+        return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
+        {
+            ordersCancelled = stale.Count,
+            message = stale.Count > 0
+                ? $"Reverse from {(wasLong ? "Long" : "Short")} {currentQuantity} → {direction} {currentQuantity * 2m} ({stale.Count} order(s) cancelled)"
+                : $"Reverse from {(wasLong ? "Long" : "Short")} {currentQuantity} → {direction} {currentQuantity * 2m}",
+        });
+    }
+
+    /// <summary>
     /// Builds an order carrying the DECK's portfolio and security, never the chart's.
     /// </summary>
     public Order NewOrder(TradingContext ctx, OrderDirections direction, OrderTypes type,

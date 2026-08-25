@@ -30,6 +30,12 @@ internal sealed class CommandDispatcher
                 "sellMarket" => _engine.SellMarket(cmd),
                 "buyLimit" => _engine.BuyLimit(cmd),
                 "sellLimit" => _engine.SellLimit(cmd),
+                "flatten" => _engine.Flatten(cmd),
+                // No key produces this action: the safety macro is its only emitter.
+                "flattenAccount" => _engine.FlattenAccount(cmd),
+                "cancelWorkingOrders" => _engine.CancelWorkingOrders(cmd),
+                "cancelOrders" => _engine.CancelOrders(cmd),
+                "reverse" => _engine.Reverse(cmd),
                 _ => BridgeMessage.Failure(cmd.RequestId, cmd.Action, "UNSUPPORTED_ACTION",
                          $"Action '{cmd.Action}' is not implemented yet by the ATAS strategy."),
             };
