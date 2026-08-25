@@ -5368,7 +5368,7 @@ d'autant qu'ici on tourne dans le fil d'événements du connecteur.
 - Produit : `ExecutionRecorder` — `ExecutionRecorder(IOrderGateway gateway, string? directory = null)`,
   `void Record(MyTrade trade)`, `void Dispose()`.
 
-- [ ] **Étape 1 : écrire l'enregistreur**
+- [x] **Étape 1 : écrire l'enregistreur**
 
 Créer `src/Atas.Strategy.TradeDeck/ExecutionRecorder.cs` :
 
@@ -5734,7 +5734,7 @@ internal sealed class ExecutionRecorder : IDisposable
 }
 ```
 
-- [ ] **Étape 2 : brancher la source des exécutions**
+- [x] **Étape 2 : brancher la source des exécutions**
 
 Dans `OrderMonitor.cs`, ajouter le champ et le paramètre :
 
@@ -5776,7 +5776,7 @@ et le gestionnaire :
         });
 ```
 
-- [ ] **Étape 3 : créer l'enregistreur dans la stratégie**
+- [x] **Étape 3 : créer l'enregistreur dans la stratégie**
 
 Dans `TradeDeckStrategy.cs`, ajouter `private ExecutionRecorder? _recorder;`, et dans `OnStarted()`,
 **avant** la création du moniteur :
@@ -5797,7 +5797,7 @@ Dans `OnStopping()`, **après** la libération du moniteur :
 
 et dans `OnStopped()` : `_recorder = null;`.
 
-- [ ] **Étape 4 : compiler**
+- [x] **Étape 4 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -5852,7 +5852,7 @@ Attendu, ligne par ligne :
    refus** côté Bitlearn. C'est ce qui prouve que le deck-host lit ce spool **sans modification** —
    l'objet de toute la tâche.
 
-- [ ] **Étape 6 : committer**
+- [x] **Étape 6 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
