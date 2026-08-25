@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 
+using ATAS.DataFeedsCore;
 using ATAS.Indicators;
 using ATAS.Strategies.Chart;
 
@@ -24,7 +25,7 @@ namespace TradeDeck.Atas.Strategy;
 [DisplayName("TradeDeck")]
 [Display(Name = "TradeDeck",
     Description = "Surface de controle Stream Deck : execute les commandes du deck via le bridge local.")]
-public class TradeDeckStrategy : ChartStrategy
+public class TradeDeckStrategy : ChartStrategy, IOrderGateway
 {
     private const string BridgeUrl = "ws://127.0.0.1:8219";
     private const int ReconnectDelayMs = 3000;
@@ -34,6 +35,18 @@ public class TradeDeckStrategy : ChartStrategy
     private ConnectorRegistry? _registry;
     private ContextResolver? _resolver;
     private StatePublisher? _publisher;
+
+    private OrderEngine? _engine;
+    private CommandDispatcher? _dispatcher;
+    private OrderMonitor? _monitor;
+
+    /// <summary>
+    /// Keeps the order monitor's connector subscriptions in step with the registry, at the same
+    /// cadence as the state publisher. A connector can connect or disconnect mid-session — see
+    /// OrderMonitor.Refresh — and the only way to notice is to ask again periodically; there is no
+    /// "connector list changed" event to subscribe to instead.
+    /// </summary>
+    private System.Threading.Timer? _connectorRefreshTimer;
 
     private const int StateIntervalMs = 500;
 
@@ -77,11 +90,32 @@ public class TradeDeckStrategy : ChartStrategy
             // delegate) when the registry cannot be reached.
             _registry = new ConnectorRegistry();
             _resolver = new ContextResolver(_registry, () => TradingManager);
+
+            _engine = new OrderEngine(_resolver, this);
+            _dispatcher = new CommandDispatcher(_engine);
+            _monitor = new OrderMonitor(_bridge);
+
             _publisher = new StatePublisher(_resolver, _bridge, StateIntervalMs);
             // Empty instrument on purpose: a hardcoded contract goes stale and would make the deck
             // show — and trade — something the trader never picked. The bridge replays its
             // selection on every connection.
             _publisher.Start(_resolver.GetAccountNames().FirstOrDefault() ?? string.Empty, string.Empty);
+
+            // Fills and cancellations refresh the deck on the spot instead of waiting for the next
+            // publish tick. Set here rather than injected so the monitor keeps no reference back to
+            // the publisher that owns it.
+            _monitor.StateChanged = _publisher.PublishNow;
+
+            // NEVER ChartStrategy.Connector (always null, confirmed by measurement — task 3). The
+            // monitor's subscriptions are reconciled against the registry's CURRENT connector list on
+            // the same cadence as the state publisher: a connector can appear mid-session (the
+            // Rithmic connector in the 24/08 field trial connected after the chart had already
+            // started), and there is no event to learn that from — only asking again.
+            _connectorRefreshTimer = new System.Threading.Timer(_ =>
+            {
+                try { _monitor?.Refresh(_resolver?.Connectors ?? Array.Empty<IDataFeedConnector>()); }
+                catch (Exception ex) { SdLog.Fail("Session", ex, "Order monitor connector refresh failed"); }
+            }, null, 0, StateIntervalMs);
 
             SdLog.Event("Session", "Strategy started — bridge={0}", BridgeUrl);
         }
@@ -112,6 +146,18 @@ public class TradeDeckStrategy : ChartStrategy
         // rather than assume OnStopping is always the one that will; Dispose is idempotent, so
         // whichever path runs first does the real work and the other is a no-op — the alternative
         // is a live 500ms timer leaked per chart reopen that no trader could ever diagnose.
+        //
+        // The connector refresh timer and the order monitor follow the same defensive logic, for
+        // the same reason: left running past a suspend, the timer would keep firing every 500ms
+        // forever (one more leaked timer per chart reopen), calling StateChanged — which points at
+        // the just-disposed publisher's PublishNow — on every connector event the monitor is still
+        // subscribed to.
+        try { _connectorRefreshTimer?.Dispose(); _connectorRefreshTimer = null; }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the connector refresh timer on suspend"); }
+
+        try { _monitor?.Dispose(); }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while detaching the order monitor on suspend"); }
+
         try { _publisher?.Dispose(); }
         catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the state publisher on suspend"); }
 
@@ -131,6 +177,11 @@ public class TradeDeckStrategy : ChartStrategy
     /// </summary>
     protected override void OnStopping()
     {
+        try { _connectorRefreshTimer?.Dispose(); _connectorRefreshTimer = null; }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the connector refresh timer"); }
+        try { _monitor?.Dispose(); }
+        catch (Exception ex) { SdLog.Fail("Session", ex, "Error while detaching the order monitor"); }
+
         // Before the bridge client, which it publishes through: stopping the socket first would
         // leave a publish in flight writing to a disposed client.
         try { _publisher?.Dispose(); }
@@ -157,9 +208,17 @@ public class TradeDeckStrategy : ChartStrategy
             // every path (e.g. after OnSuspended). Dispose is idempotent, so calling it again here
             // costs nothing on the normal path and closes the gap on any path that skips OnStopping —
             // nulling the field without disposing would otherwise leak the 500ms timer.
+            try { _connectorRefreshTimer?.Dispose(); }
+            catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the connector refresh timer during shutdown"); }
+            try { _monitor?.Dispose(); }
+            catch (Exception ex) { SdLog.Fail("Session", ex, "Error while detaching the order monitor during shutdown"); }
             try { _publisher?.Dispose(); }
             catch (Exception ex) { SdLog.Fail("Session", ex, "Error while stopping the state publisher during shutdown"); }
 
+            _connectorRefreshTimer = null;
+            _monitor = null;
+            _dispatcher = null;
+            _engine = null;
             _publisher = null;
             _resolver = null;
             _registry = null;
@@ -194,13 +253,14 @@ public class TradeDeckStrategy : ChartStrategy
 
         var response = message.Action switch
         {
+            _ when CommandDispatcher.Handles(message.Action) && _dispatcher != null => _dispatcher.Dispatch(message),
             "setAccount" or "setInstrument" => HandleTracking(message),
             // Out of scope, and answered honestly rather than with a comfortable lie. The bridge
             // FORCES both on every add-on connection; replying "success" would show the trader a
             // copier that mirrors nothing and a trend rule that judges nothing.
             "setCopierConfig" or "copierPanic" or "configureTrend" => Unsupported(message),
             _ => BridgeMessage.Failure(message.RequestId, message.Action,
-                     "UNSUPPORTED_ACTION", $"Action '{message.Action}' is not supported yet by the ATAS strategy."),
+                     "UNSUPPORTED_ACTION", $"Action '{message.Action}' is not supported by the ATAS strategy."),
         };
 
         LogOutcome(message, response, startedAt);
@@ -275,5 +335,34 @@ public class TradeDeckStrategy : ChartStrategy
         }
 
         SdLog.Event("Command", "[REQ:{0}] {1} completed ({2}ms)", request.RequestId ?? "n/a", request.Action, elapsedMs);
+    }
+
+    // --- IOrderGateway ---------------------------------------------------------------
+    //
+    // The three verbs come from ChartStrategy itself, which is the documented strategy API and takes
+    // the order and nothing else. The two classifications only ITradingManager can make, and it is a
+    // direct property of Indicator — ATAS's own indicators write TradingManager.Portfolio just like
+    // this, with no detour through DataProvider.
+
+    void IOrderGateway.Open(Order order) => OpenOrder(order);
+
+    void IOrderGateway.Cancel(Order order) => CancelOrder(order);
+
+    void IOrderGateway.Modify(Order oldOrder, Order newOrder) => ModifyOrder(oldOrder, newOrder);
+
+    /// <summary>
+    /// Classifies an order the deck did not place. Never throws: the caller is the journal, and a
+    /// classification it could not make must cost a field, never the line.
+    /// </summary>
+    bool IOrderGateway.IsStopLossOrder(Order order)
+    {
+        try { return TradingManager?.IsStopLossOrder(order) == true; }
+        catch { return false; }
+    }
+
+    bool IOrderGateway.IsTakeProfitOrder(Order order)
+    {
+        try { return TradingManager?.IsTakeProfitOrder(order) == true; }
+        catch { return false; }
     }
 }
