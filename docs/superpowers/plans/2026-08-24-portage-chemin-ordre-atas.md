@@ -4858,7 +4858,7 @@ refuser les commandes venues du deck, elle, quel que soit le mode) reste le seul
   `void SetTrackedAccount(string account)`,
   `const string OutcomeBypassed = "bypassed"`, `const string OutcomeStopped = "stopped"`.
 
-- [ ] **Étape 1 : écrire l'applicateur**
+- [x] **Étape 1 : écrire l'applicateur**
 
 Créer `src/Atas.Strategy.TradeDeck/GuardEnforcer.cs` :
 
@@ -5165,7 +5165,7 @@ internal sealed class GuardEnforcer
 }
 ```
 
-- [ ] **Étape 2 : faire passer chaque ordre par l'applicateur**
+- [x] **Étape 2 : faire passer chaque ordre par l'applicateur**
 
 Dans `OrderMonitor.cs`, ajouter le champ et le paramètre :
 
@@ -5217,7 +5217,7 @@ et le gestionnaire :
         });
 ```
 
-- [ ] **Étape 3 : adopter `setGuardPolicy` dans la stratégie**
+- [x] **Étape 3 : adopter `setGuardPolicy` dans la stratégie**
 
 Dans `TradeDeckStrategy.cs`, ajouter le champ `private GuardEnforcer? _guard;`, le construire dans
 `OnStarted()` **avant** le moniteur :
@@ -5280,7 +5280,7 @@ Enfin, dans `HandleTracking`, après `_publisher.UpdateTracking(...)` :
         _guard?.SetTrackedAccount(_publisher.TrackedAccount);
 ```
 
-- [ ] **Étape 4 : compiler**
+- [x] **Étape 4 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -5323,7 +5323,7 @@ Si l'un de ces deux derniers contrôles échoue, `GrowsExposure` est faux : ne p
    de tâche : c'est la preuve que la dégradation est silencieuse pour ce garde-fou précis, information
    que le trader doit connaître avant de compter dessus en mode dégradé.
 
-- [ ] **Étape 6 : committer**
+- [x] **Étape 6 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
