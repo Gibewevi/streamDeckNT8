@@ -597,24 +597,71 @@ internal sealed class OrderEngine
                 $"Break-even price {bePrice} is on the wrong side of the market ({market}) — the trade is not in profit yet.");
         }
 
+        // The stop EXITS the position, so it goes the opposite way to it.
+        var exit = isLong ? OrderDirections.Sell : OrderDirections.Buy;
+
         var stops = _resolver.FindStopOrders(ctx.Portfolio, ctx.Security);
 
-        if (stops.Count == 0)
+        // REVIEW ROUND 1, FINDING A1 — DIRECTION-BLIND LIST, THE MOST DANGEROUS FINDING IN THIS
+        // PORT SO FAR: FindStopOrders filters by order TYPE only, never by direction (by design —
+        // it also backs StatePublisher's hasStopOrder/stopOrderCount display, at parity with the
+        // NinjaTrader reference; narrowing IT would silently change what the deck shows for a
+        // resting entry order, well beyond this task — see the report). A resting BUY STOP
+        // breakout entry above the market, while long and in profit, is a Stop order and lands in
+        // `stops` untouched. Moving it to bePrice — BELOW the market for a long — makes it
+        // immediately marketable: Break-even, the one key whose entire job is to make the trade
+        // safe, would OPEN a second position at market instead of protecting the first. Filtered
+        // HERE instead, in OrderEngine, on the one list this method actually acts on.
+        var protectiveStops = stops.Where(o => o.Direction == exit).ToList();
+
+        if (protectiveStops.Count == 0)
         {
             var quantity = Math.Abs(position.Volume);
             if (quantity <= 0m)
                 return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_POSITION", "Position quantity is zero — nothing to protect.");
 
-            // The stop EXITS the position, so it goes the opposite way to it.
-            var exit = isLong ? OrderDirections.Sell : OrderDirections.Buy;
             var order = NewOrder(ctx, exit, OrderTypes.Stop, quantity, BreakEvenComment);
             order.TriggerPrice = bePrice;
+
+            // REVIEW ROUND 1, FINDING A4 — this is in the brief too, and the first pass missed it,
+            // same family as A2 below. A StreamDeck_TP target can be left working when its paired
+            // stop is gone (filled, cancelled): submitting this fresh stop unlinked would end the
+            // same way as A2 — the target fills, the trader believes he is flat, and this stop
+            // keeps working until it triggers a reverse entry nobody asked for. Join it to the
+            // working target's OCOGroup when there is one; mint and attempt to push a fresh one
+            // onto the target otherwise. Same "attempted, not guaranteed" honesty as A2: whether
+            // ModifyOrder honours an OCOGroup rewrite on the replacement is UNVERIFIED, so a failed
+            // link attempt is logged rather than left silent.
+            var workingTarget = _resolver.FindTargetOrders(ctx.Portfolio, ctx.Security)
+                .FirstOrDefault(o => o.Direction == exit &&
+                                      string.Equals(o.Comment, BracketTargetComment, StringComparison.OrdinalIgnoreCase));
+
+            if (workingTarget != null)
+            {
+                if (!string.IsNullOrEmpty(workingTarget.OCOGroup))
+                {
+                    order.OCOGroup = workingTarget.OCOGroup;
+                }
+                else
+                {
+                    var oco = Guid.NewGuid().ToString("N");
+                    order.OCOGroup = oco;
+                    var linkFailure = Modify(cmd, workingTarget, updated => updated.OCOGroup = oco);
+                    if (linkFailure != null)
+                    {
+                        SdLog.EventWarn("Protection",
+                            "[REQ:{0}] Break-even stop on {1} could NOT be linked to working target {2}: {3} — the two are NOT OCO-linked; a fill on either leaves the other resting and able to open a reverse entry",
+                            cmd.RequestId, name, workingTarget.Id ?? "?", linkFailure.Error?.Message);
+                    }
+                }
+            }
 
             var failure = Submit(cmd, order);
             if (failure != null) return failure;
 
-            SdLog.Event("Protection", "[REQ:{0}] BE{1}: CREATED protective {2} stop x{3} at {4} (avg entry {5})",
-                cmd.RequestId, offsetTicks != 0 ? "+" + offsetTicks : "", exit, quantity, bePrice, averagePrice);
+            SdLog.Event("Protection", "[REQ:{0}] BE{1}: CREATED protective {2} stop x{3} at {4} (avg entry {5}, oco={6})",
+                cmd.RequestId, offsetTicks != 0 ? "+" + offsetTicks : "", exit, quantity, bePrice, averagePrice,
+                order.OCOGroup ?? "(none)");
 
             return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
             {
@@ -634,7 +681,7 @@ internal sealed class OrderEngine
         // shape as FlattenAccount's best-effort liquidation (REVIEW ROUND 1, FINDING C1).
         var moved = 0;
         var failures = new List<string>();
-        foreach (var stop in stops)
+        foreach (var stop in protectiveStops)
         {
             var failure = Modify(cmd, stop, updated =>
             {
@@ -664,13 +711,13 @@ internal sealed class OrderEngine
         {
             SdLog.Fail("Protection", null,
                 "[REQ:{0}] BE{1}: only {2}/{3} stop(s) moved to {4} (avg entry {5}) — {6}",
-                cmd.RequestId, offsetTicks != 0 ? "+" + offsetTicks : "", moved, stops.Count, bePrice, averagePrice,
+                cmd.RequestId, offsetTicks != 0 ? "+" + offsetTicks : "", moved, protectiveStops.Count, bePrice, averagePrice,
                 string.Join("; ", failures));
 
             // Reported as a real failure with the honest partial count, never as a plain success:
             // leaving even one stop at the old level defeats the whole point of break-even.
             return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "ORDER_REJECTED",
-                $"Break-even: only {moved}/{stops.Count} stop(s) moved to {bePrice} — {string.Join("; ", failures)}",
+                $"Break-even: only {moved}/{protectiveStops.Count} stop(s) moved to {bePrice} — {string.Join("; ", failures)}",
                 new { bePrice, avgPrice = averagePrice, offsetTicks, stopsCreated = 0, stopsModified = moved });
         }
 
@@ -772,16 +819,40 @@ internal sealed class OrderEngine
         var ourTarget = existingTargets.FirstOrDefault(o => string.Equals(o.Comment, BracketTargetComment, StringComparison.OrdinalIgnoreCase));
 
         // Reuse the OCO group of a leg this macro already owns, so the pair survives a scale-in:
-        // a modification cannot rewrite an OCO id, and creating the second leg in a group of its own
-        // would leave the two unlinked. A fresh group when we own neither.
+        // creating the second leg in a group of its own would leave the two unlinked, and a fresh
+        // group is minted only when we own neither leg yet.
+        //
+        // REVIEW ROUND 1, FINDING A2 — CONTRADICTION FIXED: this comment used to also assert "a
+        // modification cannot rewrite an OCO id", twelve lines below the modify closures that both
+        // WRITE `OCOGroup` on the replacement order and call it "the one write that MUST land".
+        // Both cannot be true, and nothing checked which. The honest version: whether
+        // ChartStrategy.ModifyOrder honours an OCOGroup change on the replacement order is
+        // UNVERIFIED — never exercised live. The write below is attempted anyway (best effort is
+        // right here, matching this task's governing rule); see the cross-check after both leg
+        // blocks for how a silent failure to apply it is made detectable instead.
         var oco = !string.IsNullOrEmpty(ourStop?.OCOGroup) ? ourStop!.OCOGroup
                 : !string.IsNullOrEmpty(ourTarget?.OCOGroup) ? ourTarget!.OCOGroup
                 : Guid.NewGuid().ToString("N");
 
-        var stopOutcome = "disabled";
-        var targetOutcome = "disabled";
+        // Nullable: REVIEW ROUND 1, MINOR — docs/protocol.md closes this field to five literal
+        // values (created/modified/kept:foreign/refused:pastMarket/disabled) and a host switches on
+        // it; a sixth, free-form value ("failed:<message>") used to fall through that switch. A
+        // real Submit/Modify rejection has no slot in that enumeration — it did not exist when the
+        // enum was designed, this task is the first caller that can hit it — so that case leaves
+        // the field null (never a made-up sixth string) and carries the real reason in
+        // Error.Message and the log line next to it instead, exactly where a host already looks
+        // once success is false.
+        string? stopOutcome = "disabled";
+        string? targetOutcome = "disabled";
         var placed = 0;
         var refused = 0;
+
+        // The Order actually handed to Submit/Modify for the leg WE placed or repriced this call —
+        // null when the leg was disabled, refused, or left to a foreign protection. Captured so the
+        // A2 cross-check below can compare what both legs ended up carrying without waiting on an
+        // async acknowledgement this fire-and-forget path cannot afford.
+        Order? stopOrderRef = null;
+        Order? targetOrderRef = null;
 
         // BRIEF DEFECT — GOVERNING RULE OF THIS TASK: the plan `return`ed the moment either leg's
         // Submit/Modify failed, which for the STOP block meant the TARGET below was never even
@@ -810,6 +881,7 @@ internal sealed class OrderEngine
             }
             else if (ourStop != null)
             {
+                Order? repriced = null;
                 var failure = Modify(cmd, ourStop, updated =>
                 {
                     var limitOffset = updated.Type == OrderTypes.StopLimit ? updated.Price - updated.TriggerPrice : 0m;
@@ -820,23 +892,25 @@ internal sealed class OrderEngine
                     if (updated.Type == OrderTypes.StopLimit) updated.Price = stopPrice + limitOffset;
 
                     // Explicit, not left to Order.Clone() (UNVERIFIED for OCOGroup/Comment — see
-                    // BreakEven's note above). Forced to `oco` rather than copied from ourStop: this
-                    // is the one write in this method that MUST land, since a stop that keeps its
-                    // own OCOGroup while the target below lands in a different one is not linked at
-                    // all — see the OCO note on this method's own doc comment for what that costs.
+                    // BreakEven's note above). Forced to `oco` rather than copied from ourStop, so a
+                    // stop that lost its own OCOGroup somewhere converges back onto the pair instead
+                    // of staying adrift. See the A2 note on `oco` above for why "MUST land" no
+                    // longer appears here — attempted, not guaranteed; see the cross-check below.
                     updated.OCOGroup = oco;
                     updated.Comment = BracketStopComment;
+                    repriced = updated;
                 });
 
                 if (failure != null)
                 {
-                    stopOutcome = "failed:" + (failure.Error?.Message ?? "unknown");
+                    stopOutcome = null;
                     failed.Add($"stop: {failure.Error?.Message ?? "unknown"}");
                 }
                 else
                 {
                     stopOutcome = "modified";
                     placed++;
+                    stopOrderRef = repriced;
                 }
             }
             else if (existingStops.Count > 0)
@@ -854,13 +928,14 @@ internal sealed class OrderEngine
                 var failure = Submit(cmd, order);
                 if (failure != null)
                 {
-                    stopOutcome = "failed:" + (failure.Error?.Message ?? "unknown");
+                    stopOutcome = null;
                     failed.Add($"stop: {failure.Error?.Message ?? "unknown"}");
                 }
                 else
                 {
                     stopOutcome = "created";
                     placed++;
+                    stopOrderRef = order;
                 }
             }
         }
@@ -882,6 +957,7 @@ internal sealed class OrderEngine
             }
             else if (ourTarget != null)
             {
+                Order? repriced = null;
                 var failure = Modify(cmd, ourTarget, updated =>
                 {
                     updated.Price = targetPrice;
@@ -890,17 +966,19 @@ internal sealed class OrderEngine
                     // See the matching note on the stop leg above — same reasoning, same fields.
                     updated.OCOGroup = oco;
                     updated.Comment = BracketTargetComment;
+                    repriced = updated;
                 });
 
                 if (failure != null)
                 {
-                    targetOutcome = "failed:" + (failure.Error?.Message ?? "unknown");
+                    targetOutcome = null;
                     failed.Add($"target: {failure.Error?.Message ?? "unknown"}");
                 }
                 else
                 {
                     targetOutcome = "modified";
                     placed++;
+                    targetOrderRef = repriced;
                 }
             }
             else if (existingTargets.Count > 0)
@@ -915,15 +993,35 @@ internal sealed class OrderEngine
                 var failure = Submit(cmd, order);
                 if (failure != null)
                 {
-                    targetOutcome = "failed:" + (failure.Error?.Message ?? "unknown");
+                    targetOutcome = null;
                     failed.Add($"target: {failure.Error?.Message ?? "unknown"}");
                 }
                 else
                 {
                     targetOutcome = "created";
                     placed++;
+                    targetOrderRef = order;
                 }
             }
+        }
+
+        // REVIEW ROUND 1, FINDING A2 — DETECTABILITY FOR THE UNVERIFIED OCOGroup WRITE ABOVE: this
+        // cannot confirm what the venue accepted (no synchronous wait is available on this
+        // fire-and-forget path — see the project's own constraints), but it CAN compare, without
+        // blocking, what the two legs we just touched locally carry against each other and against
+        // `oco`. Only checked when both were actually touched THIS call — a lone leg has nothing to
+        // compare against. If they disagree, nothing else will say so before a take profit fills and
+        // leaves an orphan stop working the reverse direction — see this method's own OCO doc
+        // comment for exactly that scenario, and REVIEW ROUND 1's note that the manual recipe's OCO
+        // row only exercises the create/create case, never this modify/modify one.
+        if (stopOrderRef != null && targetOrderRef != null &&
+            (!string.Equals(stopOrderRef.OCOGroup, oco, StringComparison.Ordinal) ||
+             !string.Equals(targetOrderRef.OCOGroup, oco, StringComparison.Ordinal)))
+        {
+            SdLog.EventWarn("Protection",
+                "[REQ:{0}] Bracket OCO link on {1} may not have taken: stop {2} carries OCOGroup='{3}', target {4} carries OCOGroup='{5}', expected '{6}' on both",
+                cmd.RequestId, name, stopOrderRef.Id ?? "?", stopOrderRef.OCOGroup ?? "(none)",
+                targetOrderRef.Id ?? "?", targetOrderRef.OCOGroup ?? "(none)", oco);
         }
 
         if (failed.Count > 0)
@@ -1037,9 +1135,21 @@ internal sealed class OrderEngine
         if (position == null)
             return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_POSITION", "No open position.");
 
-        var orders = stops
+        var isLong = position.Volume > 0m;
+        var protectiveDirection = isLong ? OrderDirections.Sell : OrderDirections.Buy;
+
+        // REVIEW ROUND 1, FINDING A1 — same direction-blind list as BreakEven (see its own note):
+        // FindStopOrders/FindTargetOrders filter by TYPE only. A resting entry order (a Buy Limit
+        // scale-in under the market while long, sitting in FindTargetOrders because it is a Limit)
+        // is not a protection and must never be repriced. Filtered out here, before the loop below
+        // even sees it — which also means it can no longer be counted anywhere as a refusal
+        // (REVIEW ROUND 1, FINDING A3): a good move on the real protection must not report a
+        // failure just because an unrelated entry order was correctly left alone.
+        var orders = (stops
             ? _resolver.FindStopOrders(ctx.Portfolio, ctx.Security)
-            : _resolver.FindTargetOrders(ctx.Portfolio, ctx.Security);
+            : _resolver.FindTargetOrders(ctx.Portfolio, ctx.Security))
+            .Where(o => o.Direction == protectiveDirection)
+            .ToList();
 
         if (orders.Count == 0)
         {
@@ -1055,8 +1165,6 @@ internal sealed class OrderEngine
         var tickSize = ctx.Security!.TickSize;
         if (tickSize <= 0m)
             return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_MARKET_DATA", $"Invalid tick size for {name}.");
-
-        var isLong = position.Volume > 0m;
 
         // BRIEF DEFECT: the plan only ever rejected a resulting price <= 0. It never tested the
         // wrong-side-of-market case that BreakEven and AttachBracket both guard against — and this
