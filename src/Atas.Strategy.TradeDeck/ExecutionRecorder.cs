@@ -35,6 +35,12 @@ namespace TradeDeck.Atas.Strategy;
 /// the host filters on that. Writing a line to the trader's own disk is not transmission, and a
 /// spool that only started once the toggle was flipped would lose the session that made the trader
 /// want the journal in the first place.
+///
+/// FIX ROUND 1: NewMyTrades is now subscribed on EVERY connector the registry aggregates
+/// (OrderMonitor.AttachOne) — that fan-out is task 9's entire point, and it is also what makes two
+/// connector threads able to call <see cref="Record"/> concurrently, which the single-account,
+/// single-connector NinjaTrader reference never had to survive. Every lock in this file exists
+/// because of that fan-out; see <see cref="Write"/> for the one that used to be missing.
 /// </summary>
 internal sealed class ExecutionRecorder : IDisposable
 {
@@ -53,6 +59,13 @@ internal sealed class ExecutionRecorder : IDisposable
     /// </summary>
     private const int MaxSeenExecutions = 4000;
 
+    /// <summary>
+    /// How often a given repeating-warning key is allowed to fire — matches the cadence the
+    /// NinjaTrader reference uses for its own analogous commission warning (WarnIfNoCommission,
+    /// once an hour). See <see cref="ShouldWarn"/>.
+    /// </summary>
+    private static readonly TimeSpan WarnInterval = TimeSpan.FromHours(1);
+
     private readonly object _sync = new();
     private readonly string _directory;
     private readonly IOrderGateway _gateway;
@@ -65,6 +78,16 @@ internal sealed class ExecutionRecorder : IDisposable
     /// </summary>
     private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
     private readonly Queue<string> _seenOrder = new();
+
+    /// <summary>
+    /// Last time each repeating-warning key fired — the shared limiter behind
+    /// <see cref="ShouldWarn"/>. One dictionary, one lock, reused by every warning in this class
+    /// (missing security, missing account, missing point value, zero commission, undecidable
+    /// replay status) rather than each growing its own timestamp field, the way CLAUDE.md's named
+    /// idioms (_lastPnlWarning, _consecutiveSkips) already do one at a time elsewhere.
+    /// </summary>
+    private readonly object _warnLock = new();
+    private readonly Dictionary<string, DateTime> _lastWarnByKey = new(StringComparer.Ordinal);
 
     private StreamWriter? _writer;
     private DateTime _openDate = DateTime.MinValue;
@@ -104,9 +127,29 @@ internal sealed class ExecutionRecorder : IDisposable
             // A REPLAY FILL IS NOT A TRADE. ATAS's Replay mode walks historical data and raises real
             // MyTrade objects; journalling them would send fabricated trades to Bitlearn as if the
             // trader had taken them, inflating — or destroying — statistics nobody could later
-            // explain. Skipped in silence at TRACE: a replay session raises thousands of these.
-            if (trade.IsReplay())
+            // explain.
+            //
+            // FIX ROUND 1, FINDING I3: TryCheckReplay, not a bare trade.IsReplay(). The reviewer
+            // decoded the IL: Extensions.IsReplay(MyTrade) reads trade.Portfolio.IsReplay(), and
+            // Describe below already treats trade.Portfolio as possibly null. A null Portfolio must
+            // therefore read as "cannot tell", never silently as "not a replay" — the opposite
+            // failure mode from every other gap in this class: an incomplete-but-honest line is
+            // recoverable, but a replay fill written to the file as a real trade is not, once
+            // Bitlearn has ingested it.
+            if (!TryCheckReplay(trade, out var isReplay))
             {
+                if (ShouldWarn("Journal:ReplayUnknown"))
+                {
+                    SdLog.EventWarn("Journal",
+                        "Could not determine whether fill {0} came from Replay mode (Portfolio missing, or the check itself faulted) — NOT recorded: writing a possible replay fill as a real trade would be unrecoverable, worse than skipping it",
+                        trade.Id ?? "?");
+                }
+                return;
+            }
+
+            if (isReplay)
+            {
+                // Skipped in silence at TRACE: a replay session raises thousands of these.
                 SdLog.TraceEvent("Journal", "Replay fill ignored — {0}", trade.Id ?? "?");
                 return;
             }
@@ -115,10 +158,43 @@ internal sealed class ExecutionRecorder : IDisposable
 
             var record = Describe(trade);
             Write(record);
+
+            // Reference-ported check (NinjaTrader Services/ExecutionRecorder.cs, WarnIfNoCommission)
+            // — see its own doc for the incident this guards against. Run after Write, same as the
+            // reference: it never gates whether the line is written, only whether a warning follows.
+            WarnIfNoCommission(trade, ResolveAccount(trade));
         }
         catch (Exception ex)
         {
             SdLog.Fail("Journal", ex, "Execution not recorded");
+        }
+    }
+
+    /// <summary>
+    /// Same defensive shape as ContextResolver.SafeIsReplay — but DELIBERATELY DIFFERENT failure
+    /// semantics, which is why this is its own copy rather than a shared call (that one is also
+    /// private to its class). ContextResolver's version fails OPEN (false = "not replay") because a
+    /// false negative there costs one extra check on the next 500ms tick. Here a false negative
+    /// costs a fabricated trade permanently written into the trader's P&amp;L history, so this one
+    /// fails CLOSED: <paramref name="isReplay"/> is only meaningful when the return value is true.
+    /// </summary>
+    private static bool TryCheckReplay(MyTrade trade, out bool isReplay)
+    {
+        isReplay = false;
+        try
+        {
+            // Extensions.IsReplay(MyTrade) is trade.Portfolio.IsReplay() under the hood (reviewer's
+            // IL read) — a null Portfolio would NRE inside it. Checked here explicitly rather than
+            // relying on the catch below so the "cannot tell" path is a deliberate branch, not an
+            // incidental one.
+            if (trade.Portfolio == null) return false;
+            isReplay = trade.IsReplay();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            SdLog.TraceEvent("Journal", "IsReplay() faulted: {0}", ex.GetType().Name);
+            return false;
         }
     }
 
@@ -142,6 +218,10 @@ internal sealed class ExecutionRecorder : IDisposable
         }
     }
 
+    /// <summary>The account this fill belongs to, or empty when neither source knows it.</summary>
+    private static string ResolveAccount(MyTrade trade) =>
+        trade.AccountID ?? trade.Portfolio?.AccountID ?? string.Empty;
+
     /// <summary>
     /// Flattens a fill into the record the server expects.
     ///
@@ -152,6 +232,19 @@ internal sealed class ExecutionRecorder : IDisposable
     private Dictionary<string, object> Describe(MyTrade trade)
     {
         var security = trade.Security;
+        var account = ResolveAccount(trade);
+
+        // FIX ROUND 1, FINDING I1 (second half). An empty account is not merely a cosmetic gap:
+        // deck-host/src/uploader.ts:239 drops a journal line whose account is empty from the batch
+        // it uploads WHILE STILL ADVANCING ITS CURSOR PAST IT — so this fill is not retried later,
+        // it is gone the moment the host next runs. This is the only place a reader of this file
+        // will ever meet that fact, so it is spelled out here rather than assumed known.
+        if (string.IsNullOrEmpty(account) && ShouldWarn("Journal:NoAccount"))
+        {
+            SdLog.EventWarn("Journal",
+                "No account on fill {0} — the deck-host silently drops a journal line with an empty account while advancing its upload cursor past it, so this fill will be lost permanently, not merely retried",
+                trade.Id ?? "?");
+        }
 
         // Dictionary<string, object>, NOT <string, object?>: generics are invariant, and
         // JournalSeal.Stamp — the shared file — takes the non-nullable form. A null value still
@@ -161,7 +254,7 @@ internal sealed class ExecutionRecorder : IDisposable
             ["kind"] = "exec",
             ["execId"] = trade.Id ?? string.Empty,
             ["orderId"] = trade.OrderId ?? string.Empty,
-            ["account"] = trade.AccountID ?? trade.Portfolio?.AccountID ?? string.Empty,
+            ["account"] = account,
             // Buy means the fill took a long position, Sell a short. The server reads
             // "Long"/"Short", as the NinjaTrader add-on has always written it — mapping here keeps
             // one vocabulary across both platforms rather than teaching the server a second one.
@@ -169,7 +262,8 @@ internal sealed class ExecutionRecorder : IDisposable
             ["price"] = trade.Price,
             ["quantity"] = trade.Volume,
             // Nullable, exactly as today: a commission the broker never reported must stay
-            // distinguishable from a commission of zero.
+            // distinguishable from a commission of zero. See WarnIfNoCommission for what a reported
+            // zero specifically means.
             ["commission"] = trade.Commission,
             ["orderName"] = OrderName(trade),
         };
@@ -192,9 +286,24 @@ internal sealed class ExecutionRecorder : IDisposable
             // Omitted rather than faked when it cannot be derived. An absent field is read as
             // unknown; a fabricated 1.0 would price a MNQ trade at a fiftieth of its value.
             var pointValue = ContextResolver.PointValue(security);
-            if (pointValue > 0m) record["pointValue"] = pointValue;
-            else SdLog.EventWarn("Journal", "No point value for {0} (tickSize={1}, tickCost={2}) — the field is omitted",
-                ContextResolver.InstrumentName(security), security.TickSize, security.TickCost);
+            if (pointValue > 0m)
+            {
+                record["pointValue"] = pointValue;
+            }
+            else if (ShouldWarn("Journal:NoPointValue"))
+            {
+                SdLog.EventWarn("Journal", "No point value for {0} (tickSize={1}, tickCost={2}) — the field is omitted",
+                    ContextResolver.InstrumentName(security), security.TickSize, security.TickCost);
+            }
+        }
+        else if (ShouldWarn("Journal:NoSecurity"))
+        {
+            // FIX ROUND 1, FINDING I1 (first half). This branch used to not exist at all: instrument,
+            // tickSize and pointValue were all silently absent with nothing said anywhere. The line
+            // is still written — losing the whole fill would be worse than writing an unpriceable
+            // one — but the gap has to be visible to someone reading the log, not just to the server.
+            SdLog.EventWarn("Journal", "No Security on fill {0} — instrument, tickSize and pointValue are all omitted, the server cannot price this line",
+                trade.Id ?? "?");
         }
 
         // Two timestamps, deliberately. `time` is when the fill happened; `recordedAtUtc` is when we
@@ -266,19 +375,77 @@ internal sealed class ExecutionRecorder : IDisposable
         return string.Empty;
     }
 
+    /// <summary>
+    /// Says out loud that a fill carried a commission reported as EXACTLY zero, because the
+    /// consequence is invisible otherwise: the Bitlearn journal computes net = gross - commission,
+    /// so a zero silently publishes a GROSS P&amp;L that looks perfectly legitimate.
+    ///
+    /// Ported from the NinjaTrader add-on (Services/ExecutionRecorder.cs, WarnIfNoCommission) after
+    /// a named incident there: months of live journals showing P&amp;L before costs, while the
+    /// simulation account — which had a commission template — looked correct and hid the problem.
+    /// Reviewer finding I4: the ATAS port had no equivalent, so a connector reporting Commission as
+    /// 0 instead of null would reproduce that exact incident silently.
+    ///
+    /// A NULL commission is not this case — it already prints distinctly as an empty value on both
+    /// sides of the wire (see the field's own comment in Describe) and needs no separate warning.
+    /// Warning, not error: the fill itself is still recorded correctly, and a trader who genuinely
+    /// pays no commission is entitled to a quiet log.
+    /// </summary>
+    private void WarnIfNoCommission(MyTrade trade, string account)
+    {
+        if (trade.Commission != 0m) return; // null (not reported) or a genuine non-zero value
+        if (!ShouldWarn("Journal:NoCommission")) return;
+
+        SdLog.EventWarn("Journal",
+            "Commission reported as exactly zero on a fill for {0} — verify the connector actually reports it, otherwise the Bitlearn journal publishes P&L GROSS of costs",
+            string.IsNullOrEmpty(account) ? "(unknown account)" : account);
+    }
+
+    /// <summary>
+    /// Rate-limits a repeating warning to once an hour per key.
+    ///
+    /// FIX ROUND 1, MINOR: the point-value warning used to fire on every single fill of a
+    /// mispriced instrument — hundreds a day for an active scalper on one broken symbol. This is
+    /// the one limiter every warning in this class shares (see <see cref="_lastWarnByKey"/>),
+    /// following the same idiom CLAUDE.md names elsewhere (_lastPnlWarning, _consecutiveSkips):
+    /// a condition that persists across many fills must cost one log line, not one per fill.
+    /// </summary>
+    private bool ShouldWarn(string key)
+    {
+        lock (_warnLock)
+        {
+            if (_lastWarnByKey.TryGetValue(key, out var last) && DateTime.UtcNow - last < WarnInterval)
+                return false;
+            _lastWarnByKey[key] = DateTime.UtcNow;
+            return true;
+        }
+    }
+
     private void Write(Dictionary<string, object> record)
     {
-        // Sealed BEFORE serialising: the signed line is the one that reaches the disk, leaving no
-        // window during which the file holds an unsigned record.
-        //
-        // A null commission canonicalises to an empty string on both sides of the wire, which is
-        // what keeps "the broker reported nothing" distinguishable from "the commission was zero".
-        _seal.Stamp(record);
-
-        var line = JsonConvert.SerializeObject(record);
-
         lock (_sync)
         {
+            // FIX ROUND 1, FINDING C1 (critical). Sealing used to happen BEFORE this lock, on the
+            // theory that "sealed before serialising" only needed to precede the write. That was
+            // true for a single-threaded caller, and stopped being true the moment NewMyTrades was
+            // wired to EVERY connector the registry aggregates (task 9's whole point,
+            // OrderMonitor.AttachOne): two connector threads can now both reach Write() at once.
+            // With Stamp() outside the lock, thread A could take seq=N, thread B take seq=N+1
+            // chained on A's still-unwritten signature, and then B could win the race into
+            // EnsureWriter/WriteLine first — the file would then hold seq N+1 before seq N.
+            // JournalSeal's chain is built on the assumption that lines land in the order they were
+            // signed (its own doc: removing a line breaks the NEXT one's signature; reordering does
+            // exactly the same). deck-host/src/uploader.ts reads and ships lines in file order, so a
+            // single crossed pair on a busy multi-account session would silently void the chain for
+            // the rest of that day, with nothing in any log explaining why. Sealing and writing are
+            // now one atomic step under the same lock EnsureWriter already needed.
+            //
+            // A null commission canonicalises to an empty string on both sides of the wire, which is
+            // what keeps "the broker reported nothing" distinguishable from "the commission was zero".
+            _seal.Stamp(record);
+
+            var line = JsonConvert.SerializeObject(record);
+
             var writer = EnsureWriter();
             writer?.WriteLine(line);
         }

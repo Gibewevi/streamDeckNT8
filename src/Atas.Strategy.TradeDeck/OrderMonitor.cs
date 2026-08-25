@@ -377,18 +377,64 @@ internal sealed class OrderMonitor : IDisposable
     /// Task 9's execution journal. Fills reported by the CONNECTOR, never
     /// ChartStrategy.OnNewMyTrade — see the class-level remark on <see cref="AttachOne"/>. The
     /// journal owns its own guard against replay fills and duplicate ids (see
-    /// <see cref="ExecutionRecorder.Record"/>); this handler is only the wire between the platform
-    /// event and that class, and never lets one bad trade in the batch stop the rest — Record
-    /// itself cannot throw, so a foreach here is safe without its own try/catch per iteration.
+    /// <see cref="ExecutionRecorder.Record"/>), which is why <c>Record</c> itself cannot throw —
+    /// but <paramref name="trades"/> and <c>trades</c> below is only borrowed from the connector:
+    /// review round 1, finding I2, corrected a claim that a plain foreach was therefore safe. It
+    /// is not: MoveNext() on a collection the connector is mutating concurrently can throw
+    /// mid-enumeration regardless of what Record does, and an uncaught throw there would abandon
+    /// every remaining fill in the batch silently. <see cref="SafeTrades"/> is what makes the loop
+    /// keep what it already read instead.
     /// </summary>
     private void OnNewMyTrades(IDataFeedConnector connector, IEnumerable<MyTrade> trades) =>
         Safely("Journal", () =>
         {
-            if (_recorder == null) return;
-            foreach (var trade in trades) _recorder.Record(trade);
-            // A fill moved the position: refresh the deck rather than waiting for the next tick.
-            StateChanged?.Invoke();
+            var batch = SafeTrades(trades);
+
+            // Recording is unconditional on every account the platform reports — that breadth is
+            // the whole reason this journal exists (see the class doc on ExecutionRecorder).
+            // Refreshing the DECK is not: every other handler in this class gates StateChanged on
+            // InScope (OnOrderChanged, OnRegisterFailed, OnPositionsChanged is the one deliberate
+            // exception, unscoped because a position move on ANY account still means the picture
+            // this class draws could be stale). A fill on an account the trader is not tracking
+            // must not refresh a key that has nothing to do with it.
+            var trackedFillSeen = false;
+            foreach (var trade in batch)
+            {
+                _recorder?.Record(trade);
+                if (InScopeAccount(trade?.AccountID ?? trade?.Portfolio?.AccountID)) trackedFillSeen = true;
+            }
+
+            // A fill moved the tracked position: refresh the deck rather than waiting for the next
+            // tick.
+            if (trackedFillSeen) StateChanged?.Invoke();
         });
+
+    /// <summary>
+    /// Enumerates a connector's own trade batch defensively.
+    ///
+    /// The connector hands over a live IEnumerable, not a snapshot; if it mutates the underlying
+    /// collection while this class is still walking it, MoveNext() can throw partway through — an
+    /// InvalidOperationException is the common shape, but nothing here assumes which one. Same
+    /// pattern as ContextResolver.SafeOrders: keep whatever was read before the fault rather than
+    /// discard it, and say exactly how many entries were lost so the gap is never silent. Losing an
+    /// EXECUTION this way is worth an EventWarn, not a TraceEvent — unlike an order snapshot, a
+    /// dropped fill is a permanent hole in the journal, not a value re-read on the next tick.
+    /// </summary>
+    private static List<MyTrade> SafeTrades(IEnumerable<MyTrade> trades)
+    {
+        var result = new List<MyTrade>();
+        try
+        {
+            foreach (var trade in trades) result.Add(trade);
+        }
+        catch (Exception ex)
+        {
+            SdLog.EventWarn("Journal",
+                "NewMyTrades batch enumeration faulted after {0} entrie(s) — the rest of this batch is lost: {1}",
+                result.Count, ex.GetType().Name);
+        }
+        return result;
+    }
 
     private void OnRegisterFailed(IDataFeedConnector connector, string message, Order order) =>
         Safely("Order", () =>
@@ -415,15 +461,23 @@ internal sealed class OrderMonitor : IDisposable
     /// True when this order belongs to the account the deck is currently tracking, or when scope
     /// cannot be determined — see the doc on <see cref="TrackedAccountName"/> for why "unknown" means
     /// "let it through" rather than "hide it". Never throws: a scoping check must never be the reason
-    /// a real rejection fails to reach the deck.
+    /// a real rejection fails to reach the deck. Thin wrapper over <see cref="InScopeAccount"/>, which
+    /// task 9 needed a second entry point for — a MyTrade carries its account directly rather than
+    /// through an Order.
     /// </summary>
-    private bool InScope(Order? order)
+    private bool InScope(Order? order) => InScopeAccount(order?.Portfolio?.AccountID);
+
+    /// <summary>
+    /// The account-only core of <see cref="InScope"/> — same fail-open semantics, same "never
+    /// throws" guarantee, generalised so a fill (which carries an account id but not necessarily an
+    /// Order) can be scoped the same way an order rejection is.
+    /// </summary>
+    private bool InScopeAccount(string? accountId)
     {
         try
         {
             var tracked = TrackedAccountName?.Invoke();
             if (string.IsNullOrWhiteSpace(tracked)) return true; // not yet known — fail OPEN
-            var accountId = order?.Portfolio?.AccountID;
             if (string.IsNullOrWhiteSpace(accountId)) return true; // cannot tell — fail OPEN
             return string.Equals(accountId, tracked, StringComparison.OrdinalIgnoreCase);
         }
