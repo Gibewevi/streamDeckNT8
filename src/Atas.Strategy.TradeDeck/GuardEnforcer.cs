@@ -119,8 +119,34 @@ internal sealed class GuardEnforcer
     /// <summary>
     /// Rate-limits the "no stable id" cancel log — see <see cref="_handledByReference"/>'s I2a
     /// note. Read and written only under <see cref="_lock"/>.
+    ///
+    /// RESETS WHEN THE STORM SETTLES (R3 review, I2a): a session-global count that never cleared
+    /// meant that after three id-less cancels ANYWHERE in a session, every later one — a wholly
+    /// unrelated order, hours apart — dropped to TRACE except every fiftieth. Combined with I2b's
+    /// original gap (no _pending entry on this path either) that TRACE line was the ONLY record
+    /// anywhere that a trader's order had been cancelled, at a level the log does not show by
+    /// default. <see cref="_lastNoIdCancelUtc"/> tracks how long ago the last one of these fired;
+    /// a gap past <see cref="NoIdCancelResetWindow"/> means the previous storm has settled, so the
+    /// NEXT id-less cancel — whether truly new or the same churn resuming — is treated as the
+    /// start of a fresh episode and logs at WARN again. Same idiom as this project's own
+    /// StatePublisher._consecutiveSkips (reset on the condition clearing) and the NinjaTrader
+    /// add-on's _lastPnlWarning (time-gated, not count-gated) — chosen over a per-Order-reference
+    /// counter because a churning instance is, by definition, a NEW reference every time (see
+    /// _handledByReference's own doc): keying the throttle by reference would never throttle
+    /// anything, since every occurrence would read as its own "first" one.
     /// </summary>
     private int _noIdCancelCount;
+
+    private DateTime _lastNoIdCancelUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// How long a gap with no id-less cancel counts as "the storm settled" for
+    /// <see cref="_noIdCancelCount"/>. One minute, matching the NinjaTrader add-on's
+    /// _lastPnlWarning gate — long enough that a genuinely continuous churn episode (events
+    /// typically seconds or less apart) never resets mid-storm, short enough that a later,
+    /// unrelated id-less order is never silently folded into a storm that ended minutes earlier.
+    /// </summary>
+    private static readonly TimeSpan NoIdCancelResetWindow = TimeSpan.FromMinutes(1);
 
     /// <summary>The order got through: it filled despite the refusal.</summary>
     public const string OutcomeBypassed = "bypassed";
@@ -276,6 +302,18 @@ internal sealed class GuardEnforcer
                 {
                     _handledByReference.Remove(order);
                     _handled.Add(id);
+
+                    // BUILD THE PENDING ENTRY HERE (R3 review, I2b): this order was already
+                    // cancelled while it was still id-less, and CancelAndReport could not create
+                    // a _pending entry for it back then — no key existed yet. This migration is
+                    // the FIRST moment a key exists. Skipping this step (the R2 fix) moved the
+                    // dedup key but left NEITHER a bypassed NOR a stopped verdict ever reaching
+                    // Bitlearn on the NORMAL "id assigned at acknowledgement" path — worse than
+                    // the duplicate verdict the R1 fix had originally replaced. `violation` here
+                    // is the CURRENT policy's verdict for this order, computed just above; the
+                    // original id-less cancel is not expected to have used a different one, since
+                    // id assignment follows acknowledgement almost immediately.
+                    _pending[id] = new PendingGuardAction(violation);
                     return false;
                 }
 
@@ -299,6 +337,22 @@ internal sealed class GuardEnforcer
     {
         var instrument = ContextResolver.InstrumentName(order.Security);
 
+        // THE PENDING ENTRY IS CREATED BEFORE THE CANCEL REQUEST, NOT AFTER (R3 review, N2). The
+        // R2 version inserted it AFTER Cancel() returned; OrdersCancelFailed can be raised inline
+        // by Cancel() itself, or on a connector thread inside the window between the request and
+        // that insert, and NotifyCancelFailed's own lookup found nothing there — silently dropping
+        // the "our cancel failed" fact. A later hand-cancel of the SAME order would then resolve
+        // through ResolveOutcome as `outcome: "stopped"`: the exact false clean record this class
+        // exists to prevent, and Bitlearn reads "stopped" as the rule having worked. Inserting
+        // first closes the window outright: by the time Cancel() can raise anything, the entry
+        // already exists for NotifyCancelFailed to find. Only done when an id exists to key it by
+        // (R1 review, I2) — see LogCancelRequested / _handledByReference for the id-less case,
+        // which has no key to track a conclusion by regardless of ordering.
+        if (id.Length > 0)
+        {
+            lock (_lock) _pending[id] = new PendingGuardAction(violation);
+        }
+
         try
         {
             _gateway.Cancel(order);
@@ -307,7 +361,12 @@ internal sealed class GuardEnforcer
         catch (Exception ex)
         {
             // A cancel that throws is the one case settled on the spot: the order is alive and the
-            // macro did not stop it.
+            // macro did not stop it — remove the entry just inserted above, since ResolveOutcome has
+            // nothing left to wait for; this call already knows, and reports, the outcome.
+            if (id.Length > 0)
+            {
+                lock (_lock) _pending.Remove(id);
+            }
             SdLog.Fail("Safety", ex, "Could not cancel external order on {0}", instrument);
             Report(order, violation, OutcomeBypassed, ex.Message);
             return false;
@@ -318,18 +377,8 @@ internal sealed class GuardEnforcer
         // requests came back "order is complete" because the market order had already filled — and
         // every one of them had been journalled as cancelled:true, so Bitlearn read the day as 100%
         // rule compliance while every trade carried a bypass. The verdict is whatever state the
-        // order reaches NEXT, and ResolveOutcome sends it.
-        //
-        // ONLY WHEN AN ID EXISTS TO LOOK IT BACK UP BY (R1 review, I2). Without one, ResolveOutcome
-        // itself refuses to act (see its own early return), so there is no key left to track this
-        // particular cancel to a conclusion by — the reference-based dedup above already stops the
-        // retry storm; the eventual bypassed/stopped verdict is simply unavailable for an order ATAS
-        // never gave an id to.
-        if (id.Length > 0)
-        {
-            lock (_lock) _pending[id] = new PendingGuardAction(violation);
-        }
-
+        // order reaches NEXT, and ResolveOutcome sends it — the pending entry inserted above is what
+        // lets it, and NotifyCancelFailed, find their way back to this order.
         return true;
     }
 
@@ -355,7 +404,13 @@ internal sealed class GuardEnforcer
         }
 
         int count;
-        lock (_lock) count = ++_noIdCancelCount;
+        lock (_lock)
+        {
+            var now = DateTime.UtcNow;
+            if (now - _lastNoIdCancelUtc > NoIdCancelResetWindow) _noIdCancelCount = 0;
+            _lastNoIdCancelUtc = now;
+            count = ++_noIdCancelCount;
+        }
 
         if (count <= 3 || count % 50 == 0)
         {
