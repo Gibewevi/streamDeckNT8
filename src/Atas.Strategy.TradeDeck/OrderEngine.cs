@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 
 using ATAS.DataFeedsCore;
 using ATAS.Indicators;
+using Newtonsoft.Json.Linq;
 
 namespace TradeDeck.Atas.Strategy;
 
@@ -142,10 +143,26 @@ internal sealed class OrderEngine
                 $"Invalid tick size for {name} — cannot compute a limit price.");
         }
 
+        // ContextResolver.OrderPrice, NOT MarketPrice: OrderPrice is last-trade-first, matching
+        // NinjaTrader's TradingEngine.GetLastPrice digit for digit (REVIEW ROUND 1, FINDING I1) —
+        // MarketPrice's (bid+ask)/2 is the state block's display price and lands off the tick grid
+        // whenever the spread is an odd number of ticks, the ordinary case on ES/NQ. See both
+        // methods' own notes for why they must stay two different functions.
+        //
         // WITHOUT A FEED THIS IS 0, AND 0 IS NOT A PRICE. A limit computed from it would land a few
         // ticks from zero: a sell limit there fills instantly AT MARKET, which is the opposite of
         // what the trader asked for. The order is refused instead of sent.
-        var market = ContextResolver.MarketPrice(ctx.Security);
+        //
+        // REVIEW ROUND 1, FINDING I3 — WHAT THIS GUARD DOES NOT COVER: it catches ABSENT data
+        // (<= 0), not STALE data. A Security still listed over a weekend or on a halted contract
+        // can keep last Friday's last-trade/bid indefinitely, and that price is > 0 — present,
+        // just meaningless — so it passes this check. Whether ATAS actually zeroes
+        // LastTradePrice/BestBidPrice on unsubscribe (making the stale case routine) or keeps the
+        // last seen value forever (making it the common case on a closed market) is unmeasured
+        // from here; inventing a staleness heuristic without that measurement risks refusing
+        // legitimate orders on a real, if quiet, price. Left as is on purpose — carried to the
+        // next live session as a check on a closed market, not fixed blind.
+        var market = ContextResolver.OrderPrice(ctx.Security);
         if (market <= 0m)
         {
             return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_MARKET_DATA",
@@ -191,7 +208,18 @@ internal sealed class OrderEngine
     {
         var ctx = Resolve(cmd);
         if (ctx.Error != null) return ctx.Error;
+        return FlattenPosition(cmd, ctx);
+    }
 
+    /// <summary>
+    /// Flatten's actual work, taking an already-resolved context. Split out so CancelOrders
+    /// (REVIEW ROUND 1, FINDING minor 2) can reuse the SAME resolution it already has instead of
+    /// calling Resolve a second time — a second Resolve that failed used to report
+    /// INSTRUMENT_NOT_FOUND to the deck AFTER the orders had already been cancelled: a red key
+    /// reading "nothing happened" over a state that had, in fact, changed.
+    /// </summary>
+    private BridgeMessage FlattenPosition(BridgeMessage cmd, TradingContext ctx)
+    {
         var name = ContextResolver.InstrumentName(ctx.Security);
         var position = _resolver.FindPosition(ctx.Portfolio, ctx.Security);
 
@@ -204,6 +232,12 @@ internal sealed class OrderEngine
             });
         }
 
+        // REVIEW ROUND 1, FINDING minor 4 — STALE SIZE, READ ONCE: this size is read here, before
+        // any order goes out. A resting entry that fills between this read and Submit below
+        // changes the real position without this method noticing, and the market order already
+        // sized would then close the WRONG quantity. Inherent to a fire-and-forget submission path
+        // with no synchronous wait available on this path (see Reverse's own note below, which
+        // carries the sharper version of this same risk).
         var quantity = Math.Abs(position.Volume);
         var direction = position.Volume > 0m ? OrderDirections.Sell : OrderDirections.Buy;
 
@@ -245,9 +279,35 @@ internal sealed class OrderEngine
         if (portfolio == null)
             return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "ACCOUNT_NOT_FOUND", $"Account '{accountName}' not found.");
 
+        // REVIEW ROUND 1, FINDING C1 — BEST EFFORT, NOT ATOMIC. NinjaTrader liquidated an account
+        // with two atomic broker calls, Account.Cancel(orders) then Account.Flatten(instruments):
+        // no single sick order could disable the rest of the liquidation. ATAS's strategy API has
+        // no equivalent, and the original port turned that into a loop that ABORTED on the first
+        // throw — one stale order failing to cancel meant zero positions were even attempted. This
+        // command's only caller is the daily-loss safety macro, i.e. the moment things are already
+        // going wrong: a trader relying on it to end the day flat must see everything that COULD
+        // be closed actually get closed, with the failures reported alongside, not a red key that
+        // stopped after the first problem while the rest of the account kept bleeding. Every order
+        // and every position is therefore attempted independently; failures are collected, not
+        // fatal to the ones that come after.
         var orders = _resolver.FindAllActiveOrders(portfolio);
-        var cancelFailure = orders.Count > 0 ? Cancel(cmd, orders) : null;
-        if (cancelFailure != null) return cancelFailure;
+        var ordersCancelled = 0;
+        var errors = new List<string>();
+        foreach (var order in orders)
+        {
+            if (!ContextResolver.IsActive(order)) continue;
+            try
+            {
+                _gateway.Cancel(order);
+                ordersCancelled++;
+            }
+            catch (Exception ex)
+            {
+                SdLog.Fail("Safety", ex, "[REQ:{0}] ACCOUNT LIQUIDATION: failed to cancel one order on {1}",
+                    cmd.RequestId, accountName);
+                errors.Add($"cancel failed: {ex.Message}");
+            }
+        }
 
         var flattened = 0;
         // FindAllPositions, NOT a raw connector: the portfolio can live on any connector the registry
@@ -264,28 +324,45 @@ internal sealed class OrderEngine
             var order = NewOrder(ctx, direction, OrderTypes.Market, Math.Abs(position.Volume),
                                  DeckOrderComment + "_Liquidate");
 
-            var failure = Submit(cmd, order);
-            if (failure != null)
+            try
+            {
+                _gateway.Open(order);
+                flattened++;
+            }
+            catch (Exception ex)
             {
                 // The worst outcome this whole feature can produce: the trader is told the day
-                // is closed while a position is still live. Reported as a failure so the deck
-                // turns red instead of pretending it worked.
-                SdLog.Fail("Safety", null, "[REQ:{0}] ACCOUNT LIQUIDATION FAILED on {1} for {2}",
+                // is closed while a position is still live. Logged and collected, never silently
+                // swallowed — but NOT returned immediately: the remaining positions still get their
+                // own attempt, per the best-effort ruling above.
+                SdLog.Fail("Safety", ex, "[REQ:{0}] ACCOUNT LIQUIDATION FAILED on {1} for {2}",
                     cmd.RequestId, accountName, ContextResolver.InstrumentName(position.Security));
-                return failure;
+                errors.Add($"{ContextResolver.InstrumentName(position.Security)}: {ex.Message}");
             }
+        }
 
-            flattened++;
+        if (errors.Count > 0)
+        {
+            SdLog.Fail("Safety", null,
+                "[REQ:{0}] ACCOUNT LIQUIDATION INCOMPLETE on {1} — {2}/{3} order(s) cancelled, {4} position(s) flattened, {5} error(s)",
+                cmd.RequestId, accountName, ordersCancelled, orders.Count, flattened, errors.Count);
+
+            // Honest refusal, not a plain failure: the deck and the log must agree on what
+            // actually happened, so the real counts travel alongside the error rather than being
+            // discarded the way a bare Failure(...) would discard them.
+            return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "ORDER_REJECTED",
+                $"Account {accountName} liquidation incomplete: {string.Join("; ", errors)}",
+                new { ordersCancelled, positionsFlattened = flattened });
         }
 
         SdLog.EventWarn("Safety", "[REQ:{0}] ACCOUNT LIQUIDATION on {1} — {2} order(s) cancelled, {3} position(s) flattened",
-            cmd.RequestId, accountName, orders.Count, flattened);
+            cmd.RequestId, accountName, ordersCancelled, flattened);
 
         return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
         {
-            ordersCancelled = orders.Count,
+            ordersCancelled,
             positionsFlattened = flattened,
-            message = $"Account {accountName} liquidated: {flattened} position(s), {orders.Count} order(s)",
+            message = $"Account {accountName} liquidated: {flattened} position(s), {ordersCancelled} order(s)",
         });
     }
 
@@ -344,25 +421,54 @@ internal sealed class OrderEngine
             if (cancelFailure != null) return cancelFailure;
         }
 
-        var flatten = Flatten(cmd);
+        // REVIEW ROUND 1, FINDING I2 — WHY NO WAIT HERE: Cancel is fire-and-forget, and a
+        // synchronous wait is forbidden on this path (no blocking a connector event handler,
+        // shared state under a lock, sends fire-and-forget — see the project constraints). Between
+        // the cancel above and the flatten below, a resting ENTRY order that was already working
+        // can still fill: the flatten then closes the position that fill just opened, and the
+        // position this key leaves behind is whatever that fill added, not flat. NinjaTrader closed
+        // this window with one atomic Account.Flatten call; ATAS's strategy API has no equivalent.
+        // Whether this is a routine race or a theoretical one is unmeasured from here — carried
+        // forward as a known residual risk, not silently fixed with a wait this path cannot afford.
+        //
+        // REVIEW ROUND 1, FINDING minor 2 — FlattenPosition(cmd, ctx), NOT Flatten(cmd): reuses the
+        // SAME resolved context instead of resolving a second time. A second Resolve that failed
+        // used to report INSTRUMENT_NOT_FOUND to the deck after the orders above had already been
+        // cancelled — a red key claiming nothing happened over a state that had, in fact, changed.
+        var flatten = FlattenPosition(cmd, ctx);
         if (flatten.Error != null) return flatten;
 
-        SdLog.Event("Position", "[REQ:{0}] Close All on {1} — {2} order(s) cancelled, position closed",
-            cmd.RequestId, name, orders.Count);
+        // REVIEW ROUND 1, FINDING minor 1: the flatten above can legitimately find nothing to
+        // close (success, positionsFlattened: 0) when Close All is pressed with only working
+        // orders and no position — that used to be reported as "position closed" regardless. Read
+        // the real count back out instead of assuming it matched what was requested.
+        var positionsClosed = flatten.Result?["positionsFlattened"]?.Value<int>() ?? 0;
+
+        SdLog.Event("Position", "[REQ:{0}] Close All on {1} — {2} order(s) cancelled, {3} position(s) closed",
+            cmd.RequestId, name, orders.Count, positionsClosed);
 
         return BridgeMessage.Response(cmd.RequestId, cmd.Action, true, new
         {
             ordersCancelled = orders.Count,
-            message = $"Cancelled all orders and closed position for {name}",
+            positionsFlattened = positionsClosed,
+            message = positionsClosed > 0
+                ? $"Cancelled all orders and closed position for {name}"
+                : $"Cancelled {orders.Count} order(s) for {name} — no open position to close",
         });
     }
 
     /// <summary>
-    /// Reverses the position: cancel the protections, then ONE market order of twice the size.
+    /// Reverses the position: cancel its working orders, then ONE market order of twice the size.
     ///
-    /// The protective orders of the position being closed go first. Submitting the reversal alone
-    /// leaves them working, and a stop from the old long is a SELL: after the reversal it would ADD
-    /// to the new short instead of protecting it.
+    /// REVIEW ROUND 1, FINDING minor 3: "cancel the protections" undersold what actually happens
+    /// here — FindActiveOrders is origin-blind by design (see its own doc), so this cancels EVERY
+    /// working order on the pair, including a manual ChartTrader entry sitting on the same
+    /// instrument, not just the stop/target this engine itself attached. That is the safer choice
+    /// and stays as is; the point of this note is that the comment used to claim less than the
+    /// code does, in front of a guard, which is exactly backwards.
+    ///
+    /// The reason to cancel first at all: a stop from the old long is a SELL, and after the
+    /// reversal it would ADD to the new short instead of protecting it.
     ///
     /// One order of 2× rather than a close followed by an open: two orders leave a window in which
     /// the account is flat and the second one has not landed, and a partial fill in that window
@@ -377,6 +483,16 @@ internal sealed class OrderEngine
         if (position == null)
             return BridgeMessage.Failure(cmd.RequestId, cmd.Action, "NO_POSITION", "No open position to reverse.");
 
+        // REVIEW ROUND 1, FINDING minor 4 — STALE SIZE, READ ONCE, WORST CASE OF ALL FIVE VERBS:
+        // this size is read here, before either order below goes out. A resting entry that fills
+        // in the gap between this read and the reversal order changes the real position without
+        // this method noticing — a long 2 that becomes a long 3 from a fill in that window still
+        // submits a SELL 4 sized for a long 2, leaving a LONG 1 behind, not the short the trader
+        // asked for. Reverse is the most destructive verb in this set — it doubles a position
+        // rather than merely closing one — so a stale size here matters more than the same read in
+        // Flatten above. Inherent to a fire-and-forget submission path with no synchronous wait
+        // available (see the cancel-then-reverse note below); not something this method can close
+        // on its own.
         var currentQuantity = Math.Abs(position.Volume);
         var wasLong = position.Volume > 0m;
 
@@ -389,6 +505,15 @@ internal sealed class OrderEngine
                 cmd.RequestId, stale.Count);
         }
 
+        // REVIEW ROUND 1, FINDING I2 — WHY NO WAIT HERE: same fire-and-forget Cancel as
+        // CancelOrders, same reason a synchronous wait is not available on this path. An
+        // un-acknowledged STOP from the position being reversed — a sell stop protecting the old
+        // long — can still trigger after the reversal order below lands: it would ADD to the new
+        // short instead of protecting it, doubling the short instead of the position it was meant
+        // to guard. NinjaTrader closed this window with one atomic Account.Flatten/Change; ATAS's
+        // strategy API has no equivalent, and this project has decided not to fake one with a
+        // blocking wait. Carried forward as a known residual risk — neither live check can catch
+        // it, both need a fast market and a slow cancel ack against a quiet Sim book.
         var direction = wasLong ? OrderDirections.Sell : OrderDirections.Buy;
         var order = NewOrder(ctx, direction, OrderTypes.Market, currentQuantity * 2m, DeckOrderComment + "_Reverse");
 
@@ -502,9 +627,18 @@ internal sealed class OrderEngine
         }
     }
 
-    /// <summary>Rounds to a whole number of ticks — a price off the grid is refused by the venue.</summary>
+    /// <summary>
+    /// Rounds to a whole number of ticks — a price off the grid is refused by the venue.
+    ///
+    /// REVIEW ROUND 1, FINDING I1: MidpointRounding.ToEven (the decimal Math.Round default, so
+    /// left unspecified), not AwayFromZero. NinjaTrader's TradingEngine rounds every price the
+    /// same way — Math.Round(p / tick) * tick, no explicit mode, e.g. TradingEngine.cs:115 (limit
+    /// price), :831, :878, :957 (stop/target moves) — and matching it here is what keeps a price
+    /// computed from identical inputs landing on the identical tick on both platforms, for every
+    /// caller of this shared primitive, not just BuyLimit/SellLimit.
+    /// </summary>
     public static decimal RoundToTick(decimal price, decimal tickSize) =>
-        tickSize <= 0m ? price : Math.Round(price / tickSize, MidpointRounding.AwayFromZero) * tickSize;
+        tickSize <= 0m ? price : Math.Round(price / tickSize) * tickSize;
 
     public readonly struct TradingContext
     {

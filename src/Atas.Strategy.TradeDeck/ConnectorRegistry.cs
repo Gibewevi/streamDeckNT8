@@ -116,8 +116,20 @@ internal sealed class ConnectorRegistry
     /// must act on the one that owns the pair, never on a global connector (there is none).
     ///
     /// Tries the host's own lookup first (measured live: GetConnector(DEMO29ADC) -> SbeConnector,
-    /// exact match), falling back to a linear scan of GetConnectors() so this method stays correct
-    /// even when ITradingCore itself could not be resolved but IConnectorsManager could.
+    /// exact match), falling back to a two-pass scan of GetConnectors() so this method stays
+    /// correct even when ITradingCore itself could not be resolved but IConnectorsManager could.
+    ///
+    /// REVIEW ROUND 1, PROMOTED FINDING — REFERENCE PASS FIRST, ACROSS EVERY CONNECTOR, BEFORE
+    /// ANY NAME MATCH. Fixed the same way FindSecurity's foreign-connector bug was fixed, for the
+    /// same reason: two connectors can each carry a portfolio with the same AccountID (two brokers
+    /// both naming an account "Sim101"), and the old single-pass scan checked reference-or-name
+    /// per connector in enumeration order — whichever connector happened to enumerate first and
+    /// matched by EITHER test won, even if a later connector held the actual reference match for
+    /// this exact Portfolio object. That was harmless while every caller only read through it; task
+    /// 6's FlattenAccount is the first caller that can act on the wrong answer — cancelling orders
+    /// and submitting closing orders against the wrong broker's book. Scanning every connector for
+    /// a reference match first (the unambiguous case) before considering any name match removes the
+    /// enumeration-order dependency entirely.
     /// </summary>
     public IDataFeedConnector? ConnectorFor(Portfolio? portfolio)
     {
@@ -138,11 +150,59 @@ internal sealed class ConnectorRegistry
             catch { /* fall through to the scan below — this path is a shortcut, not load-bearing */ }
         }
 
-        foreach (var connector in GetConnectors())
+        var connectors = GetConnectors();
+        var accountId = portfolio.AccountID;
+
+        foreach (var connector in connectors)
         {
-            if (SafeContainsPortfolio(connector, portfolio)) return connector;
+            if (!SafeContainsPortfolioByReference(connector, portfolio)) continue;
+            // Resolved unambiguously again — clear the latch so a genuine relapse into the
+            // name-only fallback (two connectors actually colliding on this AccountID) is heard
+            // next time instead of being swallowed by a stale latch.
+            if (!string.IsNullOrEmpty(accountId)) ClearNameFallback(accountId);
+            return connector;
         }
+
+        foreach (var connector in connectors)
+        {
+            if (!SafeContainsPortfolioByName(connector, accountId)) continue;
+            if (!string.IsNullOrEmpty(accountId)) ReportNameFallback(accountId);
+            return connector;
+        }
+
         return null;
+    }
+
+    /// <summary>
+    /// Transition latch for "this account resolved to a connector by NAME only, not by Portfolio
+    /// reference" — same PATTERN as ContextResolver's own fallback latch (see FindSecurity's doc),
+    /// kept as its own instance here because ConnectorFor is reached from ContextResolver's hot
+    /// lookups (FindPosition, FindAllPositions, FindActiveOrders, FindAllActiveOrders — all on the
+    /// 500ms publish tick) and this class has no dependency back on ContextResolver to share its
+    /// private latch. A plain rate limit would not be enough here either: two connectors colliding
+    /// on the same AccountID is a steady state for as long as both stay connected, not a one-off
+    /// fault, so "once a minute" would still be ~1440 identical lines/day. Cleared the moment the
+    /// SAME account resolves by reference again, so a genuine relapse is heard rather than
+    /// permanently swallowed by a stale latch.
+    /// </summary>
+    private readonly object _nameFallbackLock = new();
+    private readonly HashSet<string> _activeNameFallbacks = new(StringComparer.OrdinalIgnoreCase);
+
+    private void ReportNameFallback(string accountId)
+    {
+        bool started;
+        lock (_nameFallbackLock) { started = _activeNameFallbacks.Add(accountId); }
+        if (started)
+        {
+            SdLog.EventWarn("Registry",
+                "Account '{0}' resolved to a connector by AccountID match only, not by Portfolio reference — a second connector may carry an account with the same name, and an order for this account could be routed to the wrong broker",
+                accountId);
+        }
+    }
+
+    private void ClearNameFallback(string accountId)
+    {
+        lock (_nameFallbackLock) { _activeNameFallbacks.Remove(accountId); }
     }
 
     /// <summary>
@@ -174,7 +234,8 @@ internal sealed class ConnectorRegistry
         catch { return 0; }
     }
 
-    private static bool SafeContainsPortfolio(IDataFeedConnector connector, Portfolio portfolio)
+    /// <summary>The unambiguous test: is this the SAME Portfolio object, not merely one with the same name.</summary>
+    private static bool SafeContainsPortfolioByReference(IDataFeedConnector connector, Portfolio portfolio)
     {
         try
         {
@@ -183,8 +244,30 @@ internal sealed class ConnectorRegistry
             foreach (var p in portfolios)
             {
                 if (ReferenceEquals(p, portfolio)) return true;
+            }
+            return false;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// The fallback test — only ever reached after every connector has failed the reference test
+    /// above. Two connectors can carry a portfolio with the same AccountID (two brokers both
+    /// naming an account "Sim101"), so a match here is not proof this is the RIGHT connector for
+    /// the given Portfolio object, only that it carries an account with the same name — see
+    /// ConnectorFor's own note on why the reference pass has to run first.
+    /// </summary>
+    private static bool SafeContainsPortfolioByName(IDataFeedConnector connector, string? accountId)
+    {
+        if (string.IsNullOrEmpty(accountId)) return false;
+        try
+        {
+            var portfolios = connector.Portfolios;
+            if (portfolios == null) return false;
+            foreach (var p in portfolios)
+            {
                 if (!string.IsNullOrEmpty(p?.AccountID) &&
-                    string.Equals(p.AccountID, portfolio.AccountID, StringComparison.OrdinalIgnoreCase))
+                    string.Equals(p.AccountID, accountId, StringComparison.OrdinalIgnoreCase))
                     return true;
             }
             return false;

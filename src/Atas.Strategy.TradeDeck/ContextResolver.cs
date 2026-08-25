@@ -659,11 +659,20 @@ internal sealed class ContextResolver
     }
 
     /// <summary>
-    /// The price a deck command computes against, or 0 when there is no feed.
+    /// The DISPLAY price — what the deck's state block reports as instrument.lastPrice, or 0 when
+    /// there is no feed.
     ///
-    /// Mid of best bid and ask, falling back to the last trade. 0 IS A REFUSAL SIGNAL, never a
-    /// price: a limit computed from 0 lands a few ticks from zero, and a sell limit under the market
-    /// fills instantly AT market. Every caller must test it — see NO_MARKET_DATA.
+    /// Mid of best bid and ask, falling back to the last trade. This matches the spec's state
+    /// table, which names BestBid/BestAsk as the source of instrument.lastPrice.
+    ///
+    /// REVIEW ROUND 1, FINDING I1: NOT the price BuyLimit/SellLimit compute against — see
+    /// OrderPrice below for that, and for why the two must stay different. Using this mid for
+    /// order pricing used to place a limit one tick off from NinjaTrader's on every liquid future,
+    /// every press (a one-tick spread — the normal case on ES/NQ — makes the mid land on a half
+    /// tick, which RoundToTick then resolves to a DIFFERENT whole tick than NinjaTrader's
+    /// last-trade-based computation would). 0 IS A REFUSAL SIGNAL here too, never a price: a limit
+    /// computed from 0 lands a few ticks from zero, and a sell limit under the market fills
+    /// instantly AT market. Every caller must test it — see NO_MARKET_DATA.
     /// </summary>
     public static decimal MarketPrice(Security? security)
     {
@@ -677,6 +686,34 @@ internal sealed class ContextResolver
 
         var last = security.LastTradePrice ?? 0m;
         return last > 0m ? last : 0m;
+    }
+
+    /// <summary>
+    /// The ORDER-PRICING price — what BuyLimit/SellLimit compute a limit price against, or 0 when
+    /// there is no feed.
+    ///
+    /// REVIEW ROUND 1, FINDING I1: last trade first, best bid as fallback — deliberately NOT the
+    /// mid MarketPrice above uses, and matching NinjaTrader's TradingEngine.GetLastPrice exactly
+    /// (instrument.MarketData.Last.Price, then instrument.MarketData.Bid.Price, both wrapped in
+    /// their own try/catch there for the same "absent data reads as absent, never throws" reason
+    /// GetInt/GetDouble follow here). This codebase now holds two deliberately different notions
+    /// of "current price" on purpose: MarketPrice feeds the state block's instrument.lastPrice per
+    /// the spec's BestBid/BestAsk table, and this one feeds an actual order. Unifying them would
+    /// move every limit order onto a mid that sits off the tick grid whenever the spread is an odd
+    /// number of ticks — the ordinary one-tick spread on ES and NQ — silently placing the same key
+    /// press one tick away from where NinjaTrader placed it. 0 IS A REFUSAL SIGNAL here too — see
+    /// NO_MARKET_DATA in OrderEngine.SubmitLimit, and its own note on what this guard does and does
+    /// not cover.
+    /// </summary>
+    public static decimal OrderPrice(Security? security)
+    {
+        if (security == null) return 0m;
+
+        var last = security.LastTradePrice ?? 0m;
+        if (last > 0m) return last;
+
+        var bid = security.BestBidPrice;
+        return bid > 0m ? bid : 0m;
     }
 
     public static bool SamePortfolio(Portfolio? a, Portfolio? b)

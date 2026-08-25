@@ -70,6 +70,29 @@ internal sealed class BridgeMessage
         Error = new MessageError { Code = code, Message = message },
     };
 
+    /// <summary>
+    /// Same as Failure, plus caller-supplied fields alongside "success": false — for a refusal
+    /// that still has partial, honest state to report (REVIEW ROUND 1, FINDING C1:
+    /// FlattenAccount attempting every cancel and every position on a best-effort basis needs to
+    /// say how many actually closed, not just that something went wrong).
+    /// </summary>
+    public static BridgeMessage Failure(string? requestId, string action, string code, string message, object extra)
+    {
+        var payload = JObject.FromObject(extra);
+        payload["success"] = false;
+
+        return new BridgeMessage
+        {
+            Type = "response",
+            RequestId = requestId,
+            Source = "addon",
+            Action = action,
+            Timestamp = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+            Result = payload,
+            Error = new MessageError { Code = code, Message = message },
+        };
+    }
+
     public static BridgeMessage Notify(string action, object payload) => new()
     {
         Type = "event",
