@@ -240,7 +240,11 @@ internal sealed class OrderEngine
         if (portfolio == null)
             return Refuse(cmd, "ACCOUNT_NOT_FOUND", $"Account '{accountName}' not found.");
 
-        var security = _resolver.FindSecurity(instrumentName);
+        // Portfolio resolved first, passed into FindSecurity so the lookup is scoped to the
+        // connector that owns THIS account — see ContextResolver.FindSecurity. This is the call
+        // site where a foreign security becomes a rejected order: the resolved Security is set
+        // directly on the Order alongside this Portfolio before ChartStrategy.OpenOrder.
+        var security = _resolver.FindSecurity(instrumentName, portfolio);
         if (security == null)
             return Refuse(cmd, "INSTRUMENT_NOT_FOUND", $"Instrument '{instrumentName}' not found.");
 

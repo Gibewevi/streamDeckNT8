@@ -131,7 +131,10 @@ internal sealed class StatePublisher : IDisposable
             AdoptDefaultAccountIfNeeded(accounts);
 
             var portfolio = _resolver.FindPortfolio(TrackedAccount);
-            var security = _resolver.FindSecurity(TrackedInstrument);
+            // Portfolio is already resolved above, so it is passed through here too — same
+            // connector-scoping as OrderEngine.Resolve, for the same reason: the display should
+            // reflect the tracked account's own connector, not whichever connector enumerates first.
+            var security = _resolver.FindSecurity(TrackedInstrument, portfolio);
 
             var state = BuildState(portfolio, security, accounts);
             var task = _bridge.SendAsync(BridgeMessage.Notify("stateUpdate", state));

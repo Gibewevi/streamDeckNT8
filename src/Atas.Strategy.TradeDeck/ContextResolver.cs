@@ -95,8 +95,9 @@ internal sealed class ContextResolver
 
     /// <summary>
     /// Rate limit for every "could not resolve" warning below: the ambiguous-prefix warning in
-    /// FindSecurity, and the not-found warnings in FindPortfolio, FindSecurity and their
-    /// degraded-mode counterparts.
+    /// FindSecurity, the not-found warnings in FindPortfolio, FindSecurity and their degraded-mode
+    /// counterparts, and the foreign-connector warning FindSecurity logs when a portfolio-scoped
+    /// lookup fell back to the cross-connector search.
     ///
     /// UNGUARDED, THIS IS UNBOUNDED ON THE PUBLISH PATH. StatePublisher.Publish calls
     /// FindSecurity(TrackedInstrument) every 500ms. Unlike the account (auto-corrected to the
@@ -136,7 +137,7 @@ internal sealed class ContextResolver
     }
 
     /// <summary>
-    /// Matches the deck's instrument string against what the registry knows, across every connector.
+    /// Matches the deck's instrument string against what the registry knows.
     ///
     /// Three passes, narrowest first, exact match always wins regardless of which connector or
     /// position in the enumeration it came from — see the ambiguity handling below. The deck sends
@@ -148,8 +149,26 @@ internal sealed class ContextResolver
     /// whichever connector happens to enumerate first is not a stable choice, and nothing would be
     /// in the log to explain where an order went. Instead every prefix match, from every connector,
     /// is collected and the ambiguity is resolved deterministically below.
+    ///
+    /// SCOPED TO THE PORTFOLIO'S OWN CONNECTOR WHEN ONE IS GIVEN. Field trial, 2026-08-25: with no
+    /// scoping this searched every connector and returned the first match, with no relation to the
+    /// account the order was about to be submitted on — an order carried Portfolio from a
+    /// RithmicConnector account (LDE050-SZ976P0C-TEST001) and Security from the SbeConnector purely
+    /// because Sbe happened to enumerate first. It was correctly submitted on that account — "Buy 1
+    /// MESU6 Market submitted on LDE050-SZ976P0C-TEST001" — and the broker answered "This order
+    /// could not be submitted to the infrastructure. Are your ticker symbol and exchange values
+    /// valid?", the signature of a ticker from a different broker. It also explains the earlier log
+    /// line "Ambiguous instrument 'ES' matched 2 securities by prefix — chose ESU6, rejected: ESU6"
+    /// — chosen and rejected shared the same Code because they were the SAME contract seen through
+    /// two different connectors, not a real month ambiguity. Resolving within the portfolio's own
+    /// connector first (see <c>ResolvePrefixAmbiguity</c> for the same-Code collapsing) is the only
+    /// way to guarantee Security and Portfolio agree on which broker they belong to. The unscoped
+    /// fallback below still exists — refusing outright would be a behaviour change beyond this fix,
+    /// and StatePublisher relies on it before an account is even known — but it is now logged when
+    /// it is what actually answers, because from that point on the security may be foreign to the
+    /// account the caller is about to trade with.
     /// </summary>
-    public Security? FindSecurity(string? name)
+    public Security? FindSecurity(string? name, Portfolio? portfolio = null)
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
 
@@ -157,6 +176,55 @@ internal sealed class ContextResolver
         if (connectors.Count == 0) return DegradedSecurity(name);
 
         var wanted = name.Trim();
+
+        if (portfolio != null)
+        {
+            var scoped = _registry.ConnectorFor(portfolio);
+            if (scoped != null)
+            {
+                var scopedResult = SearchConnectors(new[] { scoped }, wanted, name);
+                if (scopedResult != null) return scopedResult;
+            }
+
+            // NOT FOUND ON THE PORTFOLIO'S OWN CONNECTOR IS ROUTINE, NOT AN ERROR. Measured live:
+            // IDataFeedConnector.Securities lists only what the platform currently has SUBSCRIBED,
+            // not the broker's catalogue — MES resolved to nothing and three buyMarket were
+            // correctly refused INSTRUMENT_NOT_FOUND until the trader opened a chart or DOM on MES,
+            // after which the same name resolved and filled. Falling through to the cross-connector
+            // search below is what makes that recover instead of refusing forever; the WARN after it
+            // is what keeps the resulting foreign-security risk visible instead of silent.
+        }
+
+        var result = SearchConnectors(connectors, wanted, name);
+
+        if (result != null)
+        {
+            // Only reached when a portfolio was given AND its own connector could not answer above —
+            // this IS the fallback answering, so the security may belong to a different broker than
+            // `portfolio`. Rate-limited per account+instrument like every other warning here.
+            if (portfolio != null &&
+                ShouldWarn("security-foreign-connector:" + wanted + ":" + portfolio.AccountID))
+            {
+                SdLog.EventWarn("Instrument",
+                    "Instrument '{0}' not found on account '{1}''s own connector — using a cross-connector match instead; the order may carry a security from a different broker than this account",
+                    name, portfolio.AccountID ?? "?");
+            }
+            return result;
+        }
+
+        if (ShouldWarn("instrument-not-found:" + wanted))
+            SdLog.Warn("Instrument not found: {0}", name);
+        return null;
+    }
+
+    /// <summary>
+    /// The narrowest-first, three-pass search itself, run against whichever connector list the
+    /// caller hands it — either one connector (the scoped attempt) or every connector (the
+    /// fallback). Split out of FindSecurity so both attempts share one implementation instead of
+    /// two copies drifting apart.
+    /// </summary>
+    private Security? SearchConnectors(IReadOnlyList<IDataFeedConnector> connectors, string wanted, string originalName)
+    {
         List<Security>? prefixCandidates = null;
 
         foreach (var connector in connectors)
@@ -180,14 +248,34 @@ internal sealed class ContextResolver
             }
         }
 
-        if (prefixCandidates == null || prefixCandidates.Count == 0)
-        {
-            if (ShouldWarn("instrument-not-found:" + wanted))
-                SdLog.Warn("Instrument not found: {0}", name);
-            return null;
-        }
-
+        if (prefixCandidates == null || prefixCandidates.Count == 0) return null;
         if (prefixCandidates.Count == 1) return prefixCandidates[0];
+
+        return ResolvePrefixAmbiguity(prefixCandidates, wanted, originalName);
+    }
+
+    /// <summary>
+    /// Resolves more than one prefix match, deterministically, and explains itself in the log — but
+    /// only when there is a real ambiguity to explain.
+    ///
+    /// COLLAPSE SAME-CODE DUPLICATES BEFORE THE TIE-BREAK. Field trial, 2026-08-25: "Ambiguous
+    /// instrument 'ES' matched 2 securities by prefix — chose ESU6 (front month), rejected: ESU6" —
+    /// chosen and rejected carried the SAME Code. That is not a contract-month ambiguity at all: it
+    /// is the same contract seen through two different connectors (one Sbe, one Rithmic), and the
+    /// Expiration-then-Code tie-break cannot separate two objects that already agree on both, so the
+    /// pick was once again "whichever connector the aggregation enumerated first" — the exact
+    /// non-determinism this whole mechanism exists to eliminate. Grouping by Code first means the
+    /// tie-break only ever compares genuinely different contract months, and the warning below fires
+    /// only when there is one.
+    /// </summary>
+    private Security ResolvePrefixAmbiguity(List<Security> prefixCandidates, string wanted, string originalName)
+    {
+        var byCode = prefixCandidates
+            .GroupBy(s => s.Code, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+
+        if (byCode.Count == 1) return byCode[0];
 
         // AMBIGUOUS PREFIX, RESOLVED DETERMINISTICALLY — AND SAID OUT LOUD. Several contract
         // months can share a root ("MNQ" prefixes both a December and a March contract), and now
@@ -202,17 +290,17 @@ internal sealed class ContextResolver
         // a non-expiring symbol matching by prefix coincidence is the least likely intended match.
         // Code is the final tie-break so the pick is reproducible even if two candidates somehow
         // share an expiration.
-        var chosen = prefixCandidates
+        var chosen = byCode
             .OrderBy(s => s.Expiration == default ? DateTime.MaxValue : s.Expiration)
             .ThenBy(s => s.Code, StringComparer.OrdinalIgnoreCase)
             .First();
 
         if (ShouldWarn("ambiguous-instrument:" + wanted))
         {
-            var rejected = string.Join(", ", prefixCandidates.Where(s => s != chosen).Select(s => s.Code));
+            var rejected = string.Join(", ", byCode.Where(s => s != chosen).Select(s => s.Code));
             SdLog.EventWarn("Instrument",
-                "Ambiguous instrument '{0}' matched {1} securities by prefix — chose {2} (front month), rejected: {3}",
-                name, prefixCandidates.Count, chosen.Code, rejected);
+                "Ambiguous instrument '{0}' matched {1} distinct contracts by prefix — chose {2} (front month), rejected: {3}",
+                originalName, byCode.Count, chosen.Code, rejected);
         }
 
         return chosen;
