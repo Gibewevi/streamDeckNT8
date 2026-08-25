@@ -10,6 +10,10 @@ C:\Users\pixel\Desktop\stream deck        ← CE dépôt : le moteur
   src/NinjaTrader.AddOn.StreamDeck        C# .NET 4.8, NinjaScript
                                           Le SEUL composant qui parle à NinjaTrader.
                                           Envoie les ordres, lit positions et exécutions.
+  src/Atas.Strategy.TradeDeck             C# .NET 10, ATAS classique
+                                          La même chose pour un trader ATAS : une ChartStrategy qui
+                                          parle le même protocole au bridge. Un trader utilise
+                                          NinjaTrader OU ATAS. Voir atas-chemin-ordre.md.
   src/StreamDeckBridge                    C# .NET 8
                                           Les règles : Guard, Anti-Tilt, pause obligatoire,
                                           liquidation automatique. Décide ce qui est REFUSÉ.

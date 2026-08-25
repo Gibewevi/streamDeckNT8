@@ -71,6 +71,9 @@ dotnet build "src/NinjaTrader.AddOn.StreamDeck/NinjaTrader.AddOn.StreamDeck.cspr
 # Indicateurs et stratégies NinjaScript (vérification de compilation — voir docs/strategie-structure-marche.md)
 dotnet build "src/NinjaTrader.Scripts/NinjaTrader.Scripts.csproj" -c Release
 
+# Stratégie ATAS classique — le chemin d'ordre (voir docs/atas-chemin-ordre.md)
+dotnet build "src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj" -c Release
+
 # Hôte TradeDeck — c'est celui-ci qu'il faut construire
 cd src/deck-host && npm run build       # tsc → dist/
 cd src/deck-host && npx tsc --noEmit    # vérification de types seule
@@ -122,6 +125,10 @@ L'installation active **ne correspond pas** aux instructions du README :
   > à qui on demandait justement de redémarrer. Preuve du mécanisme : le DLL du 12/08 ne
   > contenait pas `JournalSeal`, arrivé dans les sources le 13/08, alors que l'add-on tournait —
   > il tournait sur la compilation du 12.
+- **la stratégie ATAS classique** se dépose en DLL dans `%APPDATA%\ATAS\Strategies\`, dossier que le
+  classique ne surveille pas — **redémarrer ATAS** avant de la charger depuis le menu contextuel d'un
+  graphique (*Chart strategies*). Un trader utilise NinjaTrader **ou** ATAS : le bridge n'accepte
+  qu'un add-on à la fois ;
 - **l'hôte TradeDeck** s'installe dans `%LOCALAPPDATA%\TradeDeck` via
   `src/deck-host/packaging/install.ps1` : il y copie `dist/`, `ui/`, `node_modules/`, `bridge/`
   et un `node.exe`, enregistre une tâche planifiée (démarrage à l'ouverture de session, relance
@@ -210,12 +217,16 @@ Règles en ajoutant un log :
   (`src/streamdeck-ninjatrader/`), y compris ses deux fichiers sous `node_modules/typescript/bin/`
   — les détacher laisserait un arbre à moitié versionné. Rappel : `.gitignore` ne s'applique pas
   aux fichiers déjà suivis, il faut un `git rm --cached`.
-- **`TdSwingEngine.cs` et `TdStopSelector.cs` sont compilés par TROIS chaînes** : NinjaScript chez le
-  trader, `NinjaTrader.Scripts.csproj`, et le projet ATAS `src/Atas.Indicators.TradeDeck/` qui les
-  lie par `<Compile Include>`. Ils doivent donc rester en **C# 9 / `net48`** — namespace à portée de
-  fichier, `record` ou `required` compilent côté ATAS et cassent la compilation NinjaScript
-  **entière** chez le trader, indicateurs personnels compris. Après toute modification de l'un
-  d'eux : `dotnet build src/NinjaTrader.Scripts` **et** le build ATAS, les deux ou aucun.
+- **`TdSwingEngine.cs`, `TdStopSelector.cs` et `JournalSeal.cs` sont compilés par PLUSIEURS chaînes**
+  — NinjaScript chez le trader, `NinjaTrader.Scripts.csproj`, et les projets ATAS
+  `src/Atas.Indicators.TradeDeck/` et `src/Atas.Strategy.TradeDeck/` qui les lient par
+  `<Compile Include>`. Ils doivent donc rester en **C# 9 / `net48`** — namespace à portée de fichier,
+  `record` ou `required` compilent côté ATAS et cassent la compilation NinjaScript **entière** chez
+  le trader, indicateurs personnels compris. Après toute modification de l'un d'eux :
+  `dotnet build src/NinjaTrader.Scripts` **et** les builds ATAS, tous ou aucun.
+  `JournalSeal.cs` a une contrainte de plus : sa forme canonique doit rester identique **au
+  caractère près** à `deck-host/src/seal.ts` et à `Bitlearn/lib/tradeDeck/integrity.js`, faute de
+  quoi plus rien ne scelle — silencieusement, puisque ce côté-ci croit toujours signer correctement.
 
 ## Conventions
 

@@ -14,6 +14,7 @@ NuGet les restaure, et elles représentaient l'essentiel du volume retiré.
 | Sous-dossier | Cible | Rôle du binaire |
 |---|---|---|
 | `Atas.Indicators.TradeDeck/` | net10.0 | **Livrable réel** : c'est ce `TradeDeck.Indicators.dll` qu'ATAS X charge. |
+| `Atas.Strategy.TradeDeck/` | net10.0 | **Livrable réel** : c'est ce `TradeDeck.Strategy.dll` qu'ATAS classique charge depuis `%APPDATA%\ATAS\Strategies\`. |
 | `StreamDeckBridge/` | net8.0 | Référence. Le déploiement passe par `dotnet publish` (voir `docs/publier-une-version.md`), pas par ce dossier. |
 | `NinjaTrader.AddOn.StreamDeck/` | net48 | Contrôle de compilation. L'add-on est déployé **en sources `.cs`** chez le trader — ce DLL n'est jamais installé. |
 | `NinjaTrader.Scripts/` | net48 | Contrôle de compilation seul, par conception (voir l'en-tête du `.csproj`). |

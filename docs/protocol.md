@@ -174,7 +174,7 @@ position resterait actif et viendrait s'ajouter à la nouvelle au lieu de la pro
   }
 }
 ```
-> `deltaTicks` : positif = éloigne le stop du prix (plus de marge), négatif = rapproche du prix (plus serré). La direction est relative au sens de la position.
+> `deltaTicks` : positif = rapproche le stop du prix (plus serré), négatif = l'éloigne du prix (plus de marge). La direction est relative au sens de la position.
 
 #### `moveTarget`
 ```json
