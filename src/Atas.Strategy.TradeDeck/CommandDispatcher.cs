@@ -36,6 +36,12 @@ internal sealed class CommandDispatcher
                 "cancelWorkingOrders" => _engine.CancelWorkingOrders(cmd),
                 "cancelOrders" => _engine.CancelOrders(cmd),
                 "reverse" => _engine.Reverse(cmd),
+                "breakeven" => _engine.BreakEven(cmd),
+                // No key produces this action: the host's Auto TP/SL macro is its only emitter, and
+                // only once the position actually exists.
+                "attachBracket" => _engine.AttachBracket(cmd),
+                "moveStop" => _engine.MoveStop(cmd),
+                "moveTarget" => _engine.MoveTarget(cmd),
                 _ => BridgeMessage.Failure(cmd.RequestId, cmd.Action, "UNSUPPORTED_ACTION",
                          $"Action '{cmd.Action}' is not implemented yet by the ATAS strategy."),
             };
