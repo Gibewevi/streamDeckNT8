@@ -323,15 +323,37 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
 
         // A policy that refuses something, adopted while nobody has told us which account to watch,
         // is the shape of the 2026-08-21 bypass: armed, displayed red on the deck, and pointed at an
-        // account the trader was not using. The policy is still applied — half a guard beats none —
-        // but it never passes in silence again.
+        // account the trader was not using. R1 review, finding I1, first cut: this comment used to
+        // say "the policy is still applied — half a guard beats none", which stopped being true the
+        // moment GuardEnforcer.InspectCore was fixed to fail CLOSED on an empty tracked account (see
+        // its own doc) — R2 review caught the wording asserting the opposite of what the code now
+        // does. The two branches below say exactly what GuardEnforcer will actually do in each case,
+        // not a single sentence that can only be right for one of them.
         if ((blocked || maxContracts > 0) && !_accountConfirmedByBridge)
         {
-            SdLog.EventWarn("Safety",
-                "SECURITY: adopting a blocking policy (blocked={0} reason={1} maxContracts={2}) while the bridge has NOT named the account — "
-                + "enforcement is running on '{3}', picked by default at startup. Orders on any other account are NOT being watched.",
-                blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts,
-                string.IsNullOrEmpty(_publisher.TrackedAccount) ? "(none)" : _publisher.TrackedAccount);
+            var trackedAccount = _publisher.TrackedAccount;
+            if (string.IsNullOrEmpty(trackedAccount))
+            {
+                // Matches GuardEnforcer.InspectCore's own gate exactly: an empty tracked account
+                // makes it inspect and cancel NOTHING. The bridge-side macro — which keeps refusing
+                // deck-originated commands regardless of this state — is the only remaining net,
+                // same statement already made for degraded mode elsewhere in this codebase.
+                SdLog.EventWarn("Safety",
+                    "SECURITY: a blocking policy (blocked={0} reason={1} maxContracts={2}) was adopted while the bridge has NOT named an account and none is tracked yet — "
+                    + "GUARD ENFORCEMENT IS OFF: no order placed outside the deck is being watched, on any account. "
+                    + "The bridge-side safety macro is the only remaining protection until an account is selected on the deck.",
+                    blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts);
+            }
+            else
+            {
+                // A default account WAS picked at startup (GetAccountNames().FirstOrDefault()) and
+                // GuardEnforcer is therefore actively enforcing on it — just not yet confirmed by
+                // the bridge as the account the trader is using.
+                SdLog.EventWarn("Safety",
+                    "SECURITY: adopting a blocking policy (blocked={0} reason={1} maxContracts={2}) while the bridge has NOT named the account — "
+                    + "enforcement is running on '{3}', picked by default at startup and NOT yet confirmed by the bridge. Orders on any other account are NOT being watched.",
+                    blocked, string.IsNullOrEmpty(reason) ? "-" : reason, maxContracts, trackedAccount);
+            }
         }
 
         _guard.SetTrackedAccount(_publisher.TrackedAccount);
