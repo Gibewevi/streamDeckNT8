@@ -5873,7 +5873,7 @@ et sait ce qui reste à faire.
 - Modifier : `CLAUDE.md`
 - Modifier : `CHANGELOG.md`
 
-- [ ] **Étape 1 : écrire la note de déploiement**
+- [x] **Étape 1 : écrire la note de déploiement**
 
 Créer `docs/atas-chemin-ordre.md` :
 
@@ -5963,7 +5963,7 @@ deux** : NinjaScript chez le trader, et le projet ATAS par lien MSBuild. Il rest
 `dotnet build src/NinjaTrader.Scripts` **et** le build ATAS, les deux ou aucun.
 ```
 
-- [ ] **Étape 2 : signaler le nouveau projet dans la carte des dépôts**
+- [x] **Étape 2 : signaler le nouveau projet dans la carte des dépôts**
 
 Dans `docs/carte-des-deux-depots.md`, ajouter à l'inventaire des composants du moteur, à côté de
 l'add-on NinjaTrader :
@@ -5972,7 +5972,7 @@ l'add-on NinjaTrader :
 | `src/Atas.Strategy.TradeDeck/` | La même chose pour ATAS classique : une `ChartStrategy` qui parle le même protocole au bridge. Un trader utilise NinjaTrader **ou** ATAS. Voir [atas-chemin-ordre.md](atas-chemin-ordre.md) |
 ```
 
-- [ ] **Étape 3 : ajouter le nouveau binaire archivé dans `binaries/README.md`**
+- [x] **Étape 3 : ajouter le nouveau binaire archivé dans `binaries/README.md`**
 
 `src/Directory.Build.targets` archive déjà l'assembly du projet dans `binaries/Atas.Strategy.TradeDeck/`
 à chaque build Release, mais le tableau de `binaries/README.md` ne le liste pas encore — il ne cite
@@ -5983,7 +5983,7 @@ que `Atas.Indicators.TradeDeck/`, `StreamDeckBridge/`, `NinjaTrader.AddOn.Stream
 | `Atas.Strategy.TradeDeck/` | net10.0 | **Livrable réel** : c'est ce `TradeDeck.Strategy.dll` qu'ATAS classique charge depuis `%APPDATA%\ATAS\Strategies\`. |
 ```
 
-- [ ] **Étape 4 : mettre `CLAUDE.md` à jour**
+- [x] **Étape 4 : mettre `CLAUDE.md` à jour**
 
 Trois ajouts, aux endroits qui existent déjà :
 
@@ -6019,7 +6019,7 @@ dotnet build "src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj" -c Rel
   quoi plus rien ne scelle — silencieusement, puisque ce côté-ci croit toujours signer correctement.
 ```
 
-- [ ] **Étape 5 : compléter le journal des versions**
+- [x] **Étape 5 : compléter le journal des versions**
 
 Dans `CHANGELOG.md`, sous la section « Non publié » déjà ouverte en tâche 1 :
 
@@ -6030,7 +6030,7 @@ Dans `CHANGELOG.md`, sous la section « Non publié » déjà ouverte en tâche 
   inchangés. La macro Tendance et le copieur multi-comptes ne sont pas portés.
 ```
 
-- [ ] **Étape 6 : vérifier que rien du bridge ni de l'hôte n'a bougé**
+- [x] **Étape 6 : vérifier que rien du bridge ni de l'hôte n'a bougé**
 
 ```bash
 git diff --stat main -- src/StreamDeckBridge src/deck-host
@@ -6039,7 +6039,7 @@ git diff --stat main -- src/StreamDeckBridge src/deck-host
 Attendu : **aucune sortie**. La moindre ligne signale qu'on a cédé quelque part sur la contrainte
 qui rend ce portage possible.
 
-- [ ] **Étape 7 : compiler les trois projets une dernière fois**
+- [x] **Étape 7 : compiler les trois projets une dernière fois**
 
 ```bash
 dotnet build src/NinjaTrader.AddOn.StreamDeck/NinjaTrader.AddOn.StreamDeck.csproj -c Release
@@ -6049,7 +6049,7 @@ dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Relea
 
 Attendu : `Build succeeded` sur les trois.
 
-- [ ] **Étape 8 : committer**
+- [x] **Étape 8 : committer**
 
 ```bash
 git add docs/ binaries/README.md CLAUDE.md CHANGELOG.md
