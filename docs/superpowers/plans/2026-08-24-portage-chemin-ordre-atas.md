@@ -3756,7 +3756,7 @@ dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Relea
 
 Attendu : `Build succeeded`.
 
-- [ ] **Étape 6 : LE contrôle qui décide du portage — un ordre part-il là où le deck vise ?**
+- [x] **Étape 6 : LE contrôle qui décide du portage — un ordre part-il là où le deck vise ?**
 
 C'est l'hypothèse porteuse de toute la conception, et **ni la documentation ni l'essai terrain du
 24/08 ne la tranchent** — celui-ci a mesuré `ChartStrategy.Connector` toujours nul et le registre de
