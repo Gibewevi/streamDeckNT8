@@ -106,6 +106,17 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
             // the publisher that owns it.
             _monitor.StateChanged = _publisher.PublishNow;
 
+            // I1 (task 4 review round 1): a rejection on ANY account, on ANY connector, used to
+            // reach the deck — the registry aggregates every connector on purpose (task 3), but
+            // nothing narrowed the OUTPUT back down. A hand-typed DOM order refused for margin on
+            // an untracked account (the field trial's Rithmic accounts, while the deck watched the
+            // Sbe one) flashed REJECTED on a key that had nothing to do with it. Read live off the
+            // publisher rather than captured once, so a later setAccount is honoured without
+            // re-wiring anything here; OrderMonitor takes no ContextResolver/StatePublisher
+            // dependency (those two constructor slots are reserved for tasks 8/9), so a plain
+            // delegate is the seam instead.
+            _monitor.TrackedAccountName = () => _publisher?.TrackedAccount;
+
             // NEVER ChartStrategy.Connector (always null, confirmed by measurement — task 3). The
             // monitor's subscriptions are reconciled against the registry's CURRENT connector list on
             // the same cadence as the state publisher: a connector can appear mid-session (the
@@ -251,17 +262,39 @@ public class TradeDeckStrategy : ChartStrategy, IOrderGateway
 
         var startedAt = DateTime.UtcNow;
 
-        var response = message.Action switch
+        // M3 (task 4 review round 1): read ONCE into a local. The field-read version checked
+        // "_dispatcher != null" and then read _dispatcher.Dispatch(...) as two separate accesses —
+        // OnStopped can null the field between them while a frame is in flight at shutdown, and the
+        // NRE that follows escapes into BridgeClient's own catch, which logs it and sends NO
+        // response at all. A dropped success/error is recoverable through a retry; a key that never
+        // hears back is not, because the protocol has no way to represent "nothing came back".
+        var dispatcher = _dispatcher;
+
+        BridgeMessage response;
+        if (CommandDispatcher.Handles(message.Action))
         {
-            _ when CommandDispatcher.Handles(message.Action) && _dispatcher != null => _dispatcher.Dispatch(message),
-            "setAccount" or "setInstrument" => HandleTracking(message),
-            // Out of scope, and answered honestly rather than with a comfortable lie. The bridge
-            // FORCES both on every add-on connection; replying "success" would show the trader a
-            // copier that mirrors nothing and a trend rule that judges nothing.
-            "setCopierConfig" or "copierPanic" or "configureTrend" => Unsupported(message),
-            _ => BridgeMessage.Failure(message.RequestId, message.Action,
-                     "UNSUPPORTED_ACTION", $"Action '{message.Action}' is not supported by the ATAS strategy."),
-        };
+            // CONTEXT_MISSING, not UNSUPPORTED_ACTION: the action genuinely is one of the thirteen
+            // this strategy performs, it is only OnStarted that has not finished (or has failed) —
+            // telling the trader the action is unsupported would send them looking for a feature
+            // that exists instead of a strategy that has not come up yet.
+            response = dispatcher != null
+                ? dispatcher.Dispatch(message)
+                : BridgeMessage.Failure(message.RequestId, message.Action, "CONTEXT_MISSING",
+                      "The ATAS strategy is not fully started yet.");
+        }
+        else
+        {
+            response = message.Action switch
+            {
+                "setAccount" or "setInstrument" => HandleTracking(message),
+                // Out of scope, and answered honestly rather than with a comfortable lie. The bridge
+                // FORCES both on every add-on connection; replying "success" would show the trader a
+                // copier that mirrors nothing and a trend rule that judges nothing.
+                "setCopierConfig" or "copierPanic" or "configureTrend" => Unsupported(message),
+                _ => BridgeMessage.Failure(message.RequestId, message.Action,
+                         "UNSUPPORTED_ACTION", $"Action '{message.Action}' is not supported by the ATAS strategy."),
+            };
+        }
 
         LogOutcome(message, response, startedAt);
         _ = _bridge?.SendAsync(response);

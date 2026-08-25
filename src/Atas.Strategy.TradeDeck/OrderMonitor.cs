@@ -22,20 +22,28 @@ namespace TradeDeck.Atas.Strategy;
 /// (500 ms) rather than once at start-up: a connector can connect mid-session, as the Rithmic one did
 /// in the field trial, carrying a portfolio invisible from the chart.
 ///
+/// SUBSCRIBING TO EVERYTHING WIDENED THE SOURCE — THE OUTPUT HAD TO BE NARROWED BACK DOWN.
+/// Aggregating across every connector is correct for GuardEnforcer's future purpose (task 8: nothing
+/// the trader account does anywhere may go unseen) but wrong for the deck key today: a rejection on
+/// an account the deck is not even tracking is not the trader's business at that key, and must not
+/// flash REJECTED on it (review round 1, finding I1 — a hand-typed DOM order refused for margin on a
+/// Rithmic account the deck was not watching used to do exactly that). <see cref="TrackedAccountName"/>
+/// is how the output is narrowed back down; see its own doc for why it is a delegate rather than a
+/// dependency, and why "account unknown" fails OPEN, not closed.
+///
 /// DEGRADED MODE — AND MORE GENERALLY, ZERO CONNECTORS CURRENTLY WATCHED — MEANS NO REJECTION EVER
 /// REACHES THE DECK. <see cref="Refresh"/> can receive an empty connector list for two different
 /// reasons: the host registry is unreachable (ContextResolver.IsDegraded), or it is perfectly
 /// reachable but nothing is connected to it yet (ATAS just started, no broker attached). Either way
-/// this class ends up subscribed to nothing, and OrdersRegisterFailed / OrderChanged / NewOrders
-/// simply never fire — a trader could press Buy, get what looks like a silent nothing, and have no
-/// way to know a rejection is not coming because nobody is listening for it. <see cref="Refresh"/>
-/// therefore logs this loudly, once per episode (not once per 500ms tick — see the rate limiting
-/// below), naming exactly what is lost. This is NOT a replacement event source: task 8/9's own
-/// design question (polling TradingManager.Orders from the publish loop while degraded) is left
-/// alone here on purpose. What this class offers instead is a shape an alternative source can slot
-/// into without restructuring: Refresh already reconciles against whatever connector list it is
-/// handed, and StateChanged is a plain callback a polling path could invoke exactly like a connector
-/// event does.
+/// this class ends up subscribed to nothing, and OrdersRegisterFailed / OrderChanged simply never
+/// fire — a trader could press Buy, get what looks like a silent nothing, and have no way to know a
+/// rejection is not coming because nobody is listening for it. <see cref="Refresh"/> therefore logs
+/// this loudly, once per episode (not once per 500ms tick — see the rate limiting below), naming
+/// exactly what is lost. This is NOT a replacement event source: task 8/9's own design question
+/// (polling TradingManager.Orders from the publish loop while degraded) is left alone here on
+/// purpose. What this class offers instead is a shape an alternative source can slot into without
+/// restructuring: Refresh already reconciles against whatever connector list it is handed, and
+/// StateChanged is a plain callback a polling path could invoke exactly like a connector event does.
 /// </summary>
 internal sealed class OrderMonitor : IDisposable
 {
@@ -56,6 +64,40 @@ internal sealed class OrderMonitor : IDisposable
     private bool _warnedNoConnectors;
 
     /// <summary>
+    /// How many CONSECUTIVE Refresh ticks a previously-attached connector has been absent from the
+    /// registry's report, keyed by reference. See <see cref="GraceTicks"/>.
+    /// </summary>
+    private readonly Dictionary<IDataFeedConnector, int> _missingTicks = new();
+
+    /// <summary>
+    /// Review round 1, finding M1: ConnectorRegistry re-evaluates whether a connector carries a
+    /// portfolio every 500ms, and a connector mid-reconnect can read empty for exactly one tick
+    /// before recovering on its own. Detaching and reattaching on that single missed tick used to
+    /// produce a full detach plus no-connector-WARN plus attach cycle PER FLAP — up to about one WARN
+    /// a second during a prolonged reconnect, roughly 86,000 lines a day, the same axis task 3's
+    /// review had already flagged once. A connector must be absent GraceTicks consecutive times (one
+    /// tick of tolerance, i.e. it has to miss twice in a row) before it is treated as actually gone —
+    /// one missed tick is jitter, not a disconnect.
+    /// </summary>
+    private const int GraceTicks = 2;
+
+    /// <summary>
+    /// Read on every rejection/orderUpdate frame this class is about to forward, and on every order
+    /// transition it is about to log at INFO — see the class-level remark on why the output had to be
+    /// narrowed back to one account. TradeDeckStrategy wires this from StatePublisher.TrackedAccount
+    /// as a LIVE delegate (invoked on every check) rather than a value captured once, so a later
+    /// setAccount is honoured without this class needing to be told about it.
+    ///
+    /// A DELEGATE, NOT A ContextResolver/StatePublisher DEPENDENCY. The plan reserves OrderMonitor's
+    /// two optional constructor parameters for tasks 8 and 9; taking either dependency early would
+    /// both jump ahead of that reservation and make this class impossible to unit-test without
+    /// standing up the whole publish pipeline. Defaults to null, which — see InScope — means "let
+    /// everything through", so a caller that never sets it (a unit test, for instance) gets the
+    /// pre-I1 behaviour rather than a monitor that discards every event.
+    /// </summary>
+    public Func<string?>? TrackedAccountName { get; set; }
+
+    /// <summary>
     /// Refreshes the deck on the spot instead of waiting for the next publish tick. Assigned rather
     /// than injected so this class keeps no reference back to the publisher that owns it.
     /// </summary>
@@ -66,7 +108,8 @@ internal sealed class OrderMonitor : IDisposable
     /// <summary>
     /// Reconciles the connectors this monitor listens to against what the registry currently reports.
     /// Cheap to call every tick: a session with no connector churn does nothing beyond a set
-    /// comparison, and one that gains or loses a connector attaches or detaches exactly that one.
+    /// comparison, and one that gains or loses a connector attaches or detaches exactly that one —
+    /// modulo the grace period on the detach side, see <see cref="GraceTicks"/>.
     /// </summary>
     public void Refresh(IReadOnlyList<IDataFeedConnector> connectors)
     {
@@ -76,8 +119,29 @@ internal sealed class OrderMonitor : IDisposable
 
             var wanted = new HashSet<IDataFeedConnector>(connectors);
 
-            foreach (var gone in _attached.Where(c => !wanted.Contains(c)).ToList())
-                DetachOne(gone);
+            // Detach side: grace-period the absence rather than acting on one missed tick — see
+            // GraceTicks' doc. Walking _attached (not `connectors`) is deliberate: this loop only
+            // ever concerns connectors we currently think we are subscribed to.
+            foreach (var connector in _attached.ToList())
+            {
+                if (wanted.Contains(connector))
+                {
+                    _missingTicks.Remove(connector);
+                    continue;
+                }
+
+                _missingTicks.TryGetValue(connector, out var missed);
+                missed++;
+                if (missed >= GraceTicks)
+                {
+                    _missingTicks.Remove(connector);
+                    DetachOne(connector);
+                }
+                else
+                {
+                    _missingTicks[connector] = missed;
+                }
+            }
 
             foreach (var connector in connectors)
                 if (!_attached.Contains(connector)) AttachOne(connector);
@@ -108,16 +172,58 @@ internal sealed class OrderMonitor : IDisposable
         lock (_lock)
         {
             foreach (var connector in _attached.ToList()) DetachOne(connector);
+            // No connector should carry a grace-period count once nothing is attached at all — a
+            // stale entry here would only ever matter if a connector reference were reused, which
+            // ATAS never does, but clearing it costs nothing and removes the question.
+            _missingTicks.Clear();
         }
     }
 
+    /// <summary>
+    /// Subscribes all five events this monitor needs from one connector — symmetric with
+    /// <see cref="DetachOne"/> ON PURPOSE (review round 1, finding I2). DetachOne already wraps its
+    /// unsubscribes in a try/catch, which is an admission that these accessors CAN throw (a connector
+    /// mid-disposal or mid-reconnect); the subscribe side used to not say so. Without the try/catch
+    /// and the unwind below, a throw on (say) the fourth "+=" left handlers one-to-three subscribed
+    /// while _attached.Add never ran — the connector then read as "not attached" on every subsequent
+    /// Refresh, which resubscribed handlers one-to-three AGAIN every tick, forever: after an hour of
+    /// 500ms ticks that is roughly 7200 duplicate registrations, so one broker rejection would fan out
+    /// into thousands of orderUpdate frames at the bridge, on top of an ERROR line every 500ms on a
+    /// periodic path. A connector must end this method either FULLY attached and recorded in
+    /// _attached, or FULLY detached and absent from it — never the half-subscribed state in between.
+    /// </summary>
     private void AttachOne(IDataFeedConnector connector)
     {
-        connector.OrderChanged += OnOrderChanged;
-        connector.OrdersRegisterFailed += OnRegisterFailed;
-        connector.OrdersCancelFailed += OnCancelFailed;
-        connector.OrderModifyFailed += OnModifyFailed;
-        connector.PositionsChanged += OnPositionsChanged;
+        var alreadySubscribed = new List<Action>(5);
+        try
+        {
+            connector.OrderChanged += OnOrderChanged;
+            alreadySubscribed.Add(() => connector.OrderChanged -= OnOrderChanged);
+
+            connector.OrdersRegisterFailed += OnRegisterFailed;
+            alreadySubscribed.Add(() => connector.OrdersRegisterFailed -= OnRegisterFailed);
+
+            connector.OrdersCancelFailed += OnCancelFailed;
+            alreadySubscribed.Add(() => connector.OrdersCancelFailed -= OnCancelFailed);
+
+            connector.OrderModifyFailed += OnModifyFailed;
+            alreadySubscribed.Add(() => connector.OrderModifyFailed -= OnModifyFailed);
+
+            connector.PositionsChanged += OnPositionsChanged;
+            alreadySubscribed.Add(() => connector.PositionsChanged -= OnPositionsChanged);
+        }
+        catch (Exception ex)
+        {
+            foreach (var unsubscribe in alreadySubscribed)
+            {
+                // Best effort: the connector is already failing, and a second exception while
+                // unwinding must not stop the rest of the unwind or escape to the caller.
+                try { unsubscribe(); } catch { /* nothing useful left to do */ }
+            }
+            SdLog.Warn("Could not attach order monitor to a connector (unwound {0} partial subscription(s)): {1}",
+                alreadySubscribed.Count, ex.Message);
+            return;
+        }
 
         _attached.Add(connector);
         SdLog.Event("Order", "Order monitor attached to connector {0} ({1} connector(s) now watched)",
@@ -159,35 +265,55 @@ internal sealed class OrderMonitor : IDisposable
             if (order == null) return;
 
             var status = order.Status();
+            var inScope = InScope(order);
 
-            // Every transition is recorded, not only the failures: reconstructing why a position
-            // ended up where it did needs the whole life of the order. Both the raw state and the
-            // Status() verdict go in — the second is what we act on, the first is what the platform
-            // will quote back at you in a support thread.
-            SdLog.Event("Order", "Order {0} {1}/{2} — {3} {4} qty={5} unfilled={6} instrument={7}",
-                order.Id ?? "?", status, order.State, order.Direction, order.Type,
-                order.QuantityToFill, order.Unfilled,
-                ContextResolver.InstrumentName(order.Security));
+            // Every transition on the TRACKED account is recorded at INFO, not only the failures:
+            // reconstructing why a position ended up where it did needs the whole life of the order.
+            // An order on a DIFFERENT account still gets a line — just at TRACE (raise TD_LOG_LEVEL to
+            // see it) rather than INFO, so it stays findable for diagnosis without adding to the
+            // default log's volume for accounts the deck is not even tracking (review round 1, finding
+            // I1's log-volume side effect, called out under M1's "not to fix" list).
+            if (inScope)
+            {
+                SdLog.Event("Order", "Order {0} {1}/{2} — {3} {4} qty={5} unfilled={6} instrument={7}",
+                    order.Id ?? "?", status, order.State, order.Direction, order.Type,
+                    order.QuantityToFill, order.Unfilled,
+                    ContextResolver.InstrumentName(order.Security));
+            }
+            else
+            {
+                SdLog.TraceEvent("Order", "Order {0} {1}/{2} — {3} {4} qty={5} unfilled={6} instrument={7} (different account, not forwarded)",
+                    order.Id ?? "?", status, order.State, order.Direction, order.Type,
+                    order.QuantityToFill, order.Unfilled,
+                    ContextResolver.InstrumentName(order.Security));
+            }
 
             if (order.State == OrderStates.Failed)
             {
                 // A failed order with no message of its own still has to reach the deck: the key
                 // must go from "sent" to "rejected", and silence would leave it lying. Read from
                 // State rather than Status(), which has no value for "the venue refused it".
+                // ReportRejection ALWAYS logs (any account); it only forwards to the bridge — and
+                // this only invokes StateChanged — when the order is on the tracked account.
                 ReportRejection(order, "OrderFailed", order.State.ToString());
-                StateChanged?.Invoke();
+                if (inScope) StateChanged?.Invoke();
                 return;
             }
 
             // These change the stop/target picture the deck draws even when the net position does
-            // not move — a target cancelled, a stop replaced after a break-even.
-            if (status is OrderStatus.Filled or OrderStatus.PartlyFilled or OrderStatus.Canceled)
+            // not move — a target cancelled, a stop replaced after a break-even. Only worth an
+            // immediate refresh when it is the tracked account's own picture that changed.
+            if (inScope && status is OrderStatus.Filled or OrderStatus.PartlyFilled or OrderStatus.Canceled)
                 StateChanged?.Invoke();
         });
     }
 
     private void OnRegisterFailed(IDataFeedConnector connector, string message, Order order) =>
-        Safely("Order", () => { ReportRejection(order, "OrderRejected", message); StateChanged?.Invoke(); });
+        Safely("Order", () =>
+        {
+            ReportRejection(order, "OrderRejected", message);
+            if (InScope(order)) StateChanged?.Invoke();
+        });
 
     private void OnCancelFailed(IDataFeedConnector connector, string message, Order order) =>
         Safely("Order", () => ReportRejection(order, "CancelRejected", message));
@@ -196,14 +322,53 @@ internal sealed class OrderMonitor : IDisposable
         Safely("Order", () => ReportRejection(order, "ModifyRejected", error));
 
     /// <summary>
-    /// Sends the orderUpdate event the host turns into a red REJECTED on the key.
+    /// True when this order belongs to the account the deck is currently tracking, or when scope
+    /// cannot be determined — see the doc on <see cref="TrackedAccountName"/> for why "unknown" means
+    /// "let it through" rather than "hide it". Never throws: a scoping check must never be the reason
+    /// a real rejection fails to reach the deck.
+    /// </summary>
+    private bool InScope(Order? order)
+    {
+        try
+        {
+            var tracked = TrackedAccountName?.Invoke();
+            if (string.IsNullOrWhiteSpace(tracked)) return true; // not yet known — fail OPEN
+            var accountId = order?.Portfolio?.AccountID;
+            if (string.IsNullOrWhiteSpace(accountId)) return true; // cannot tell — fail OPEN
+            return string.Equals(accountId, tracked, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            SdLog.TraceEvent("Order", "Account scope check faulted, letting the event through: {0}", ex.GetType().Name);
+            return true; // fail OPEN — see the class-level remark on why a spurious flash beats a silent drop
+        }
+    }
+
+    /// <summary>
+    /// Sends the orderUpdate event the host turns into a red REJECTED on the key, SCOPED TO THE
+    /// TRACKED ACCOUNT ONLY (review round 1, finding I1) — deliberately NOT also scoped to the
+    /// tracked instrument: a flattenAccount failing on a different instrument of the SAME account is
+    /// still the trader's own order failing, and instrument-scoping this would have swallowed it.
     ///
-    /// The field names are the protocol's and are read by the host as they are: orderState,
-    /// rejected, error, reason. `rejected: true` is what makes the key flash — the key's background
-    /// stays normal, because a greyed background means "blocked", never "rejected".
+    /// The rejection is ALWAYS logged, on any account — see OnOrderChanged's INFO/TRACE split above
+    /// for the same reasoning applied to logging — so an out-of-scope rejection stays visible to
+    /// someone reading the log even though it never reaches the deck.
+    ///
+    /// The field names are the protocol's and are read by the host as they are: orderState, rejected,
+    /// error, reason. `rejected: true` is what makes the key flash — the key's background stays
+    /// normal, because a greyed background means "blocked", never "rejected".
     /// </summary>
     private void ReportRejection(Order? order, string error, string? reason)
     {
+        var inScope = InScope(order);
+
+        SdLog.EventWarn("Order", "ORDER REJECTED {0} — {1} {2} qty={3} instrument={4} account={5}: {6} (error={7}){8}",
+            order?.Id ?? "?", order?.Direction, order?.Type, order?.QuantityToFill,
+            ContextResolver.InstrumentName(order?.Security), order?.Portfolio?.AccountID ?? "?", reason, error,
+            inScope ? string.Empty : " [different account — NOT forwarded to the deck]");
+
+        if (!inScope) return;
+
         var payload = new Dictionary<string, object?>
         {
             ["orderId"] = order?.Id ?? string.Empty,
@@ -217,10 +382,6 @@ internal sealed class OrderMonitor : IDisposable
             ["name"] = order?.Comment ?? string.Empty,
             ["instrument"] = ContextResolver.InstrumentName(order?.Security),
         };
-
-        SdLog.EventWarn("Order", "ORDER REJECTED {0} — {1} {2} qty={3} instrument={4}: {5} (error={6})",
-            order?.Id ?? "?", order?.Direction, order?.Type, order?.QuantityToFill,
-            ContextResolver.InstrumentName(order?.Security), reason, error);
 
         // Fire-and-forget: this runs on the connector's event thread and cannot wait. SendAsync
         // catches its own errors, so no faulted task is left unobserved.
@@ -246,6 +407,7 @@ internal sealed class OrderMonitor : IDisposable
             _disposed = true;
             DetachAll();
             StateChanged = null;
+            TrackedAccountName = null;
         }
     }
 }

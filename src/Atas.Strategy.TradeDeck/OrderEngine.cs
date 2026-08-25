@@ -55,12 +55,19 @@ internal sealed class OrderEngine
     private readonly IOrderGateway _gateway;
 
     /// <summary>
-    /// Orders this engine created.
+    /// Orders this engine built and handed to IOrderGateway THIS SESSION.
     ///
-    /// TRACKED BY OBJECT, NOT BY COMMENT. A comment is a free string a trader can type into a DOM
-    /// ticket, so trusting it alone would hand anyone a one-word bypass of every rule GuardEnforcer
-    /// applies. The comment stays — the server reads it in the journal, and it survives ATAS handing
-    /// a different instance back — but the table below is what the guard trusts first.
+    /// REVIEW ROUND 1, FINDING I3: this doc used to claim the table is "what the guard trusts
+    /// first" against "a one-word bypass" — that overstates what the code actually does, and
+    /// task 8's GuardEnforcer will read this sentence to decide how much to trust IsOurs. The
+    /// honest version: this table is AUTHORITATIVE only for the exact Order instances this engine
+    /// itself created — it says nothing about a manual DOM ticket. The Comment fallback in IsOurs
+    /// below is best-effort RECOVERY for the case ATAS hands back a DIFFERENT Order instance for
+    /// the same order (observed to happen), not a security boundary: Comment is a free string, and
+    /// a trader who types "StreamDeck" into a manual order's comment field WILL be classified as a
+    /// deck order by IsOurs — there is no defence against that in this class. One mitigating,
+    /// measured fact: a real manual ChartTrader order was observed with Comment empty, so the false
+    /// positive needs a trader to type the exact word; it does not happen by default.
     ///
     /// A ConditionalWeakTable so a forgotten order cannot leak: entries vanish with the order.
     /// </summary>
