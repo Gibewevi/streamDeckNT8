@@ -95,9 +95,15 @@ internal sealed class ContextResolver
 
     /// <summary>
     /// Rate limit for every "could not resolve" warning below: the ambiguous-prefix warning in
-    /// FindSecurity, the not-found warnings in FindPortfolio, FindSecurity and their degraded-mode
-    /// counterparts, and the foreign-connector warning FindSecurity logs when a portfolio-scoped
-    /// lookup fell back to the cross-connector search.
+    /// FindSecurity, and the not-found warnings in FindPortfolio, FindSecurity and their
+    /// degraded-mode counterparts.
+    ///
+    /// The foreign-connector warning FindSecurity logs when a portfolio-scoped lookup falls back to
+    /// the cross-connector search does NOT use this rate limiter — it uses the transition latch
+    /// below instead. Reviewed 2026-08-25: a merely rate-limited warning still repeats forever for a
+    /// perfectly legitimate steady state (an instrument subscribed only through the chart's
+    /// connector while the deck trades another broker's account) — about 1440 lines/day saying the
+    /// same thing. Logging is for transitions, not sustained conditions.
     ///
     /// UNGUARDED, THIS IS UNBOUNDED ON THE PUBLISH PATH. StatePublisher.Publish calls
     /// FindSecurity(TrackedInstrument) every 500ms. Unlike the account (auto-corrected to the
@@ -137,6 +143,47 @@ internal sealed class ContextResolver
     }
 
     /// <summary>
+    /// Transition latch for the "resolved via the cross-connector fallback" warning in FindSecurity,
+    /// keyed per (instrument, account) — e.g. "security-foreign-connector:MESU6:LDE050-SZ976P0C-TEST001".
+    ///
+    /// A RATE LIMIT IS NOT A TRANSITION LOG. Reviewed 2026-08-25: an instrument that is legitimately
+    /// only subscribed through another connector than the one carrying this account is a steady
+    /// state, not a fault — the WARN must fire once when the pair FIRST falls back, then go silent
+    /// for as long as it keeps falling back, exactly like the project's rule for anything on a
+    /// periodic path (docs/logging-strategy.md, and CLAUDE.md's "ne journaliser un visuel de touche
+    /// qu'au changement"). FindSecurity sits on the 500ms publish tick, so "rate-limited to once a
+    /// minute" would still be ~1440 identical lines/day forever.
+    ///
+    /// SHARES THE SAME LOCK AS ShouldWarn rather than introducing a second synchronisation
+    /// mechanism — this set is reached from the same non-chart threads (OrderMonitor, GuardEnforcer)
+    /// that made ShouldWarn's lock necessary in the first place, for the same reason.
+    ///
+    /// Grows one entry per distinct (instrument, account) pair ever seen falling back, the same
+    /// unbounded-but-small shape as _lastWarnByKey above — not per tick, per request, or per
+    /// connector reshuffle, so it never grows faster than the set of instruments the deck actually
+    /// trades.
+    /// </summary>
+    private readonly HashSet<string> _activeFallbacks = new(StringComparer.Ordinal);
+
+    /// <summary>True (a genuine transition) only the first time this key falls back since it last resolved on its own connector.</summary>
+    private bool MarkFallbackStarted(string key)
+    {
+        lock (_warnRateLimitLock)
+        {
+            return _activeFallbacks.Add(key);
+        }
+    }
+
+    /// <summary>Called once the pair resolves on its own connector again, so a genuine relapse into the fallback is heard rather than swallowed by a stale latch.</summary>
+    private void ClearFallback(string key)
+    {
+        lock (_warnRateLimitLock)
+        {
+            _activeFallbacks.Remove(key);
+        }
+    }
+
+    /// <summary>
     /// Matches the deck's instrument string against what the registry knows.
     ///
     /// Three passes, narrowest first, exact match always wins regardless of which connector or
@@ -167,6 +214,21 @@ internal sealed class ContextResolver
     /// and StatePublisher relies on it before an account is even known — but it is now logged when
     /// it is what actually answers, because from that point on the security may be foreign to the
     /// account the caller is about to trade with.
+    ///
+    /// TWO DIFFERENT REASONS THE SCOPED SEARCH CAN COME UP EMPTY, LOGGED DIFFERENTLY. Reviewed
+    /// 2026-08-25: the fallback branch below used to warn every time regardless of WHY the scoped
+    /// search failed, which conflated two states that are not equally alarming —
+    ///   - ConnectorFor(portfolio) returned a connector, but it has no match for this instrument:
+    ///     the genuine foreign-security case this whole method exists to police. Warned, and — see
+    ///     the transition latch above — only on the transition into that state, not every tick.
+    ///   - ConnectorFor(portfolio) returned null: there is no connector for this account YET. That
+    ///     is an ordinary, documented state on this platform (ATAS started before the broker
+    ///     attached, or any mid-session reconnect — the same gate ConnectorRegistry.ConnectorFor and
+    ///     FindPosition/FindAllPositions/FindActiveOrders already treat as routine, not degraded).
+    ///     Nothing foreign is happening here; there is simply nothing to scope to. Warning about it
+    ///     would tell a reconnecting trader, falsely and every minute, that their order "may carry a
+    ///     security from a different broker" about a security that is in fact correct — exactly the
+    ///     alarming-but-wrong line that makes a log stop being read. TRACE only.
     /// </summary>
     public Security? FindSecurity(string? name, Portfolio? portfolio = null)
     {
@@ -176,38 +238,61 @@ internal sealed class ContextResolver
         if (connectors.Count == 0) return DegradedSecurity(name);
 
         var wanted = name.Trim();
+        IDataFeedConnector? scoped = null;
+        string? fallbackKey = null;
 
         if (portfolio != null)
         {
-            var scoped = _registry.ConnectorFor(portfolio);
+            fallbackKey = "security-foreign-connector:" + wanted + ":" + portfolio.AccountID;
+            scoped = _registry.ConnectorFor(portfolio);
             if (scoped != null)
             {
                 var scopedResult = SearchConnectors(new[] { scoped }, wanted, name);
-                if (scopedResult != null) return scopedResult;
-            }
+                if (scopedResult != null)
+                {
+                    // Resolved on its own connector again — clear the latch so a genuine relapse
+                    // into the fallback path (a real reconnect that swaps which broker carries this
+                    // instrument) is heard next time, instead of being swallowed by a stale latch.
+                    ClearFallback(fallbackKey);
+                    return scopedResult;
+                }
 
-            // NOT FOUND ON THE PORTFOLIO'S OWN CONNECTOR IS ROUTINE, NOT AN ERROR. Measured live:
-            // IDataFeedConnector.Securities lists only what the platform currently has SUBSCRIBED,
-            // not the broker's catalogue — MES resolved to nothing and three buyMarket were
-            // correctly refused INSTRUMENT_NOT_FOUND until the trader opened a chart or DOM on MES,
-            // after which the same name resolved and filled. Falling through to the cross-connector
-            // search below is what makes that recover instead of refusing forever; the WARN after it
-            // is what keeps the resulting foreign-security risk visible instead of silent.
+                // NOT FOUND ON THE PORTFOLIO'S OWN CONNECTOR IS ROUTINE, NOT AN ERROR. Measured live:
+                // IDataFeedConnector.Securities lists only what the platform currently has SUBSCRIBED,
+                // not the broker's catalogue — MES resolved to nothing and three buyMarket were
+                // correctly refused INSTRUMENT_NOT_FOUND until the trader opened a chart or DOM on MES,
+                // after which the same name resolved and filled. Falling through to the cross-connector
+                // search below is what makes that recover instead of refusing forever; the WARN after it
+                // is what keeps the resulting foreign-security risk visible instead of silent.
+            }
         }
 
         var result = SearchConnectors(connectors, wanted, name);
 
         if (result != null)
         {
-            // Only reached when a portfolio was given AND its own connector could not answer above —
-            // this IS the fallback answering, so the security may belong to a different broker than
-            // `portfolio`. Rate-limited per account+instrument like every other warning here.
-            if (portfolio != null &&
-                ShouldWarn("security-foreign-connector:" + wanted + ":" + portfolio.AccountID))
+            if (portfolio != null)
             {
-                SdLog.EventWarn("Instrument",
-                    "Instrument '{0}' not found on account '{1}''s own connector — using a cross-connector match instead; the order may carry a security from a different broker than this account",
-                    name, portfolio.AccountID ?? "?");
+                if (scoped != null)
+                {
+                    // The scoped connector exists but had no match — this IS the foreign-security
+                    // case. Latched, not merely rate-limited: see the transition-latch doc above.
+                    if (MarkFallbackStarted(fallbackKey!))
+                    {
+                        SdLog.EventWarn("Instrument",
+                            "Instrument '{0}' not found on the connector for account {1} — using a cross-connector match instead; the order may carry a security from a different broker than this account",
+                            name, portfolio.AccountID ?? "?");
+                    }
+                }
+                else
+                {
+                    // No connector for this account yet — ordinary at ATAS startup or mid-session
+                    // reconnect, not a foreign-security situation. TRACE only: this is on the 500ms
+                    // publish tick and can repeat every call while the broker is still attaching.
+                    SdLog.TraceEvent("Instrument",
+                        "No connector yet for account {0} — '{1}' resolved via a platform-wide search instead",
+                        portfolio.AccountID ?? "?", name);
+                }
             }
             return result;
         }
