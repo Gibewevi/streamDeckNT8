@@ -624,40 +624,56 @@ internal sealed class OrderEngine
             order.TriggerPrice = bePrice;
 
             // REVIEW ROUND 1, FINDING A4 — this is in the brief too, and the first pass missed it,
-            // same family as A2 below. A StreamDeck_TP target can be left working when its paired
+            // same family as A2 above. A StreamDeck_TP target can be left working when its paired
             // stop is gone (filled, cancelled): submitting this fresh stop unlinked would end the
             // same way as A2 — the target fills, the trader believes he is flat, and this stop
             // keeps working until it triggers a reverse entry nobody asked for. Join it to the
             // working target's OCOGroup when there is one; mint and attempt to push a fresh one
-            // onto the target otherwise. Same "attempted, not guaranteed" honesty as A2: whether
-            // ModifyOrder honours an OCOGroup rewrite on the replacement is UNVERIFIED, so a failed
-            // link attempt is logged rather than left silent.
+            // onto the target otherwise.
             var workingTarget = _resolver.FindTargetOrders(ctx.Portfolio, ctx.Security)
                 .FirstOrDefault(o => o.Direction == exit &&
                                       string.Equals(o.Comment, BracketTargetComment, StringComparison.OrdinalIgnoreCase));
 
+            // REVIEW ROUND 2, FINDING N2 — decide the link BEFORE touching the venue, but do not
+            // ACT on it until after the stop itself is confirmed submitted below. Round 1 modified
+            // the target first: if Submit then failed on the stop, the trader's existing target had
+            // already been churned into a group of one for nothing, on a call that reports failure.
+            // A command that fails must leave existing protection exactly as it was.
+            string? targetLinkOco = null;
             if (workingTarget != null)
             {
-                if (!string.IsNullOrEmpty(workingTarget.OCOGroup))
-                {
-                    order.OCOGroup = workingTarget.OCOGroup;
-                }
-                else
-                {
-                    var oco = Guid.NewGuid().ToString("N");
-                    order.OCOGroup = oco;
-                    var linkFailure = Modify(cmd, workingTarget, updated => updated.OCOGroup = oco);
-                    if (linkFailure != null)
-                    {
-                        SdLog.EventWarn("Protection",
-                            "[REQ:{0}] Break-even stop on {1} could NOT be linked to working target {2}: {3} — the two are NOT OCO-linked; a fill on either leaves the other resting and able to open a reverse entry",
-                            cmd.RequestId, name, workingTarget.Id ?? "?", linkFailure.Error?.Message);
-                    }
-                }
+                targetLinkOco = !string.IsNullOrEmpty(workingTarget.OCOGroup)
+                    ? workingTarget.OCOGroup
+                    : Guid.NewGuid().ToString("N");
+                order.OCOGroup = targetLinkOco;
             }
 
             var failure = Submit(cmd, order);
             if (failure != null) return failure;
+
+            // Only reached once the stop is confirmed submitted (N2). A target that already carried
+            // an OCOGroup needs no venue call at all — `order` above already joined it. Only a
+            // target with NO group yet needs one pushed onto it.
+            if (workingTarget != null && string.IsNullOrEmpty(workingTarget.OCOGroup))
+            {
+                // REVIEW ROUND 2, FINDING N1 — the only Modify closure in this file that omitted
+                // Comment. Order.Clone() propagating Comment/OCOGroup is UNVERIFIED (see the other
+                // three closures' own notes); if Clone() drops Comment, this replacement loses
+                // StreamDeck_TP and becomes unrecognisable as our target — AttachBracket's ourTarget
+                // lookup and this method's own workingTarget lookup above would both miss it from
+                // then on, and it would never be repriced again on a scale-in.
+                var linkFailure = Modify(cmd, workingTarget, updated =>
+                {
+                    updated.OCOGroup = targetLinkOco;
+                    updated.Comment = workingTarget.Comment;
+                });
+                if (linkFailure != null)
+                {
+                    SdLog.EventWarn("Protection",
+                        "[REQ:{0}] Break-even stop on {1} could NOT be linked to working target {2}: {3} — the two are NOT OCO-linked; a fill on either leaves the other resting and able to open a reverse entry",
+                        cmd.RequestId, name, workingTarget.Id ?? "?", linkFailure.Error?.Message);
+                }
+            }
 
             SdLog.Event("Protection", "[REQ:{0}] BE{1}: CREATED protective {2} stop x{3} at {4} (avg entry {5}, oco={6})",
                 cmd.RequestId, offsetTicks != 0 ? "+" + offsetTicks : "", exit, quantity, bePrice, averagePrice,
@@ -847,13 +863,6 @@ internal sealed class OrderEngine
         var placed = 0;
         var refused = 0;
 
-        // The Order actually handed to Submit/Modify for the leg WE placed or repriced this call —
-        // null when the leg was disabled, refused, or left to a foreign protection. Captured so the
-        // A2 cross-check below can compare what both legs ended up carrying without waiting on an
-        // async acknowledgement this fire-and-forget path cannot afford.
-        Order? stopOrderRef = null;
-        Order? targetOrderRef = null;
-
         // BRIEF DEFECT — GOVERNING RULE OF THIS TASK: the plan `return`ed the moment either leg's
         // Submit/Modify failed, which for the STOP block meant the TARGET below was never even
         // attempted — two legs this macro treats as independent orders, made to depend on each
@@ -881,7 +890,6 @@ internal sealed class OrderEngine
             }
             else if (ourStop != null)
             {
-                Order? repriced = null;
                 var failure = Modify(cmd, ourStop, updated =>
                 {
                     var limitOffset = updated.Type == OrderTypes.StopLimit ? updated.Price - updated.TriggerPrice : 0m;
@@ -894,11 +902,21 @@ internal sealed class OrderEngine
                     // Explicit, not left to Order.Clone() (UNVERIFIED for OCOGroup/Comment — see
                     // BreakEven's note above). Forced to `oco` rather than copied from ourStop, so a
                     // stop that lost its own OCOGroup somewhere converges back onto the pair instead
-                    // of staying adrift. See the A2 note on `oco` above for why "MUST land" no
-                    // longer appears here — attempted, not guaranteed; see the cross-check below.
+                    // of staying adrift.
+                    //
+                    // REVIEW ROUND 2, FINDING A2 (still open after round 1): this write is
+                    // ATTEMPTED, not guaranteed. Whether ChartStrategy.ModifyOrder honours an
+                    // OCOGroup change on the replacement order is UNVERIFIED, and it CANNOT be
+                    // observed from here: ModifyOrder is asynchronous, the replacement has not
+                    // landed by the time this call returns, and a synchronous wait is forbidden on
+                    // this path. Round 1 added a same-call comparison between the stop and target
+                    // Order objects, but both are local objects THIS code just wrote `oco` into —
+                    // the comparison could never disagree, so it was a dead check, deleted here
+                    // rather than left to look like coverage that does not exist. The only thing
+                    // that can actually answer this question is a real session: scale in, let the
+                    // take profit fill, and look at whether the stop is still working.
                     updated.OCOGroup = oco;
                     updated.Comment = BracketStopComment;
-                    repriced = updated;
                 });
 
                 if (failure != null)
@@ -910,7 +928,6 @@ internal sealed class OrderEngine
                 {
                     stopOutcome = "modified";
                     placed++;
-                    stopOrderRef = repriced;
                 }
             }
             else if (existingStops.Count > 0)
@@ -935,7 +952,6 @@ internal sealed class OrderEngine
                 {
                     stopOutcome = "created";
                     placed++;
-                    stopOrderRef = order;
                 }
             }
         }
@@ -957,16 +973,16 @@ internal sealed class OrderEngine
             }
             else if (ourTarget != null)
             {
-                Order? repriced = null;
                 var failure = Modify(cmd, ourTarget, updated =>
                 {
                     updated.Price = targetPrice;
                     updated.QuantityToFill = quantity;
 
-                    // See the matching note on the stop leg above — same reasoning, same fields.
+                    // See the matching note on the stop leg above — same reasoning, same fields,
+                    // same REVIEW ROUND 2, FINDING A2 caveat: attempted, unverified, unobservable
+                    // from this fire-and-forget path.
                     updated.OCOGroup = oco;
                     updated.Comment = BracketTargetComment;
-                    repriced = updated;
                 });
 
                 if (failure != null)
@@ -978,7 +994,6 @@ internal sealed class OrderEngine
                 {
                     targetOutcome = "modified";
                     placed++;
-                    targetOrderRef = repriced;
                 }
             }
             else if (existingTargets.Count > 0)
@@ -1000,30 +1015,22 @@ internal sealed class OrderEngine
                 {
                     targetOutcome = "created";
                     placed++;
-                    targetOrderRef = order;
                 }
             }
         }
 
-        // REVIEW ROUND 1, FINDING A2 — DETECTABILITY FOR THE UNVERIFIED OCOGroup WRITE ABOVE: this
-        // cannot confirm what the venue accepted (no synchronous wait is available on this
-        // fire-and-forget path — see the project's own constraints), but it CAN compare, without
-        // blocking, what the two legs we just touched locally carry against each other and against
-        // `oco`. Only checked when both were actually touched THIS call — a lone leg has nothing to
-        // compare against. If they disagree, nothing else will say so before a take profit fills and
-        // leaves an orphan stop working the reverse direction — see this method's own OCO doc
-        // comment for exactly that scenario, and REVIEW ROUND 1's note that the manual recipe's OCO
-        // row only exercises the create/create case, never this modify/modify one.
-        if (stopOrderRef != null && targetOrderRef != null &&
-            (!string.Equals(stopOrderRef.OCOGroup, oco, StringComparison.Ordinal) ||
-             !string.Equals(targetOrderRef.OCOGroup, oco, StringComparison.Ordinal)))
-        {
-            SdLog.EventWarn("Protection",
-                "[REQ:{0}] Bracket OCO link on {1} may not have taken: stop {2} carries OCOGroup='{3}', target {4} carries OCOGroup='{5}', expected '{6}' on both",
-                cmd.RequestId, name, stopOrderRef.Id ?? "?", stopOrderRef.OCOGroup ?? "(none)",
-                targetOrderRef.Id ?? "?", targetOrderRef.OCOGroup ?? "(none)", oco);
-        }
-
+        // REVIEW ROUND 2, FINDING A2 — round 1 added an in-process comparison of the stop and
+        // target Order objects here, meant to catch an OCOGroup write that did not take. It was
+        // deleted: both objects being compared are local objects this very code had just written
+        // `oco` into, so the comparison could never disagree — dead code masquerading as coverage,
+        // worse than no check at all because the next reader (task 8's GuardEnforcer among them)
+        // would believe the case was handled. It is not handled, and it cannot be from here:
+        // ModifyOrder is asynchronous, so the replacement has not landed by the time this method
+        // returns, and no synchronous wait is available on this path to wait for it. The write
+        // above is attempted (best effort, per this task's governing rule); whether ATAS honours an
+        // OCOGroup change on a modify's replacement order is UNVERIFIED and can only be answered by
+        // a real session — scale in, let the take profit fill, and look at whether the stop is
+        // still working (see the report's live-check list).
         if (failed.Count > 0)
         {
             SdLog.Fail("Protection", null,
