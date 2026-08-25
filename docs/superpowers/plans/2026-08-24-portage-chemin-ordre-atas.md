@@ -1764,7 +1764,7 @@ un nombre à chaque ouverture.
   `void PublishNow()`, `string TrackedAccount { get; }`, `string TrackedInstrument { get; }`,
   `void Dispose()`.
 
-- [ ] **Étape 1 : écrire l'accès au registre de connecteurs de l'hôte, par réflexion**
+- [x] **Étape 1 : écrire l'accès au registre de connecteurs de l'hôte, par réflexion**
 
 > Nouvelle étape — c'est le maillon qui manquait à la première exécution de cette tâche. Elle
 > implémente proprement `prototype-acces-connecteur.patch`
@@ -2039,7 +2039,7 @@ internal sealed class ConnectorRegistry
 }
 ```
 
-- [ ] **Étape 2 : écrire le résolveur de contexte**
+- [x] **Étape 2 : écrire le résolveur de contexte**
 
 Créer `src/Atas.Strategy.TradeDeck/ContextResolver.cs` :
 
@@ -2500,7 +2500,7 @@ internal sealed class ContextResolver
 }
 ```
 
-- [ ] **Étape 3 : écrire le publieur d'état**
+- [x] **Étape 3 : écrire le publieur d'état**
 
 Créer `src/Atas.Strategy.TradeDeck/StatePublisher.cs` :
 
@@ -2835,7 +2835,7 @@ internal sealed class StatePublisher : IDisposable
 }
 ```
 
-- [ ] **Étape 4 : brancher la publication et les commandes de suivi**
+- [x] **Étape 4 : brancher la publication et les commandes de suivi**
 
 > ⏸ Redémarrée avec les étapes 2 et 3 : `new ContextResolver(() => Connector)` construisait le
 > résolveur contre `ChartStrategy.Connector`, toujours nul. Il se construit désormais contre le
@@ -2989,7 +2989,7 @@ et ajouter les trois méthodes :
 
 (ajouter `using System.Collections.Generic;` en tête de fichier.)
 
-- [ ] **Étape 5 : compiler**
+- [x] **Étape 5 : compiler**
 
 > ⏸ Redémarrée avec les étapes 1 à 4 ci-dessus : le build réussi précédemment portait sur la
 > conception invalidée (résolution contre `ChartStrategy.Connector`).
@@ -3055,7 +3055,7 @@ signe qu'ATAS a arrêté la stratégie en silence (changement d'instrument, d'un
 portefeuille sur le graphique, rechargement d'historique, fermeture du graphique, redépôt du DLL) —
 vérifier l'état de la stratégie dans ATAS avant de chercher un bug dans ce code.
 
-- [ ] **Étape 7 : committer**
+- [x] **Étape 7 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
