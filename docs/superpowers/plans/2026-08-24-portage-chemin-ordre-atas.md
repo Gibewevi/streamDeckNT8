@@ -3861,7 +3861,7 @@ instantanément au marché.
 - Consomme : `OrderEngine.Resolve/NewOrder/Submit/RoundToTick`, `ContextResolver.MarketPrice` (tâche 4).
 - Produit : `OrderEngine.BuyLimit(BridgeMessage)`, `OrderEngine.SellLimit(BridgeMessage)`.
 
-- [ ] **Étape 1 : ajouter les deux méthodes au moteur**
+- [x] **Étape 1 : ajouter les deux méthodes au moteur**
 
 Dans `OrderEngine.cs`, après `SubmitMarket` :
 
@@ -3924,7 +3924,7 @@ Dans `OrderEngine.cs`, après `SubmitMarket` :
     }
 ```
 
-- [ ] **Étape 2 : ouvrir les deux branches de l'aiguilleur**
+- [x] **Étape 2 : ouvrir les deux branches de l'aiguilleur**
 
 Dans `CommandDispatcher.Dispatch`, ajouter sous `"sellMarket"` :
 
@@ -3933,7 +3933,7 @@ Dans `CommandDispatcher.Dispatch`, ajouter sous `"sellMarket"` :
                 "sellLimit" => _engine.SellLimit(cmd),
 ```
 
-- [ ] **Étape 3 : compiler**
+- [x] **Étape 3 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -3957,7 +3957,7 @@ Deux contrôles, dans cet ordre :
 Le second contrôle est le plus important des deux : c'est celui qui empêche une limite vendeuse de
 partir à zéro.
 
-- [ ] **Étape 5 : committer**
+- [x] **Étape 5 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
@@ -3980,7 +3980,7 @@ Cinq commandes : `flatten`, `flattenAccount`, `cancelWorkingOrders`, `cancelOrde
 - Produit : `OrderEngine.Flatten`, `.FlattenAccount`, `.CancelWorkingOrders`, `.CancelOrders`,
   `.Reverse`, toutes de signature `BridgeMessage Xxx(BridgeMessage cmd)`.
 
-- [ ] **Étape 1 : ajouter les cinq méthodes**
+- [x] **Étape 1 : ajouter les cinq méthodes**
 
 Dans `OrderEngine.cs`, après les ordres d'entrée :
 
@@ -4217,7 +4217,7 @@ Dans `OrderEngine.cs`, après les ordres d'entrée :
     }
 ```
 
-- [ ] **Étape 2 : ouvrir les cinq branches de l'aiguilleur**
+- [x] **Étape 2 : ouvrir les cinq branches de l'aiguilleur**
 
 Dans `CommandDispatcher.Dispatch`, ajouter :
 
@@ -4230,7 +4230,7 @@ Dans `CommandDispatcher.Dispatch`, ajouter :
                 "reverse" => _engine.Reverse(cmd),
 ```
 
-- [ ] **Étape 3 : compiler**
+- [x] **Étape 3 : compiler**
 
 ```bash
 dotnet build src/Atas.Strategy.TradeDeck/Atas.Strategy.TradeDeck.csproj -c Release
@@ -4258,7 +4258,7 @@ rouvrirait ou renforcerait la position au lieu de la protéger.
 main sur le port isolé du bridge. Attendu : toutes les positions du compte fermées, tous les ordres
 annulés, et la ligne `Safety | … ACCOUNT LIQUIDATION on …` dans `addon-*.log`.
 
-- [ ] **Étape 5 : committer**
+- [x] **Étape 5 : committer**
 
 ```bash
 git add src/Atas.Strategy.TradeDeck/ binaries/
