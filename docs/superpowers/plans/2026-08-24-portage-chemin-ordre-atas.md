@@ -3805,7 +3805,7 @@ la plateforme et non du code — le noter dans le rapport de tâche.
 Consigner le résultat des trois contrôles : c'est la conclusion la plus réutilisable de tout ce
 portage.
 
-- [ ] **Étape 7 : recette étape 3 — un ordre au marché**
+- [x] **Étape 7 : recette étape 3 — un ordre au marché**
 
 Bridge lancé, hôte lancé, ATAS ouvert sur un **compte Sim**, stratégie démarrée, instrument
 sélectionné sur le deck.
@@ -3822,7 +3822,7 @@ Attendu, chaque point constaté :
 Puis aplatir la position **à la souris dans ATAS** et vérifier que le deck repasse à `FLAT` dans la
 demi-seconde : c'est la preuve que `PositionsChanged` remonte bien.
 
-- [ ] **Étape 8 : recette étape 4 — un rejet remonte jusqu'à la touche**
+- [x] **Étape 8 : recette étape 4 — un rejet remonte jusqu'à la touche**
 
 Provoquer un rejet volontaire. Deux façons, la première d'abord :
 - envoyer une quantité qui dépasse la taille de lot maximale de l'instrument (touche Quantité montée
