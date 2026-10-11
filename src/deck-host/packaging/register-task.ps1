@@ -9,7 +9,8 @@
 param(
   [Parameter(Mandatory = $true)][ValidateSet('install', 'uninstall', 'stop')][string]$Action,
   [string]$InstallDir = "$env:LOCALAPPDATA\TradeDeck",
-  [string]$TaskName = 'TradeDeck'
+  [string]$TaskName = 'TradeDeck',
+  [switch]$KeepElgatoAutostart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -181,7 +182,7 @@ puis relancer cet installateur.
 # un chemin d'exécutable est un fait.
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $cle = Get-Item $run -ErrorAction SilentlyContinue
-if ($cle) {
+if ($cle -and -not $KeepElgatoAutostart) {
   foreach ($nom in $cle.Property) {
     $commande = "$((Get-ItemProperty -Path $run -Name $nom -ErrorAction SilentlyContinue).$nom)"
     # `-like` et non `-match` : dans une regex .NET, \S est la classe « non-espace », donc

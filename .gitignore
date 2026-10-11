@@ -22,6 +22,9 @@ src/deck-host/dist/
 # Le bridge est livré dans le dossier de l'hôte (`npm run build:bridge`) : c'est une sortie de
 # publication régénérable, comme src/StreamDeckBridge/publish/.
 src/deck-host/bridge/
+# Isolated regression harness output; the harness source is versioned.
+src/deck-host/tests/journal-seal/bin/
+src/deck-host/tests/journal-seal/obj/
 
 # Artefacts d'empaquetage : charge utile assemblee et installateur produit.
 build/

@@ -108,6 +108,12 @@ function verifierVersion() {
     console.error('Les deux doivent porter le même numéro — c\'est celui que lit l\'installateur.');
     process.exit(1);
   }
+  const lock = JSON.parse(readFileSync(resolve(ICI, '..', 'package-lock.json'), 'utf8'));
+  const inno = readFileSync(resolve(ICI, '..', 'packaging', 'TradeDeck.iss'), 'utf8').match(/#define AppVersion "([^"]+)"/)?.[1];
+  if (lock.version !== paquet || lock.packages?.['']?.version !== paquet || inno !== paquet) {
+    console.error('Version incohérente dans package-lock.json ou TradeDeck.iss.');
+    process.exit(1);
+  }
   return paquet;
 }
 

@@ -32,7 +32,7 @@
 #define AppUrl BitlearnUrl + "/tradedeck"
 
 #ifndef AppVersion
-  #define AppVersion "0.29.0"
+  #define AppVersion "0.29.1"
 #endif
 
 #ifndef Payload
@@ -112,6 +112,7 @@ Source: "assets\TradeDeck.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
 ; que la version installée du script n'existe. Sur une mise à jour, celle du dossier serait de
 ; surcroît l'ancienne.
 Source: "register-task.ps1"; Flags: dontcopy
+Source: "configure-server.ps1"; Flags: dontcopy
 
 ; L'intégration NinjaTrader. Sans elle le voyant « NinjaTrader » reste rouge quoi qu'il arrive :
 ; c'est l'add-on chargé DANS NinjaTrader qui ouvre la connexion vers le bridge, et rien d'autre
@@ -241,45 +242,6 @@ end;
   Scellées avec la clé de l'ancien serveur, elles tomberont au palier non vérifiable sur
   le nouveau — dégradé, jamais perdu.
 }
-
-{ La valeur de "url" dans le fichier de configuration. Écrit par cet installateur, mais aussi
-  à la main sur un poste de développement : on cherche la clé, pas une mise en forme. }
-function UrlLue(const contenu: String): String;
-var
-  reste: String;
-  p: Integer;
-begin
-  Result := '';
-  p := Pos('"url"', contenu);
-  if p = 0 then Exit;
-  reste := Copy(contenu, p + 5, Length(contenu));
-  p := Pos(':', reste);
-  if p = 0 then Exit;
-  reste := Copy(reste, p + 1, Length(reste));
-  p := Pos('"', reste);
-  if p = 0 then Exit;
-  reste := Copy(reste, p + 1, Length(reste));
-  p := Pos('"', reste);
-  if p = 0 then Exit;
-  Result := Copy(reste, 1, p - 1);
-end;
-
-{ La cible actuelle du poste. Fichier absent = production : c'est le repli codé en dur dans
-  l'hôte comme dans le lanceur, donc bien ce que le poste visait jusqu'ici. Sans cette
-  équivalence, la première mise à jour vers un installateur qui écrit le fichier
-  désapparierait tous les postes déjà installés. }
-function CibleActuelle(const chemin: String): String;
-var
-  brut: AnsiString;
-  contenu, url: String;
-begin
-  Result := 'https://bitlearn.fr';
-  if not FileExists(chemin) then Exit;
-  if not LoadStringFromFile(chemin, brut) then Exit;
-  contenu := brut;
-  url := Trim(UrlLue(contenu));
-  if url <> '' then Result := url;
-end;
 
 var
   RacineNinjaScript: String;
@@ -500,7 +462,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  dossier, config, precedente: String;
+  Code: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -510,32 +472,13 @@ begin
   end;
   if CurStep <> ssInstall then Exit;
 
-  dossier := ExpandConstant('{userappdata}\StreamDeckTrader');
-  config := AddBackslash(dossier) + 'bitlearn.json';
-  precedente := CibleActuelle(config);
-
-  if not ForceDirectories(dossier) then
-  begin
-    { Non bloquant : un poste sans fichier retombe sur la production, soit exactement l'état
-      d'avant. Tracé dans le journal d'installation, rien n'est montré au trader. }
-    Log('bitlearn.json : dossier d etat impossible a creer');
-    Exit;
-  end;
-
-  if not SaveStringToFile(config, '{"url": "{#BitlearnUrl}"}' + #13#10, False) then
-  begin
-    Log('bitlearn.json : ecriture impossible');
-    Exit;
-  end;
-
-  if CompareText(precedente, '{#BitlearnUrl}') <> 0 then
-  begin
-    { Les deux logements : le jeton a quitté le profil itinérant en 0.20.0, et un poste qui
-      n'a pas encore été migré porte encore l'ancien. En oublier un le ferait revivre. }
-    DeleteFile(AddBackslash(dossier) + 'device.json');
-    DeleteFile(ExpandConstant('{localappdata}\StreamDeckTrader\device.json'));
-    Log('Serveur Bitlearn : ' + precedente + ' -> {#BitlearnUrl}, le poste sera reapparie');
-  end;
+  ExtractTemporaryFile('configure-server.ps1');
+  if not Exec('powershell.exe',
+      '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + ExpandConstant('{tmp}\configure-server.ps1') + '"'
+        + ' -BitlearnUrl "{#BitlearnUrl}"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    RaiseException('Impossible de preparer le serveur Bitlearn. Installation interrompue.');
+  if Code <> 0 then
+    RaiseException('La configuration Bitlearn a echoue. Installation interrompue pour conserver le journal.');
 end;
 
 [UninstallDelete]

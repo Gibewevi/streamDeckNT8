@@ -50,7 +50,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
         };
 
         /// <summary>Retry interval for a key that is not there yet — the deck may be unpaired.</summary>
-        private static readonly TimeSpan KeyRetry = TimeSpan.FromMinutes(1);
+        private static readonly TimeSpan KeyRetry = TimeSpan.FromSeconds(5);
 
         private readonly object _sync = new object();
         private readonly string _directory;
@@ -60,6 +60,7 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
         private string _sig = string.Empty;
         private DateTime _lastKeyLook = DateTime.MinValue;
         private bool _failureReported;
+        private string _stateKeyId = string.Empty;
 
         public JournalSeal(string directory)
         {
@@ -198,14 +199,19 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
         /// </summary>
         private void EnsureKey()
         {
-            if (_key != null) return;
             if (DateTime.UtcNow - _lastKeyLook < KeyRetry) return;
             _lastKeyLook = DateTime.UtcNow;
 
             try
             {
                 var path = KeyPath();
-                if (!File.Exists(path)) return;
+                if (!File.Exists(path))
+                {
+                    _key = null;
+                    _seq = 0;
+                    _sig = string.Empty;
+                    return;
+                }
 
                 var hex = File.ReadAllText(path).Trim();
                 if (hex.Length != 64) return;
@@ -215,7 +221,31 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
                 {
                     bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
                 }
+                if (_key != null)
+                {
+                    bool identical = true;
+                    for (var i = 0; i < bytes.Length; i++) identical &= bytes[i] == _key[i];
+                    if (identical) return;
+
+                    // A new pairing can rotate the key while NinjaTrader remains open. Never
+                    // keep signing forever with the previous device's key, and never remove fills.
+                    var archive = Path.Combine(_directory, "key-archives",
+                        DateTime.UtcNow.Ticks.ToString(CultureInfo.InvariantCulture) + "-exec-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(archive);
+                    File.WriteAllText(Path.Combine(archive, "journal.key"), ToHex(_key));
+                    if (File.Exists(StatePath())) File.Copy(StatePath(), Path.Combine(archive, "seal-state-exec.json"));
+                    _seq = 0;
+                    _sig = string.Empty;
+                }
+                else if (_stateKeyId.Length > 0 && _stateKeyId != KeyId(bytes))
+                {
+                    // The host can rotate a device key while this process is stopped. A state
+                    // written under another key cannot be the predecessor of the new chain.
+                    _seq = 0;
+                    _sig = string.Empty;
+                }
                 _key = bytes;
+                SaveState();
                 SdLogger.Info("Journal sealing key loaded — fills will be signed");
             }
             catch (Exception ex)
@@ -244,6 +274,8 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
 
                 object sig;
                 if (parsed.TryGetValue("sig", out sig) && sig is string) _sig = (string)sig;
+                object keyId;
+                if (parsed.TryGetValue("keyId", out keyId) && keyId is string) _stateKeyId = (string)keyId;
             }
             catch (Exception ex)
             {
@@ -258,13 +290,19 @@ namespace NinjaTrader.NinjaScript.AddOns.StreamDeck.Utilities
             try
             {
                 Directory.CreateDirectory(_directory);
-                var state = new Dictionary<string, object> { { "seq", _seq }, { "sig", _sig } };
+                _stateKeyId = _key == null ? string.Empty : KeyId(_key);
+                var state = new Dictionary<string, object> { { "seq", _seq }, { "sig", _sig }, { "keyId", _stateKeyId } };
                 File.WriteAllText(StatePath(), SimpleJson.Serialize(state), Encoding.UTF8);
             }
             catch
             {
                 // Not blocking: at worst one chain break on the next start.
             }
+        }
+
+        private static string KeyId(byte[] key)
+        {
+            using (var sha = SHA256.Create()) return ToHex(sha.ComputeHash(key));
         }
     }
 }

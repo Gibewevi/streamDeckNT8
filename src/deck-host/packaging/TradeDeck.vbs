@@ -15,6 +15,8 @@ Const SONDE = "http://127.0.0.1:8220"
 ' retomber sur la production — le trader y arriverait sur un 404 sans rien qui le relie à
 ' l'installateur qu'il a lancé.
 Const REPLI = "https://bitlearn.fr"
+' Fixed by packaging: development overrides cannot redirect an installed release.
+Const PAQUET = ""
 
 Set sh = CreateObject("WScript.Shell")
 
@@ -45,6 +47,10 @@ sh.Run ServeurBitlearn() & "/tradedeck/configuration", 1, False
 ' vers le serveur local, et le raccourci ouvrait une page absente en production.
 Function ServeurBitlearn()
   ServeurBitlearn = REPLI
+  If Len(PAQUET) > 0 Then
+    ServeurBitlearn = PAQUET
+    Exit Function
+  End If
   On Error Resume Next
 
   chemin = sh.ExpandEnvironmentStrings("%APPDATA%") & "\StreamDeckTrader\bitlearn.json"

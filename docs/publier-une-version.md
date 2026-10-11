@@ -179,3 +179,54 @@ Le trader doit relancer TradeDeck. Les réglages sont conservés : le layout vit
 l'état de la macro de sécurité dans `%APPDATA%\StreamDeckTrader\safety-macro.json`. L'installateur
 arrête lui-même l'hôte et le bridge (`PrepareToInstall`), et le verrou de sécurité survit à la
 mise à jour — c'est vérifié, redémarrer n'est pas un moyen de le lever.
+
+## Correctif 0.29.1 — passage en production
+
+Chaque paquet embarque sa cible dans `dist/release-target.js` et dans le lanceur : le paquet
+production utilise exclusivement `https://bitlearn.fr`, même si un ancien réglage dev ou une
+variable d'environnement subsiste. Le paquet `-dev` demeure explicitement séparé. Les requêtes
+API refusent les redirections ; les nouveaux jetons enregistrent leur origine. Une mise à jour
+production conserve les anciens jetons production. Un jeton révoqué est retiré pour permettre
+un nouvel appairage au prochain démarrage ; une habilitation expirée ne supprime pas l'appairage.
+
+`packaging/configure-server.ps1`, partagé par les deux installateurs, archive les identités
+et les clés lors d'un changement d'environnement. Il conserve les journaux en attente, les
+curseurs d'envoi, la disposition et les verrous de sécurité. La nouvelle clé remplace réellement
+l'ancienne après réappairage ; l'add-on la relit même si NinjaTrader demeure ouvert. Les anciennes
+lignes ne sont pas réécrites : leur sceau peut être invérifiable sur le nouvel environnement,
+mais les données ne sont pas supprimées. La forme canonique des signatures ne change pas.
+
+Le builder exige Node **24 LTS Windows x64**. Si le PATH de la machine vise une autre version :
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-installer.ps1 -NodePath 'C:\chemin\node.exe'
+```
+
+Le numéro doit correspondre dans les quatre fichiers ; une version différente passée par
+`-Version` et un hôte compilé périmé sont refusés. La signature et le fichier `.sha256` portent
+sur le nom exact attendu, jamais sur un autre installateur présent dans `build`.
+
+Vérifications sans installation active :
+
+```powershell
+npm test
+npm run emit:check
+dotnet build tests/journal-seal/JournalSealHarness.csproj -c Release
+& tests/journal-seal/bin/Release/net48/JournalSealHarness.exe
+```
+
+Ces tests utilisent uniquement des profils temporaires et des API simulées. Le harness C#
+exécute le vrai `JournalSeal`, sans charger NinjaTrader et sans soumettre d'ordre. Ne jamais
+exécuter l'installateur sur le profil de trading actif pour un essai, même avec `/DIR` vers un
+dossier temporaire : ses hooks modifient la tâche et les sources NinjaScript du profil.
+
+Les deux listeners de trading refusent toute poignée de main navigateur portant `Origin`
+(403), y compris depuis bitlearn.fr : seuls les clients natifs sans Origin appartiennent à ce
+transport localhost. Cela ferme le chemin par lequel une page extérieure pouvait émettre des
+commandes locales. L'éditeur Bitlearn continue de passer par la synchronisation du site.
+
+`node scripts/bridge-smoke.mjs` lance le vrai bridge uniquement sur **9318/9319**, avec profils,
+journaux et états temporaires, et mode comptes réels désactivé. Il vérifie le refus des origines,
+les connexions natives, un état NT8 simulé, les pings et l'absence de commande d'ordre. Il arrête
+uniquement le processus qu'il vient de créer. `node scripts/validate-payload.mjs <origine>`
+vérifie le paquet assemblé, ses sources, la cible, Node et les modules natifs sans ouvrir de boîtier.

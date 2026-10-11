@@ -20,9 +20,12 @@ import { AddressInfo } from 'net';
 import { DeckStateReport } from './messages.js';
 import { DEFAULT_DATA_DIR, Layout, LayoutStore, validateLayout } from './layout.js';
 import * as log from './logger.js';
+import { RELEASE_TARGET } from './release-target.js';
+import { normalizeServerUrl, PRODUCTION_URL, resolveServerTarget } from './server-target.js';
 
 /**
- * Serveur Bitlearn visé, par ordre de priorité : `--bitlearn <url>`, puis
+ * A packaged release always uses its embedded origin. Source development only uses, in order,
+ * `--bitlearn <url>`, puis
  * `TRADEDECK_BITLEARN_URL`, puis `bitlearn.json` à côté de l'état, puis la production.
  *
  * L'argument existe parce que la variable d'environnement se perd trop facilement — une autre
@@ -50,17 +53,8 @@ function resolveBaseUrl(): string {
   const argv = process.argv.slice(2);
   const index = argv.indexOf('--bitlearn');
   const fromArg = index >= 0 ? argv[index + 1] : undefined;
-  const raw = fromArg || process.env.TRADEDECK_BITLEARN_URL || readConfiguredUrl();
-  if (!raw) return 'https://bitlearn.fr';
-
-  try {
-    // Normalisée pour que `http://localhost:3000/` et `http://localhost:3000` construisent la
-    // même URL : un double slash au milieu d'un chemin donne un 404 difficile à relier à sa cause.
-    return new URL(raw).origin;
-  } catch {
-    log.eventWarn('Bitlearn', 'Adresse de serveur illisible — retour à la production', { valeur: raw });
-    return 'https://bitlearn.fr';
-  }
+  return resolveServerTarget({ packagedTarget: RELEASE_TARGET, argument: fromArg,
+    environment: process.env.TRADEDECK_BITLEARN_URL, configured: readConfiguredUrl() });
 }
 
 const BASE_URL = resolveBaseUrl();
@@ -129,6 +123,7 @@ div{max-width:26rem;padding:2rem}h1{font-size:1.5rem;margin:0 0 .75rem}p{color:#
 
 interface StoredDevice {
   token: string;
+  serverOrigin?: string;
   deviceId?: number;
   pairedAt?: string;
 }
@@ -237,6 +232,15 @@ export class BitlearnClient {
 
     try {
       const stored = JSON.parse(readFileSync(chemin, 'utf8')) as StoredDevice;
+      // Old production tokens remain valid. A token from another environment must instead
+      // trigger pairing, never a stream of 401 responses with no way to recover.
+      const origin = stored.serverOrigin
+        ? normalizeServerUrl(stored.serverOrigin)
+        : normalizeServerUrl(readConfiguredUrl()) || PRODUCTION_URL;
+      if (origin !== BASE_URL) {
+        log.eventWarn('Bitlearn', 'Jeton d’un autre environnement — nouvel appairage nécessaire');
+        return null;
+      }
       return typeof stored?.token === 'string' && stored.token ? stored.token : null;
     } catch (err) {
       // Un fichier illisible ne doit pas empêcher l'hôte de démarrer : le poste se comporte
@@ -248,8 +252,17 @@ export class BitlearnClient {
 
   #saveToken(device: StoredDevice): void {
     mkdirSync(dirname(TOKEN_PATH), { recursive: true });
-    writeFileSync(TOKEN_PATH, JSON.stringify(device, null, 2), 'utf8');
+    writeFileSync(TOKEN_PATH, JSON.stringify({ ...device, serverOrigin: BASE_URL }, null, 2), 'utf8');
     this.#token = device.token;
+  }
+
+  #forgetRevokedToken(): void {
+    this.#token = null;
+    for (const path of [TOKEN_PATH, TOKEN_PATH_ITINERANT]) {
+      try { if (existsSync(path)) unlinkSync(path); } catch {
+        log.eventWarn('Bitlearn', 'Jeton révoqué impossible à retirer du disque — réappairage manuel nécessaire');
+      }
+    }
   }
 
   /**
@@ -423,6 +436,7 @@ export class BitlearnClient {
       }, true);
 
       if (response.status === 401 || response.status === 403) {
+        if (response.status === 401) this.#forgetRevokedToken();
         this.#warnOnce('unauthorized', 'Poste non autorisé — journal non envoyé');
         return false;
       }
@@ -471,6 +485,7 @@ export class BitlearnClient {
       );
 
       if (response.status === 401 || response.status === 403) {
+        if (response.status === 401) this.#forgetRevokedToken();
         // Le seul cas où l'on sait avec certitude que la synchronisation est finie : appareil
         // révoqué ou habilitation retirée. On cesse d'interroger, mais le deck continue.
         this.#stopPolling();
@@ -554,6 +569,7 @@ export class BitlearnClient {
         const response = await this.#request(url, { method: 'GET' }, true, WATCH_TIMEOUT_MS);
 
         if (response.status === 401 || response.status === 403) {
+          if (response.status === 401) this.#forgetRevokedToken();
           this.#warnOnce('unauthorized', 'Poste non autorisé par Bitlearn — synchronisation arrêtée, le deck continue de fonctionner');
           this.stop();
           return;
@@ -614,7 +630,8 @@ export class BitlearnClient {
     // cycle de synchronisation ne repart plus. L'attente longue en demande un plus large que les
     // autres appels, d'où le paramètre.
     const abort = AbortSignal.timeout(timeoutMs);
-    return fetch(`${BASE_URL}${path}`, { ...init, headers, signal: abort });
+    // API endpoints are canonical. Following a redirect would let a release leave its target.
+    return fetch(`${BASE_URL}${path}`, { ...init, headers, signal: abort, redirect: 'error' });
   }
 
   /**

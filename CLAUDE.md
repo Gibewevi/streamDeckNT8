@@ -82,7 +82,7 @@ cd src/streamdeck-ninjatrader && npm run build     # tsc → dist/
 cd src/streamdeck-ninjatrader && npx tsc --noEmit   # vérification de types seule
 ```
 
-**Il n'existe aucun test automatisé.** `docs/test-plan.md` est un plan de test **manuel**. Pour
+**Les tests automatisés du paquet et du scellement** sont décrits dans `docs/publier-une-version.md` (0.29.1). `docs/test-plan.md` reste un plan de test **manuel**. Pour
 valider un changement, il faut le faire tourner (voir ci-dessous), pas seulement le compiler.
 
 ### Faire tourner le bridge sans perturber l'installation active

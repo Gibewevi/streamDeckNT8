@@ -16,8 +16,9 @@ param(
   # se régler séparément reviendrait à pouvoir publier un paquet de développement qui ouvre
   # la production.
   [string]$BitlearnUrl = 'https://bitlearn.fr',
-  # Chemin d'un certificat .pfx. Sans lui, l'installateur n'est PAS signé : voir l'avertissement
-  # en fin de script.
+  # Runtime Windows x64 Node 24 LTS (le moteur de la machine de build peut être différent).
+  [string]$NodePath,
+  # Certificat facultatif ; voir l'avertissement en fin de script.
   [string]$SignPfx,
   [string]$SignPassword,
   [switch]$SkipBuild
@@ -32,19 +33,30 @@ $ntPayload = Join-Path $build 'ninjatrader'
 
 function Etape($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
 
-if (-not $Version) {
-  $Version = (Get-Content (Join-Path $deckHost 'package.json') -Raw | ConvertFrom-Json).version
+$sourceVersion = (Get-Content (Join-Path $deckHost 'package.json') -Raw | ConvertFrom-Json).version
+if ($Version -and $Version -ne $sourceVersion) { throw 'Version demandee differente du moteur.' }
+$Version = $sourceVersion
+$node = if ($NodePath) { (Resolve-Path -LiteralPath $NodePath).Path } else { (Get-Command node -ErrorAction Stop).Source }
+$runtime = (& $node -p 'JSON.stringify({version:process.versions.node,arch:process.arch,platform:process.platform})') | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $runtime.version -notmatch '^24\.' -or $runtime.arch -ne 'x64' -or $runtime.platform -ne 'win32') {
+  throw 'Le paquet exige Node 24 LTS Windows x64. Utilisez -NodePath vers ce moteur.'
 }
+$originalPath = $env:PATH
+try {
+$env:PATH = (Split-Path -Parent $node) + [IO.Path]::PathSeparator + $env:PATH
 
 # Ramenée à une origine : `https://dev.bitlearn.fr/tradedeck/` et `https://dev.bitlearn.fr`
 # doivent produire le même paquet. Un chemin résiduel donnerait
 # `.../tradedeck/tradedeck/configuration`, soit un 404 dont la cause serait invisible côté poste.
 $PRODUCTION = 'https://bitlearn.fr'
 try { $uri = [uri]$BitlearnUrl } catch { throw "BitlearnUrl illisible : $BitlearnUrl" }
-if (-not $uri.IsAbsoluteUri -or $uri.Scheme -notin @('http', 'https')) {
+if (-not $uri.IsAbsoluteUri -or $uri.Scheme -notin @('http', 'https') -or $uri.UserInfo) {
   throw "BitlearnUrl doit être une adresse http(s) absolue : $BitlearnUrl"
 }
-$BitlearnUrl = '{0}://{1}' -f $uri.Scheme, $uri.Authority
+$BitlearnUrl = $uri.GetLeftPart([UriPartial]::Authority).TrimEnd('/')
+if ($BitlearnUrl -notin @('https://bitlearn.fr','https://dev.bitlearn.fr') -and -not ($uri.Scheme -eq 'http' -and $uri.Host -in @('localhost','127.0.0.1','[::1]','::1'))) {
+  throw 'Serveur interdit : production, dev ou HTTP local uniquement.'
+}
 
 # Un paquet qui ne vise pas la production porte sa cible dans son nom. Deux .exe de même
 # version pointant deux serveurs sont autrement indiscernables une fois téléchargés, et se
@@ -70,6 +82,10 @@ if (-not $SkipBuild) {
 foreach ($requis in @('dist\host.js', 'bridge\StreamDeckBridge.exe', 'ui\index.html')) {
   if (-not (Test-Path (Join-Path $deckHost $requis))) { throw "Manquant apres construction : $requis" }
 }
+$compiledHost = [IO.File]::ReadAllText((Join-Path $deckHost 'dist\host.js'))
+if ($compiledHost -notmatch ("const VERSION = '" + [regex]::Escape($Version) + "'")) {
+  throw 'Hote compile perime : reconstruire avant de preparer le paquet.'
+}
 
 # Le bridge doit être AUTONOME. Publié dépendant du framework, il exige un runtime .NET 8 que
 # Windows n'embarque pas : l'exe se termine aussitôt, et comme le superviseur le lance en
@@ -87,7 +103,12 @@ if (-not (Test-Path $marqueur)) {
 
 # --- 2. Charge utile ---------------------------------------------------------------
 Etape "Assemblage de la charge utile"
-if (Test-Path $payload) { Remove-Item $payload -Recurse -Force }
+foreach ($directory in @($payload, $ntPayload)) {
+  $absolute = [IO.Path]::GetFullPath($directory)
+  $allowed = [IO.Path]::GetFullPath($build).TrimEnd('\') + '\'
+  if (-not $absolute.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase)) { throw 'Charge utile hors du dossier build.' }
+}
+if (Test-Path -LiteralPath $payload) { Remove-Item -LiteralPath $payload -Recurse -Force }
 New-Item -ItemType Directory -Path $payload -Force | Out-Null
 
 foreach ($d in @('dist', 'ui', 'bridge')) {
@@ -105,6 +126,11 @@ $ancre = 'Const REPLI = "https://bitlearn.fr"'
 $lanceur = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'TradeDeck.vbs'), [System.Text.Encoding]::UTF8)
 if (-not $lanceur.Contains($ancre)) { throw "Repli introuvable dans TradeDeck.vbs : la substitution du serveur ne s'applique plus" }
 $lanceur = $lanceur.Replace($ancre, 'Const REPLI = "' + $BitlearnUrl + '"')
+if (-not $lanceur.Contains('Const PAQUET = ""')) { throw 'Ancre de serveur immuable manquante dans le lanceur.' }
+$lanceur = $lanceur.Replace('Const PAQUET = ""', 'Const PAQUET = "' + $BitlearnUrl + '"')
+$targetJson = ConvertTo-Json -InputObject $BitlearnUrl -Compress
+[IO.File]::WriteAllText((Join-Path $payload 'dist\release-target.js'), ('export const RELEASE_TARGET = ' + $targetJson + ';' + "
+"), (New-Object Text.UTF8Encoding($false)))
 [System.IO.File]::WriteAllText((Join-Path $payload 'TradeDeck.vbs'), $lanceur, (New-Object System.Text.UTF8Encoding($false)))
 # Lanceur silencieux appelé par la tâche planifiée : sans lui, Node ouvre une fenêtre console.
 Copy-Item (Join-Path $PSScriptRoot 'run-host.vbs') $payload -Force
@@ -124,8 +150,6 @@ Remove-Item (Join-Path $payload 'package-lock.json') -Force -ErrorAction Silentl
 
 # node.exe est embarqué : on ne peut pas supposer Node installé chez un trader.
 Etape "Ajout du moteur Node"
-$node = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $node) { throw "node.exe introuvable dans le PATH" }
 Copy-Item $node (Join-Path $payload 'node.exe') -Force
 
 # --- 2 bis. Sources NinjaScript ------------------------------------------------------
@@ -136,7 +160,7 @@ Copy-Item $node (Join-Path $payload 'node.exe') -Force
 # `TdSwingEngine`, qui doit exister en UNE seule copie. Deux exemplaires lèvent un CS0101, et une
 # compilation NinjaScript est tout ou rien — l'échec emporterait les indicateurs du trader.
 Etape "Assemblage des sources NinjaScript"
-if (Test-Path $ntPayload) { Remove-Item $ntPayload -Recurse -Force }
+if (Test-Path -LiteralPath $ntPayload) { Remove-Item -LiteralPath $ntPayload -Recurse -Force }
 New-Item -ItemType Directory -Path "$ntPayload/AddOns/StreamDeck" -Force | Out-Null
 New-Item -ItemType Directory -Path "$ntPayload/Indicators" -Force | Out-Null
 
@@ -183,7 +207,9 @@ if ($suffixe) { $argsIscc += "/DFileSuffix=$suffixe" }
 & $iscc @argsIscc (Join-Path $PSScriptRoot 'TradeDeck.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC a echoue" }
 
-$exe = Get-ChildItem $build -Filter '*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$exePath = Join-Path $build "BitlearnTradeDeck-Setup-$Version$suffixe.exe"
+if (-not (Test-Path -LiteralPath $exePath)) { throw "Installateur attendu absent : $exePath" }
+$exe = Get-Item -LiteralPath $exePath
 $mo = [math]::Round($exe.Length / 1MB, 1)
 Write-Host "`nInstallateur : $($exe.FullName) ($mo Mo)" -ForegroundColor Green
 Write-Host "Serveur visé : $BitlearnUrl" -ForegroundColor Green
@@ -210,3 +236,6 @@ construit ensuite sur quelques centaines de telechargements ; un certificat EV l
 immediatement, pour environ le double.
 "@
 }
+
+(Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $exe.Name | Set-Content -LiteralPath ($exe.FullName + '.sha256') -Encoding ASCII
+} finally { $env:PATH = $originalPath }

@@ -94,8 +94,10 @@ public sealed class BridgeServer : BackgroundService
         }
         finally
         {
-            pluginListener.Stop();
-            addonListener.Stop();
+            // A failed listener start can already dispose its HttpListener. Preserve the original
+            // startup diagnosis instead of hiding it behind an ObjectDisposedException in cleanup.
+            if (pluginListener.IsListening) pluginListener.Stop();
+            if (addonListener.IsListening) addonListener.Stop();
         }
     }
 
@@ -129,6 +131,7 @@ public sealed class BridgeServer : BackgroundService
             try
             {
                 var context = await listener.GetContextAsync().WaitAsync(ct);
+                if (RejectBrowserConnection(context)) continue;
                 if (!context.Request.IsWebSocketRequest)
                 {
                     context.Response.StatusCode = 400;
@@ -160,6 +163,7 @@ public sealed class BridgeServer : BackgroundService
             try
             {
                 var context = await listener.GetContextAsync().WaitAsync(ct);
+                if (RejectBrowserConnection(context)) continue;
                 if (!context.Request.IsWebSocketRequest)
                 {
                     context.Response.StatusCode = 400;
@@ -190,6 +194,20 @@ public sealed class BridgeServer : BackgroundService
                 await Task.Delay(1000, ct);
             }
         }
+    }
+
+    /// <summary>
+    /// Only native localhost clients use the trading transport. A browser always supplies Origin
+    /// on its WebSocket handshake: accepting it would let an unrelated website send trading
+    /// commands or impersonate NinjaTrader. The website editor synchronizes through Bitlearn,
+    /// not through these listeners, so no browser origin belongs on either channel.
+    /// </summary>
+    private static bool RejectBrowserConnection(HttpListenerContext context)
+    {
+        if (context.Request.Headers["Origin"] == null) return false;
+        context.Response.StatusCode = 403;
+        context.Response.Close();
+        return true;
     }
 
     private async Task HandlePluginSession(WebSocket ws, CancellationToken ct)

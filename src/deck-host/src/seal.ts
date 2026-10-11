@@ -19,8 +19,8 @@
  * divergent d'un caractère, plus rien ne se scelle et tous les journaux tombent au palier non
  * vérifiable — silencieusement, puisque le poste croit signer correctement.
  */
-import { createHmac } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { createHmac, randomBytes } from 'crypto';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import * as log from './logger.js';
 
@@ -128,14 +128,26 @@ export class Sealer {
    */
   installerCle(cleHex: string): void {
     if (!cleHex || !/^[0-9a-f]{64}$/i.test(cleHex)) return;
-    // Une clé déjà en place ne se remplace pas. Le battement peut en proposer une au rattrapage, et
-    // l'écraser casserait la chaîne en cours — le serveur verrait toutes les lignes suivantes
-    // échouer leur signature, ce qui ferait perdre son sceau à la séance du jour pour rien.
-    if (this.#cle) return;
+    const nouvelle = Buffer.from(cleHex, 'hex');
+    if (this.#cle?.equals(nouvelle)) return;
     try {
       mkdirSync(this.#dossier, { recursive: true });
-      writeFileSync(this.#cheminCle(), cleHex, 'utf8');
-      this.#cle = Buffer.from(cleHex, 'hex');
+      if (this.#cle) {
+        // Re-pairing returns a different device key. Keep recovery material without deleting
+        // any spool, acknowledged cursor or trading safety state.
+        const archive = join(this.#dossier, 'key-archives', `${Date.now()}-${randomBytes(5).toString('hex')}`);
+        mkdirSync(archive, { recursive: true });
+        for (const nom of ['journal.key', 'seal-state.json', 'seal-state-exec.json']) {
+          const chemin = join(this.#dossier, nom);
+          if (existsSync(chemin)) copyFileSync(chemin, join(archive, nom));
+        }
+      }
+      const temporaire = `${this.#cheminCle()}.${randomBytes(5).toString('hex')}.tmp`;
+      writeFileSync(temporaire, cleHex.toLowerCase(), 'utf8');
+      renameSync(temporaire, this.#cheminCle());
+      this.#cle = nouvelle;
+      this.#etats.clear();
+      this.#sauver();
       log.event('Journal', 'Clé de scellement installée — le journal part désormais scellé');
     } catch (err) {
       log.fail('Journal', err, 'Clé de scellement non enregistrée — le journal partira non scellé');
